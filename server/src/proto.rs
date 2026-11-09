@@ -9,6 +9,8 @@ pub const S_PONG: u8 = 4;
 // Client -> server
 pub const C_PING: u8 = 1;
 pub const C_ACK: u8 = 2;
+/// Client decoder lost sync and needs an IDR frame.
+pub const C_KEYFRAME: u8 = 3;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
 pub const C_WHEEL: u8 = 12;
@@ -17,10 +19,17 @@ pub const C_KEY: u8 = 13;
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
 
+/// FRAME flags.
+pub const FLAG_VIDEO: u8 = 1;
+pub const FLAG_KEY: u8 = 2;
+
 /// FRAME header: type u8, flags u8, n_rects u16, seq u32,
-/// capture_oldest_us u64, capture_newest_us u64, send_us u64. Followed by rects,
-/// each: x u16, y u16, w u16, h u16, enc u8, pad u8, pad u16, len u32, data.
-pub const FRAME_HEADER_LEN: usize = 32;
+/// capture_oldest_us u64, capture_newest_us u64, send_us u64,
+/// pull_us u64 (frame build started), encode_us u32 (video load+encode), pad u32. Followed by:
+/// - rects, each: x u16, y u16, w u16, h u16, enc u8, pad u8, pad u16, len u32, data
+/// - n_switches u16, then u16 each: tile index | 0x8000 when the tile moves to video
+/// - if FLAG_VIDEO: len u32 + H.264 Annex B access unit
+pub const FRAME_HEADER_LEN: usize = 48;
 
 pub fn now_us() -> u64 {
     std::time::SystemTime::now()

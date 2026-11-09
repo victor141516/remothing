@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 FROM base AS build-server
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl build-essential pkg-config clang libxcb1-dev \
+      libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH
@@ -27,7 +28,10 @@ RUN npm run build
 FROM base AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11-utils x11-xkb-utils xkb-data openbox xterm fonts-dejavu-core \
+      libavcodec60 libavformat60 libswscale7 \
     && rm -rf /var/lib/apt/lists/*
+# NVENC needs the driver's video libraries injected by `--gpus`.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 COPY --from=build-server /usr/local/bin/remothing-server /usr/local/bin/rt-testapp /usr/local/bin/
 COPY --from=build-client /client/dist /opt/remothing/web
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

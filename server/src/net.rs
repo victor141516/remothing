@@ -1,27 +1,33 @@
 //! HTTP (static client) + WebSocket session transport.
+//!
+//! Per client: a dedicated OS thread builds and encodes frames (blocking work,
+//! woken by capture / ACKs via unpark), an async writer drains its output, and
+//! an async reader handles pings, ACKs and input.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::{HeaderName, HeaderValue};
 use axum::response::Response;
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, Notify};
-use axum::http::{HeaderName, HeaderValue};
+use tokio::sync::mpsc;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::input::Injector;
 use crate::proto;
-use crate::shared::Shared;
+use crate::shared::{Pull, Shared};
+use crate::video::VideoEncoder;
 
 /// Frames sent but not yet acknowledged by the client. Caps queueing in
 /// socket buffers so latency stays bounded when the link is slower than the
@@ -73,71 +79,123 @@ async fn input_handler(ws: WebSocketUpgrade, State(app): State<Arc<App>>) -> Res
     })
 }
 
+struct ClientLink {
+    id: u64,
+    inflight: AtomicI32,
+    key_request: AtomicBool,
+    stop: AtomicBool,
+}
+
 async fn session(socket: WebSocket, app: Arc<App>) {
-    let (mut tx, rx) = socket.split();
+    let (mut tx, mut rx) = socket.split();
     let g = app.shared.geometry();
     if tx.send(Message::Binary(proto::hello(g.width, g.height, g.tile).into())).await.is_err() {
         return;
     }
-    let notify = Arc::new(Notify::new());
-    let inflight = Arc::new(AtomicI32::new(0));
-    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let id = app.shared.add_client(notify.clone());
-    let reader = tokio::spawn(read_loop(rx, app.clone(), notify.clone(), inflight.clone(), reply_tx));
-    eprintln!("client {id} connected");
+    let link = Arc::new(ClientLink {
+        id: app.shared.new_client_id(),
+        inflight: AtomicI32::new(0),
+        key_request: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+    });
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Bytes>();
+    let producer = {
+        let (shared, link, out_tx) = (app.shared.clone(), link.clone(), out_tx.clone());
+        std::thread::Builder::new()
+            .name(format!("client-{}", link.id))
+            .spawn(move || produce(&shared, &link, &out_tx))
+            .expect("spawn client thread")
+    };
+    let waker = producer.thread().clone();
+    app.shared.add_client(link.id, waker.clone());
+    eprintln!("client {} connected", link.id);
 
-    'outer: loop {
-        tokio::select! {
-            biased;
-            reply = reply_rx.recv() => match reply {
-                Some(m) => if tx.send(Message::Binary(m.into())).await.is_err() { break 'outer },
-                None => break 'outer,
-            },
-            _ = notify.notified() => {}
+    let reader = {
+        let (app, link, waker) = (app.clone(), link.clone(), waker.clone());
+        async move {
+            while let Some(Ok(msg)) = rx.next().await {
+                let Message::Binary(b) = msg else { continue };
+                match (b.first().copied(), b.len()) {
+                    (Some(proto::C_PING), 16..) => {
+                        let ts = f64::from_le_bytes(b[8..16].try_into().unwrap());
+                        let _ = out_tx.send(proto::pong(ts).into());
+                    }
+                    (Some(proto::C_ACK), 8..) => {
+                        // Signed: a client acking unknown frames only hurts its own pacing.
+                        link.inflight.fetch_sub(1, Ordering::AcqRel);
+                        waker.unpark();
+                    }
+                    (Some(proto::C_KEYFRAME), _) => {
+                        link.key_request.store(true, Ordering::Release);
+                        waker.unpark();
+                    }
+                    _ => {
+                        if let Err(e) = handle_input(&b, &app.injector) {
+                            eprintln!("input error: {e:#}");
+                        }
+                    }
+                }
+            }
         }
-        if let Some(c) = app.shared.take_cursor(id) {
-            if tx.send(Message::Binary(Bytes::copy_from_slice(&c))).await.is_err() {
+    };
+    let writer = async {
+        while let Some(m) = out_rx.recv().await {
+            if tx.send(Message::Binary(m)).await.is_err() {
                 break;
             }
         }
-        if inflight.load(Ordering::Acquire) < MAX_INFLIGHT {
-            if let Some(frame) = app.shared.take_frame(id) {
-                inflight.fetch_add(1, Ordering::AcqRel);
-                if tx.send(Message::Binary(frame.into())).await.is_err() {
-                    break;
+    };
+    tokio::select! {
+        _ = reader => {}
+        _ = writer => {}
+    }
+    link.stop.store(true, Ordering::Release);
+    waker.unpark();
+    app.shared.remove_client(link.id);
+    eprintln!("client {} disconnected", link.id);
+}
+
+/// Client thread: pulls frames whenever the window allows, parks otherwise.
+fn produce(shared: &Shared, link: &ClientLink, out: &mpsc::UnboundedSender<Bytes>) {
+    let g = shared.geometry();
+    let mut enc = match VideoEncoder::new(g.width, g.height) {
+        Ok(e) => Some(e),
+        Err(e) => {
+            eprintln!("video layer disabled: {e:#}");
+            None
+        }
+    };
+    let mut need_key = true;
+    while !link.stop.load(Ordering::Acquire) {
+        if let Some(c) = shared.take_cursor(link.id) {
+            if out.send(Bytes::copy_from_slice(&c)).is_err() {
+                return;
+            }
+        }
+        let mut wake_at_us = None;
+        if link.inflight.load(Ordering::Acquire) < MAX_INFLIGHT {
+            need_key |= link.key_request.swap(false, Ordering::AcqRel);
+            match shared.pull(link.id, enc.as_mut(), need_key) {
+                Ok(Pull::Frame { msg, key }) => {
+                    need_key &= !key;
+                    link.inflight.fetch_add(1, Ordering::AcqRel);
+                    if out.send(msg.into()).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Ok(Pull::Idle { wake_at_us: w }) => wake_at_us = w,
+                Err(e) => {
+                    eprintln!("video encode failed, lossless only from now: {e:#}");
+                    enc = None;
+                    shared.drop_video(link.id);
+                    continue;
                 }
             }
         }
-    }
-    reader.abort();
-    app.shared.remove_client(id);
-    eprintln!("client {id} disconnected");
-}
-
-async fn read_loop(
-    mut rx: futures_util::stream::SplitStream<WebSocket>,
-    app: Arc<App>,
-    notify: Arc<Notify>,
-    inflight: Arc<AtomicI32>,
-    reply_tx: mpsc::UnboundedSender<Vec<u8>>,
-) {
-    while let Some(Ok(msg)) = rx.next().await {
-        let Message::Binary(b) = msg else { continue };
-        match (b.first().copied(), b.len()) {
-            (Some(proto::C_PING), 16..) => {
-                let ts = f64::from_le_bytes(b[8..16].try_into().unwrap());
-                let _ = reply_tx.send(proto::pong(ts));
-            }
-            (Some(proto::C_ACK), 8..) => {
-                // Signed: a client acking unknown frames only hurts its own pacing.
-                inflight.fetch_sub(1, Ordering::AcqRel);
-                notify.notify_one();
-            }
-            _ => {
-                if let Err(e) = handle_input(&b, &app.injector) {
-                    eprintln!("input error: {e:#}");
-                }
-            }
+        match wake_at_us {
+            Some(t) => std::thread::park_timeout(Duration::from_micros(t.saturating_sub(proto::now_us()))),
+            None => std::thread::park(),
         }
     }
 }

@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
+ffmpeg-next = { version = "7", default-features = false, features = ["codec", "format", "software-scaling"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 libc = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

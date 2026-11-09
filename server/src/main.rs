@@ -1,8 +1,10 @@
 mod capture;
+mod cuda;
 mod input;
 mod net;
 mod proto;
 mod shared;
+mod video;
 mod xfb;
 
 use std::net::SocketAddr;

@@ -1,6 +1,7 @@
-// WebGL2 compositor (runs in the render worker): one screen-sized texture
-// holding the exact server framebuffer (BGRX bytes uploaded as RGBA and
-// swizzled in the shader).
+// WebGL2 compositor (runs in the stream worker). Two layers:
+//  - lossless: exact server framebuffer (BGRX bytes uploaded as RGBA, swizzled here)
+//  - video: last decoded H.264 frame of the whole screen
+// A per-tile mask picks the layer for each tile.
 
 const VS = `#version 300 es
 void main() {
@@ -11,18 +12,39 @@ void main() {
 const FS = `#version 300 es
 precision highp float;
 uniform highp sampler2D u_screen;
+uniform highp sampler2D u_video;
+uniform highp sampler2D u_mask;
 uniform int u_height;
+uniform int u_tile;
 out vec4 o;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   p.y = u_height - 1 - p.y;
-  o = vec4(texelFetch(u_screen, p, 0).bgr, 1.0);
+  if (texelFetch(u_mask, p / u_tile, 0).r > 0.5) {
+    o = vec4(texelFetch(u_video, p, 0).rgb, 1.0);
+  } else {
+    o = vec4(texelFetch(u_screen, p, 0).bgr, 1.0);
+  }
 }`;
+
+function texture(gl: WebGL2RenderingContext, unit: number): WebGLTexture {
+  const t = gl.createTexture()!;
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
 
 export class Renderer {
   readonly gl: WebGL2RenderingContext;
-  private tex: WebGLTexture | null = null;
-  private uHeight: WebGLUniformLocation;
+  private readonly prog: WebGLProgram;
+  private textures: WebGLTexture[] = [];
+  private mask = new Uint8Array(0);
+  private tilesX = 0;
+  private tilesY = 0;
   width = 0;
   height = 0;
 
@@ -49,31 +71,60 @@ export class Renderer {
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? 'link');
     gl.useProgram(prog);
+    this.prog = prog;
     gl.uniform1i(gl.getUniformLocation(prog, 'u_screen'), 0);
-    this.uHeight = gl.getUniformLocation(prog, 'u_height')!;
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_video'), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, 'u_mask'), 2);
     gl.bindVertexArray(gl.createVertexArray());
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
 
-  resize(width: number, height: number): void {
+  resize(width: number, height: number, tile: number): void {
     const gl = this.gl;
     this.width = width;
     this.height = height;
     this.canvas.width = width;
     this.canvas.height = height;
-    if (this.tex) gl.deleteTexture(this.tex);
-    this.tex = gl.createTexture();
+    for (const t of this.textures) gl.deleteTexture(t);
+    this.tilesX = Math.ceil(width / tile);
+    this.tilesY = Math.ceil(height / tile);
+    this.mask = new Uint8Array(this.tilesX * this.tilesY);
+    const [screen, video, mask] = [texture(gl, 0), texture(gl, 1), texture(gl, 2)];
+    this.textures = [screen, video, mask];
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, this.tilesX, this.tilesY);
+    this.uploadMask();
     gl.viewport(0, 0, width, height);
-    gl.uniform1i(this.uHeight, height);
+    gl.uniform1i(gl.getUniformLocation(this.prog, 'u_height'), height);
+    gl.uniform1i(gl.getUniformLocation(this.prog, 'u_tile'), tile);
   }
 
   upload(x: number, y: number, w: number, h: number, bgrx: Uint8Array): void {
-    this.gl.texSubImage2D(this.gl.TEXTURE_2D, 0, x, y, w, h, this.gl.RGBA, this.gl.UNSIGNED_BYTE, bgrx);
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bgrx);
+  }
+
+  uploadVideo(frame: VideoFrame): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+  }
+
+  /** Tile index with bit 15 set = show from video. */
+  switchTile(entry: number): void {
+    this.mask[entry & 0x7fff] = entry & 0x8000 ? 255 : 0;
+  }
+
+  uploadMask(): void {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.tilesX, this.tilesY, gl.RED, gl.UNSIGNED_BYTE, this.mask);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
   }
 
   draw(): void {

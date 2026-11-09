@@ -1,9 +1,14 @@
-// Stream worker: owns the stream WebSocket, the WebGL renderer and frame
-// timing, so frame handling never waits on main-thread work.
+// Stream worker: owns the stream WebSocket, the H.264 decoder and the WebGL
+// renderer, so frame handling never waits on main-thread work.
+//
+// Frames are applied strictly in order and atomically: a frame carrying video
+// waits for its decoded picture, and later frames wait behind it, so lossless
+// rects, tile layer switches and the video picture always match.
 
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_PING, ENC_RAW, FRAME_HEADER_LEN, RECT_HEADER_LEN, S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
+  C_ACK, C_KEYFRAME, C_PING, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
+  S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { Stats } from './stats';
@@ -22,9 +27,26 @@ export type FromWorker =
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
+interface Frame {
+  buf: ArrayBuffer;
+  seq: number;
+  received: number;
+  oldest: number;
+  sent: number;
+  /** Offset of the switch list (rects precede it). */
+  switchesAt: number;
+  hasVideo: boolean;
+  picture: VideoFrame | null;
+  decoded: number;
+}
+
 let renderer: Renderer;
 let barcode: BarcodeReader | null = null;
 let ws: WebSocket;
+let decoder: VideoDecoder;
+let awaitingKey = true;
+let debugOutputs = 0;
+const queue: Frame[] = [];
 const stats = new Stats();
 
 // Clock sync: offset = server ms - client ms, from the lowest-RTT ping of a sliding window.
@@ -44,12 +66,82 @@ function ping(): void {
   send(m);
 }
 
+function createDecoder(): void {
+  decoder = new VideoDecoder({
+    output: (picture) => {
+      debugOutputs++;
+      const f = queue.find((q) => q.hasVideo && !q.picture && q.seq === picture.timestamp);
+      if (!f) {
+        picture.close();
+        return;
+      }
+      f.picture = picture;
+      f.decoded = now();
+      pump();
+    },
+    error: (e) => {
+      console.warn('decoder error, requesting keyframe', e);
+      resetDecoder();
+    },
+  });
+  decoder.configure({ codec: 'avc1.640033', optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+  awaitingKey = true;
+}
+
+function resetDecoder(): void {
+  if (decoder.state !== 'closed') decoder.close();
+  // Frames waiting for pictures that will never come are shown without video.
+  for (const f of queue) f.hasVideo = !!f.picture;
+  createDecoder();
+  send(new Uint8Array([C_KEYFRAME]));
+  pump();
+}
+
 function onFrame(buf: ArrayBuffer, received: number): void {
   const v = new DataView(buf);
+  const flags = v.getUint8(1);
   const n = v.getUint16(2, true);
-  const seq = v.getUint32(4, true);
-  const oldest = Number(v.getBigUint64(8, true)) / 1000;
-  const sent = Number(v.getBigUint64(24, true)) / 1000;
+  let off = FRAME_HEADER_LEN;
+  for (let i = 0; i < n; i++) off += RECT_HEADER_LEN + v.getUint32(off + 12, true);
+  const f: Frame = {
+    buf,
+    seq: v.getUint32(4, true),
+    received,
+    oldest: Number(v.getBigUint64(8, true)) / 1000,
+    sent: Number(v.getBigUint64(24, true)) / 1000,
+    switchesAt: off,
+    hasVideo: false,
+    picture: null,
+    decoded: 0,
+  };
+  if (flags & FLAG_VIDEO) {
+    const sw = v.getUint16(off, true);
+    const videoAt = off + 2 + sw * 2;
+    const len = v.getUint32(videoAt, true);
+    const key = (flags & FLAG_KEY) !== 0;
+    if (key) awaitingKey = false;
+    if (!awaitingKey) {
+      f.hasVideo = true;
+      decoder.decode(new EncodedVideoChunk({
+        type: key ? 'key' : 'delta',
+        timestamp: f.seq,
+        data: new Uint8Array(buf, videoAt + 4, len),
+      }));
+    } else {
+      send(new Uint8Array([C_KEYFRAME]));
+    }
+  }
+  queue.push(f);
+  pump();
+}
+
+function pump(): void {
+  while (queue.length && (!queue[0].hasVideo || queue[0].picture)) apply(queue.shift()!);
+}
+
+function apply(f: Frame): void {
+  const v = new DataView(f.buf);
+  const n = v.getUint16(2, true);
   let off = FRAME_HEADER_LEN;
   for (let i = 0; i < n; i++) {
     const x = v.getUint16(off, true);
@@ -59,8 +151,16 @@ function onFrame(buf: ArrayBuffer, received: number): void {
     const enc = v.getUint8(off + 8);
     const len = v.getUint32(off + 12, true);
     off += RECT_HEADER_LEN;
-    if (enc === ENC_RAW) renderer.upload(x, y, w, h, new Uint8Array(buf, off, len));
+    if (enc === ENC_RAW) renderer.upload(x, y, w, h, new Uint8Array(f.buf, off, len));
     off += len;
+  }
+  const switches = v.getUint16(f.switchesAt, true);
+  for (let i = 0; i < switches; i++) renderer.switchTile(v.getUint16(f.switchesAt + 2 + i * 2, true));
+  if (switches) renderer.uploadMask();
+  if (f.picture) {
+    renderer.uploadVideo(f.picture);
+    f.picture.close();
+    stats.decode.push(f.decoded - f.received);
   }
   renderer.draw();
   // Probe mode reads back pixels, which waits for the GPU to execute the draw:
@@ -70,7 +170,7 @@ function onFrame(buf: ArrayBuffer, received: number): void {
 
   const ack = new Uint8Array(8);
   ack[0] = C_ACK;
-  new DataView(ack.buffer).setUint32(4, seq, true);
+  new DataView(ack.buffer).setUint32(4, f.seq, true);
   send(ack);
 
   if (code) {
@@ -84,11 +184,14 @@ function onFrame(buf: ArrayBuffer, received: number): void {
     }
   }
   stats.frames++;
-  stats.bytes += buf.byteLength;
-  stats.server.push(sent - oldest);
-  stats.net.push(received + offset - sent);
-  stats.client.push(drawn - received);
-  stats.total.push(drawn + offset - oldest);
+  if (f.picture) stats.videoFrames++;
+  stats.bytes += f.buf.byteLength;
+  stats.server.push(f.sent - f.oldest);
+  stats.serverWait.push(Number(v.getBigUint64(32, true)) / 1000 - f.oldest);
+  if (f.picture) stats.encode.push(v.getUint32(40, true) / 1000);
+  stats.net.push(f.received + offset - f.sent);
+  stats.client.push(drawn - f.received);
+  stats.total.push(drawn + offset - f.oldest);
 }
 
 function connect(url: string): void {
@@ -112,7 +215,9 @@ function connect(url: string): void {
       case S_HELLO: {
         const width = v.getUint32(4, true);
         const height = v.getUint32(8, true);
-        renderer.resize(width, height);
+        renderer.resize(width, height, v.getUint32(12, true));
+        queue.length = 0;
+        resetDecoder();
         post({ type: 'hello', width, height });
         break;
       }
@@ -135,9 +240,13 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'init':
       renderer = new Renderer(m.canvas);
       if (m.probe) barcode = new BarcodeReader(renderer);
+      createDecoder();
       connect(m.url);
       setInterval(ping, 1000);
-      setInterval(() => post({ type: 'stats', text: stats.text() }), 500);
+      setInterval(() => {
+        const pipeline = `queue ${queue.length} [${queue.map((q) => `${q.seq}${q.hasVideo ? 'v' : ''}${q.picture ? 'p' : ''}`).join(',')}]  decoder ${decoder.state} q${decoder.decodeQueueSize} out ${debugOutputs}${awaitingKey ? ' awaiting key' : ''}`;
+        post({ type: 'stats', text: `${stats.text()}\n${pipeline}` });
+      }, 500);
       break;
     case 'reset':
       stats.reset();
