@@ -1,0 +1,12 @@
+{
+  "name": "remothing-client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/main.ts src/worker.ts --bundle --format=esm --target=chrome120 --sourcemap --outdir=dist && node -e \"require('fs').copyFileSync('index.html','dist/index.html')\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

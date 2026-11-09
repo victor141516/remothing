@@ -1,0 +1,107 @@
+// Main thread: input capture on its own WebSocket (sent the moment the event
+// fires), cursor, stats overlay. Frames are handled in worker.ts.
+
+import { Input } from './input';
+import { InputProber } from './probe';
+import { Series, p50p99 } from './stats';
+import type { FromWorker, ToWorker } from './worker';
+
+declare global {
+  interface Window {
+    __bench?: { done: boolean; result?: Record<string, unknown> };
+  }
+}
+
+const params = new URLSearchParams(location.search);
+const benchSeconds = Number(params.get('bench') ?? 0);
+const probeEnabled = benchSeconds > 0 || params.has('probe');
+const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+
+const canvas = document.getElementById('screen') as HTMLCanvasElement;
+const statsEl = document.getElementById('stats') as HTMLDivElement;
+
+let inputWs: WebSocket;
+function connectInput(): void {
+  inputWs = new WebSocket(`${wsBase}/input`);
+  inputWs.onclose = () => setTimeout(connectInput, 1000);
+}
+connectInput();
+const input = new Input(canvas, (m) => {
+  if (inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
+});
+
+const inputRtt = new Series();
+const prober = new InputProber((x, y) => input.moveTo(x, y), (rtt) => inputRtt.push(rtt));
+
+const worker = new Worker('worker.js', { type: 'module' });
+const toWorker = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+let reportWaiter: ((r: Record<string, unknown>) => void) | null = null;
+
+function layout(width: number, height: number): void {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = `${width / dpr}px`;
+  canvas.style.height = `${height / dpr}px`;
+}
+
+function setCursor(buf: ArrayBuffer): void {
+  const v = new DataView(buf);
+  const w = v.getUint16(2, true);
+  const h = v.getUint16(4, true);
+  if (w === 0 || h === 0) {
+    canvas.style.cursor = 'none';
+    return;
+  }
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(buf, 12, w * h * 4), w, h), 0, 0);
+  canvas.style.cursor = `url(${c.toDataURL()}) ${v.getUint16(6, true)} ${v.getUint16(8, true)}, default`;
+}
+
+worker.onmessage = (ev: MessageEvent<FromWorker>) => {
+  const m = ev.data;
+  switch (m.type) {
+    case 'hello':
+      input.screenWidth = m.width;
+      input.screenHeight = m.height;
+      layout(m.width, m.height);
+      window.onresize = () => layout(m.width, m.height);
+      break;
+    case 'cursor':
+      setCursor(m.buf);
+      break;
+    case 'marker':
+      prober.observed(m.marker, m.at);
+      break;
+    case 'stats':
+      if (!statsEl.hidden) statsEl.textContent = `${m.text}\ninput rtt   ${p50p99(inputRtt.summary())}`;
+      break;
+    case 'report':
+      reportWaiter?.(m.report);
+      break;
+  }
+};
+
+const offscreen = canvas.transferControlToOffscreen();
+toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}/ws`, probe: probeEnabled }, [offscreen]);
+statsEl.hidden = !(params.has('stats') || probeEnabled);
+
+if (benchSeconds > 0) {
+  window.__bench = { done: false };
+  setTimeout(() => {
+    toWorker({ type: 'reset' });
+    inputRtt.clear();
+    prober.start();
+    setTimeout(() => {
+      prober.stop();
+      reportWaiter = (report) => {
+        window.__bench = { done: true, result: { ...report, inputRtt: inputRtt.summary() } };
+      };
+      toWorker({ type: 'report' });
+    }, benchSeconds * 1000);
+  }, 2000);
+} else if (probeEnabled) {
+  setTimeout(() => prober.start(), 2000);
+}
+
+canvas.focus();

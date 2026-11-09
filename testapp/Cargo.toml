@@ -1,0 +1,9 @@
+[package]
+name = "rt-testapp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "shm"] }

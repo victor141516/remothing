@@ -1,0 +1,60 @@
+//! Binary wire protocol. All integers little-endian. Mirrored in `client/src/proto.ts`.
+
+// Server -> client
+pub const S_HELLO: u8 = 1;
+pub const S_FRAME: u8 = 2;
+pub const S_CURSOR: u8 = 3;
+pub const S_PONG: u8 = 4;
+
+// Client -> server
+pub const C_PING: u8 = 1;
+pub const C_ACK: u8 = 2;
+pub const C_MOVE: u8 = 10;
+pub const C_BUTTON: u8 = 11;
+pub const C_WHEEL: u8 = 12;
+pub const C_KEY: u8 = 13;
+
+/// Rect payload encodings.
+pub const ENC_RAW: u8 = 0;
+
+/// FRAME header: type u8, flags u8, n_rects u16, seq u32,
+/// capture_oldest_us u64, capture_newest_us u64, send_us u64. Followed by rects,
+/// each: x u16, y u16, w u16, h u16, enc u8, pad u8, pad u16, len u32, data.
+pub const FRAME_HEADER_LEN: usize = 32;
+
+pub fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+pub fn hello(width: u32, height: u32, tile: u32) -> Vec<u8> {
+    let mut m = Vec::with_capacity(16);
+    m.extend_from_slice(&[S_HELLO, 0, 0, 0]);
+    m.extend_from_slice(&width.to_le_bytes());
+    m.extend_from_slice(&height.to_le_bytes());
+    m.extend_from_slice(&tile.to_le_bytes());
+    m
+}
+
+pub fn pong(client_ts: f64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(24);
+    m.extend_from_slice(&[S_PONG, 0, 0, 0, 0, 0, 0, 0]);
+    m.extend_from_slice(&client_ts.to_le_bytes());
+    m.extend_from_slice(&now_us().to_le_bytes());
+    m
+}
+
+/// Cursor image as straight-alpha RGBA.
+pub fn cursor(w: u16, h: u16, xhot: u16, yhot: u16, rgba: &[u8]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(12 + rgba.len());
+    m.extend_from_slice(&[S_CURSOR, 0]);
+    m.extend_from_slice(&w.to_le_bytes());
+    m.extend_from_slice(&h.to_le_bytes());
+    m.extend_from_slice(&xhot.to_le_bytes());
+    m.extend_from_slice(&yhot.to_le_bytes());
+    m.extend_from_slice(&[0, 0]);
+    m.extend_from_slice(rgba);
+    m
+}
