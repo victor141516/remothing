@@ -1,6 +1,9 @@
 //! FFmpeg-based `EncoderProvider`: NVENC, AMF, QuickSync and x264 behind one
 //! low-latency configuration, with zero-copy GPU input where the platform
-//! offers it (CUDA on Linux, D3D11 on Windows) and system memory otherwise.
+//! offers it (CUDA on Linux, D3D11 on Windows) and system memory otherwise;
+//! Opus or AAC for sound.
+
+mod audio;
 
 #[cfg(target_os = "linux")]
 mod cuda;
@@ -10,7 +13,7 @@ mod ffmpeg;
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ff;
-use remothing_core::encode::{EncoderProvider, EncoderRequest, VideoEncoder};
+use remothing_core::encode::{AudioEncoder, EncoderProvider, EncoderRequest, VideoEncoder};
 
 use crate::ffmpeg::{FfmpegEncoder, InputKind};
 
@@ -158,5 +161,18 @@ impl EncoderProvider for FfmpegEncoders {
             }
         }
         Err(anyhow!("no H.264 encoder available: {}", skipped.join("; ")))
+    }
+
+    fn audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioEncoder>> {
+        for codec in audio::CODECS {
+            match audio::FfmpegAudio::open(codec) {
+                Ok(encoder) => {
+                    tried.push(format!("encoder {}: ok", codec.ffmpeg_name()));
+                    return Ok(Box::new(encoder));
+                }
+                Err(e) => tried.push(format!("encoder {}: {e:#}", codec.ffmpeg_name())),
+            }
+        }
+        Err(anyhow!("no sound encoder in this FFmpeg build"))
     }
 }

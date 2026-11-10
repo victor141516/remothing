@@ -1,7 +1,7 @@
 # Fetches the native build dependencies for the Windows binary into .tools/:
 #   - libclang.dll (bindgen, used by ffmpeg-sys-next), taken from the `libclang` wheel
-#   - vcpkg + static FFmpeg (NVENC, AMF, QuickSync, x264) with the static CRT, so
-#     remothing.exe needs neither FFmpeg DLLs nor the VC++ runtime
+#   - vcpkg + static FFmpeg (NVENC, AMF, QuickSync, x264; libopus for sound) with the
+#     static CRT, so remothing.exe needs neither FFmpeg DLLs nor the VC++ runtime
 # Afterwards build with scripts/windows-env.ps1 loaded.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -27,5 +27,5 @@ if (-not (Test-Path (Join-Path $vcpkg 'vcpkg.exe'))) {
     & (Join-Path $vcpkg 'bootstrap-vcpkg.bat') -disableMetrics
 }
 & (Join-Path $vcpkg 'vcpkg.exe') install `
-    'ffmpeg[core,avcodec,avformat,swscale,nvcodec,amf,qsv,x264,gpl]:x64-windows-static' `
+    'ffmpeg[core,avcodec,avformat,swscale,nvcodec,amf,qsv,x264,opus,gpl]:x64-windows-static' `
     --clean-after-build

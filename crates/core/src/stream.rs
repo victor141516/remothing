@@ -1,5 +1,5 @@
-//! Streaming endpoints: `/ws` (frames, ACKs, pings, WebRTC signaling) and
-//! `/input` (input only).
+//! Streaming endpoints: `/ws` (frames, sound, ACKs, pings, WebRTC signaling)
+//! and `/input` (input only).
 //!
 //! Per client: a dedicated OS thread builds and encodes frames (blocking work,
 //! woken by capture / ACKs via unpark), an async writer drains its output, and
@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::app::App;
 use crate::config::constant_time_eq;
@@ -32,7 +32,7 @@ use crate::platform::Button;
 use crate::proto;
 use crate::recovery::SentLog;
 use crate::rtc::PeerEvent;
-use crate::shared::{ClientCodec, Link, Pull, VIDEO_SHARE};
+use crate::shared::{ClientCodec, Link, Pull, Tuning, VIDEO_SHARE};
 
 /// Where frames go: the WebSocket, or the WebRTC frames channel.
 const PATH_WS: u8 = 0;
@@ -50,10 +50,19 @@ const RTC_SLOWER: f64 = 0.5;
 
 /// Video cap changes cost an IDR with NVENC, itself a burst that can cut the
 /// estimate again: only for clear shifts, at most this often, unless the link
-/// collapsed (target under CAP_COLLAPSE of the cap).
+/// collapsed (target under CAP_COLLAPSE of the cap). A target several times
+/// the cap (the estimate during slow start, which begins low) is worth the
+/// keyframe sooner.
 const CAP_HOLD_US: u64 = 3_000_000;
 const CAP_DEADBAND: (f64, f64) = (0.67, 1.5);
 const CAP_COLLAPSE: f64 = 0.33;
+const CAP_JUMP: f64 = 2.5;
+const CAP_JUMP_HOLD_US: u64 = 500_000;
+/// During slow start the cap is this many times the video share: frame
+/// pacing keeps the bytes within the share (fewer, better pictures), and
+/// video that fills it is what lets the estimate grow; capped at the share
+/// it could never show that the link carries more.
+const CAP_RAMP: f64 = 2.0;
 
 /// Longest gap between messages from a live client (it pings every second).
 const CLIENT_SILENCE: Duration = Duration::from_secs(5);
@@ -93,18 +102,43 @@ pub async fn input_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |mut socket| async move {
-        while let Some(Ok(msg)) = socket.recv().await {
+        let mut held = Held::default();
+        // The client pings every second: silence means it is gone, whatever
+        // the socket says, and what it held down must not stay down.
+        while let Ok(Some(Ok(msg))) = tokio::time::timeout(CLIENT_SILENCE, socket.recv()).await {
             let Message::Binary(b) = msg else { continue };
             if b.first() == Some(&proto::C_PING) && b.len() >= 16 {
                 let pong = proto::pong(f64::from_le_bytes(b[8..16].try_into().unwrap()));
                 if socket.send(Message::Binary(pong.into())).await.is_err() {
                     break;
                 }
-            } else if let Err(e) = handle_input(&b, &app) {
+            } else if let Err(e) = handle_input(&b, &app, &mut held) {
                 app.telemetry.error("input", e);
             }
         }
+        held.release(&app);
     })
+}
+
+/// Keys and buttons one connection holds down. A held key repeats on the
+/// remote side, so it is released when the connection that pressed it ends
+/// before sending the release.
+#[derive(Default)]
+struct Held {
+    keys: Vec<u16>,
+    buttons: Vec<Button>,
+}
+
+impl Held {
+    fn release(&mut self, app: &App) {
+        let Some(input) = app.control.input() else { return };
+        for key in self.keys.drain(..) {
+            let _ = input.key(key, false);
+        }
+        for button in self.buttons.drain(..) {
+            let _ = input.button(button, false);
+        }
+    }
 }
 
 struct ClientLink {
@@ -124,6 +158,9 @@ struct ClientLink {
     /// PATH_WS or PATH_RTC.
     path: AtomicU8,
     stop: AtomicBool,
+    /// Input that came over this connection (the data channel, or the
+    /// stream socket itself).
+    held: Mutex<Held>,
 }
 
 async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
@@ -140,6 +177,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         hello_acked: AtomicBool::new(true),
         path: AtomicU8::new(PATH_WS),
         stop: AtomicBool::new(false),
+        held: Mutex::new(Held::default()),
     });
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<PeerEvent>();
@@ -161,6 +199,58 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     }
 
     let peer_out = out_tx.clone();
+    let clipboard = {
+        let (mut text, out_tx, id) = (app.control.clipboard_text(), out_tx.clone(), link.id);
+        async move {
+            // What is there on connect, then every change this client did not make.
+            loop {
+                let (by, now) = text.borrow_and_update().clone();
+                if by != Some(id) && !now.is_empty() {
+                    let _ = out_tx.send(proto::text(proto::S_CLIPBOARD, &now));
+                }
+                if text.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    };
+    // Sound, while the client asks for it.
+    let (audio_on, mut audio_wanted) = watch::channel(false);
+    let audio = {
+        let (app, out_tx) = (app.clone(), out_tx.clone());
+        async move {
+            while audio_wanted.wait_for(|&on| on).await.is_ok() {
+                let mut listener = app.audio.listen();
+                // What the stream is right now is news to this client.
+                listener.info.mark_changed();
+                while *audio_wanted.borrow() {
+                    tokio::select! {
+                        changed = audio_wanted.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                        changed = listener.info.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            if let Some(info) = listener.info.borrow_and_update().clone() {
+                                let _ = out_tx.send(info.to_vec());
+                            }
+                        }
+                        packet = listener.packets.recv() => match packet {
+                            Ok(packet) => {
+                                let _ = out_tx.send(packet.to_vec());
+                            }
+                            // This client fell behind: what it missed is old by now.
+                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => return,
+                        },
+                    }
+                }
+            }
+        }
+    };
     let reader = {
         let (app, link, waker) = (app.clone(), link.clone(), waker.clone());
         async move {
@@ -198,6 +288,26 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         }
                     }
                     (Some(proto::C_EVENT), _) => app.telemetry.event(link.id, &String::from_utf8_lossy(&b[1..])),
+                    (Some(proto::C_CLIPBOARD), _) => {
+                        if let Err(e) = app.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])) {
+                            app.telemetry.error("clipboard", e);
+                        }
+                    }
+                    (Some(proto::C_AUDIO), 2..) => {
+                        audio_on.send_replace(b[1] != 0);
+                    }
+                    (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, app.control.current().map(|d| d.id)),
+                    (Some(proto::C_DISPLAY), _) => {
+                        let id = String::from_utf8_lossy(&b[1..]).into_owned();
+                        match app.select_display(&id) {
+                            Ok(()) => {
+                                app.telemetry.event(link.id, &format!("display {id} selected"));
+                                // The capture thread switches a moment later.
+                                send_displays(&app, &out_tx, Some(id));
+                            }
+                            Err(e) => app.telemetry.error("select display", e),
+                        }
+                    }
                     (Some(proto::C_STATS), _) => {
                         if let Ok(v) = serde_json::from_slice(&b[1..]) {
                             app.telemetry.client_report(link.id, v);
@@ -209,7 +319,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                     }
                     (Some(proto::C_SIGNAL), _) => on_signal(&b[1..], &app, &link, &out_tx, &peer_tx).await,
                     _ => {
-                        if let Err(e) = handle_input(&b, &app) {
+                        if let Err(e) = handle_input(&b, &app, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -237,7 +347,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         _ => {}
                     },
                     PeerEvent::Input(b) => {
-                        if let Err(e) = handle_input(&b, &app) {
+                        if let Err(e) = handle_input(&b, &app, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -274,8 +384,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         _ = reader => {}
         _ = writer => {}
         _ = peer => {}
+        _ = clipboard => {}
+        _ = audio => {}
     }
     link.stop.store(true, Ordering::Release);
+    link.held.lock().unwrap().release(&app);
     waker.unpark();
     if let Some(hub) = &app.rtc {
         hub.close(link.id);
@@ -457,13 +570,12 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 // Preference changed at runtime: rebuild the encoder.
                 encoder_pref = s.encoder.preferred.clone();
                 drop(s);
-                video_cap.reset(model.budget(&codec.tuning));
+                video_cap.reset(video_rate(model, &codec.tuning));
                 create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
                 shared.drop_video(link.id);
                 need_key = true;
             }
         }
-        let budget = model.budget(&codec.tuning);
         if let Some(c) = shared.take_cursor(link.id) {
             if out.send(c.to_vec()).is_err() {
                 return;
@@ -471,7 +583,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         }
         if let Some(e) = codec.encoder.as_mut() {
             let before = video_cap.bps;
-            if let Some(bps) = video_cap.update(budget, proto::now_us()) {
+            if let Some(bps) = video_cap.update(video_rate(model, &codec.tuning), proto::now_us()) {
                 // A keyframe with NVENC (FFmpeg resets the encoder).
                 e.set_max_bitrate(bps);
                 let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
@@ -512,7 +624,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 Ok(Pull::Reset { geometry: g, first_seq }) => {
                     size = (g.width, g.height);
                     encoder_pref = app.settings.read().unwrap().encoder.preferred.clone();
-                    video_cap.reset(budget);
+                    video_cap.reset(video_rate(model, &codec.tuning));
                     create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
@@ -568,12 +680,24 @@ impl VideoCap {
         let target = Self::target(rate);
         let ratio = target as f64 / self.bps.max(1) as f64;
         let shifted = ratio < CAP_DEADBAND.0 || ratio > CAP_DEADBAND.1;
-        if ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= CAP_HOLD_US) {
+        let hold = if ratio >= CAP_JUMP { CAP_JUMP_HOLD_US } else { CAP_HOLD_US };
+        if ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= hold) {
             self.bps = target;
             self.changed_us = now;
             return Some(target);
         }
         None
+    }
+}
+
+/// Bytes/s the video cap follows: the content budget, with CAP_RAMP headroom
+/// during slow start (within the configured bandwidth).
+fn video_rate(link: Link, tuning: &Tuning) -> f64 {
+    let budget = link.budget(tuning);
+    if link.proven {
+        budget
+    } else {
+        (budget * CAP_RAMP).min(tuning.bandwidth_mbps * 1e6 / 8.0)
     }
 }
 
@@ -604,7 +728,7 @@ fn u16_at(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[i], b[i + 1]])
 }
 
-fn handle_input(b: &[u8], app: &App) -> Result<()> {
+fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
     let Some(input) = app.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
@@ -618,11 +742,34 @@ fn handle_input(b: &[u8], app: &App) -> Result<()> {
                 9 => Button::Forward,
                 _ => return Ok(()),
             };
-            input.button(button, b[2] != 0)?;
+            let down = b[2] != 0;
+            held.buttons.retain(|&h| h != button);
+            if down {
+                held.buttons.push(button);
+            }
+            input.button(button, down)?;
         }
         (Some(proto::C_WHEEL), 6..) => input.wheel(u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32)?,
-        (Some(proto::C_KEY), 4..) => input.key(u16_at(b, 2), b[1] != 0)?,
+        (Some(proto::C_KEY), 4..) => {
+            let (key, down) = (u16_at(b, 2), b[1] != 0);
+            held.keys.retain(|&h| h != key);
+            if down {
+                held.keys.push(key);
+            }
+            input.key(key, down)?;
+        }
+        (Some(proto::C_TEXT), _) => input.text(&String::from_utf8_lossy(&b[1..]))?,
         _ => {}
     }
     Ok(())
+}
+
+/// The display list and the one being streamed (`current`), for the client's menu.
+fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Option<String>) {
+    match app.platform.displays().list() {
+        Ok(displays) => {
+            let _ = out.send(proto::text(proto::S_DISPLAYS, &json!({ "displays": displays, "current": current }).to_string()));
+        }
+        Err(e) => app.telemetry.error("list displays", e),
+    }
 }

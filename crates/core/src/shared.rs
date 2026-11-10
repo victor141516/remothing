@@ -42,7 +42,7 @@ const BURST_SLICES: f64 = 4.0;
 const REFINE_SHARE: f64 = 0.8;
 /// Below this link rate lossless rects use zstd: 1.7x smaller than LZ4 on a
 /// 4K desktop capture, at a CPU cost that only pays off when the link is the limit.
-const ZSTD_BELOW: f64 = 200e6 / 8.0;
+const ZSTD_BELOW: f64 = 100e6 / 8.0;
 const ZSTD_LEVEL: i32 = 1;
 /// Share of the link the video layer may use (lossless refinement and
 /// protocol overhead need the rest). Its bitrate cap and frame pacing follow it.
@@ -670,21 +670,16 @@ pub struct Link {
     /// Estimated bandwidth, bytes/s.
     pub rate: f64,
     /// The link queued at least once: the estimate is its capacity, not
-    /// just a lower bound.
+    /// just a lower bound still being raised (slow start).
     pub proven: bool,
 }
 
 impl Link {
-    /// Bytes/s content may be planned against: the configured cap, lowered to
-    /// the estimate once the link has shown where it runs full. Before that,
-    /// a fast link must not be treated as slow because content stayed light.
+    /// Bytes/s content may be planned against: the estimate, within the
+    /// configured cap. It starts low and slow start raises it as fast as
+    /// the link confirms, so the first frames suit a slow link too.
     pub fn budget(&self, tuning: &Tuning) -> f64 {
-        let cap = tuning.bandwidth_mbps * 1e6 / 8.0;
-        if self.proven {
-            self.rate.min(cap)
-        } else {
-            cap
-        }
+        self.rate.min(tuning.bandwidth_mbps * 1e6 / 8.0)
     }
 }
 

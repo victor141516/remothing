@@ -18,6 +18,9 @@ pub trait Platform: Send + Sync + 'static {
     fn displays(&self) -> &dyn DisplayProvider;
     fn encoders(&self) -> &dyn EncoderProvider;
     fn monitor(&self) -> &dyn SystemMonitor;
+    /// Opens the capture of what the session plays. Every path tried goes
+    /// to `tried` with its outcome, so the log tells why there is no sound.
+    fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -64,6 +67,19 @@ pub struct OpenedDisplay {
     pub info: DisplayInfo,
     pub capture: Box<dyn CaptureSession>,
     pub input: Arc<dyn InputProvider>,
+    /// None where the session's clipboard cannot be reached.
+    pub clipboard: Option<Arc<dyn Clipboard>>,
+}
+
+/// Receives the clipboard text each time it changes.
+pub type ClipboardSink = Box<dyn Fn(String) + Send + Sync>;
+
+/// Text clipboard of the session a display belongs to.
+pub trait Clipboard: Send + Sync {
+    fn set_text(&self, text: &str) -> Result<()>;
+    /// Reports the text every time something else puts text on the
+    /// clipboard, from now on (called once).
+    fn watch(&self, on_change: ClipboardSink);
 }
 
 /// Opaque GPU surface handle passed from a capture session to an encoder of
@@ -137,9 +153,26 @@ pub trait InputProvider: Send + Sync {
     fn wheel(&self, dx: i32, dy: i32) -> Result<()>;
     /// Physical key as a Linux evdev code (wire format), mapped per platform.
     fn key(&self, evdev: u16, down: bool) -> Result<()>;
+    /// Types characters, whatever the keyboard layout. `\n` is the Enter key.
+    fn text(&self, text: &str) -> Result<()>;
     fn set_keyboard_layout(&self, _layout: &str) -> Result<()> {
         bail!("keyboard layout is controlled by the host OS on this platform")
     }
+}
+
+/// Sample rate and channels of every [`AudioSource`].
+pub const AUDIO_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: usize = 2;
+
+/// What the session plays (every program's sound, mixed) as interleaved
+/// signed 16-bit samples, [`AUDIO_CHANNELS`] at [`AUDIO_RATE`].
+pub trait AudioSource: Send {
+    /// The capture path in use, for the log and the clients.
+    fn name(&self) -> String;
+    /// Appends what was captured since the last call, waiting about a tenth
+    /// of a second when there is nothing: some paths deliver nothing while
+    /// nothing plays.
+    fn read(&mut self, out: &mut Vec<i16>) -> Result<()>;
 }
 
 #[derive(Clone, Debug, Serialize)]

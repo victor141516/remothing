@@ -31,14 +31,14 @@ flowchart LR
 
 | crate | role |
 |---|---|
-| `crates/core` | traits (`platform.rs`, `encode.rs`), tile diff + motion classification + policy (`shared.rs`), capture loop (`capture.rs`), wire protocol (`proto.rs`), transport (`stream.rs`), admin API (`admin.rs`), config/auth (`config.rs`), embedded web assets, server wiring (`app.rs`) |
-| `crates/encoder` | FFmpeg `EncoderProvider`: H.264 NVENC / AMF / QuickSync / x264, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback |
+| `crates/core` | traits (`platform.rs`, `encode.rs`), tile diff + motion classification + policy (`shared.rs`), capture loop (`capture.rs`), wire protocol (`proto.rs`), transport (`stream.rs`), sound hub (`audio.rs`), admin API (`admin.rs`), config/auth (`config.rs`), embedded web assets, server wiring (`app.rs`) |
+| `crates/encoder` | FFmpeg `EncoderProvider`: H.264 NVENC / AMF / QuickSync / x264, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; Opus (libopus) or AAC for sound |
 | `crates/gpu-interop` | GPU surface types shared by capture and encoder of one platform (`D3D11Frame`) |
-| `crates/platform-linux` | Xvfb manager (simulated displays, shared-memory framebuffer + XDamage), real X11 displays (RandR outputs, XShm + XDamage), XTest input, XFixes cursor, NVML/DRM GPU info |
-| `crates/platform-windows` | DXGI Desktop Duplication (dirty + move rects, D3D11 texture), SendInput, cursor from duplication, desktop switching, Windows service supervising the session process |
+| `crates/platform-linux` | Xvfb manager (simulated displays, shared-memory framebuffer + XDamage), real X11 displays (RandR outputs, XShm + XDamage), XTest input, XFixes cursor, X selections (clipboard), sound through PulseAudio / PipeWire / ALSA loopback helpers, NVML/DRM GPU info |
+| `crates/platform-windows` | DXGI Desktop Duplication (dirty + move rects, D3D11 texture), SendInput, cursor from duplication, clipboard, WASAPI loopback sound, desktop switching, Windows service supervising the session process |
 | `crates/server` | the `remothing` binary: CLI, config path, picks the platform |
 | `testapp` | `rt-testapp`: latency probe app (barcode with timestamp + input marker), X11 and Win32 backends |
-| `client` | browser client (`index.html`, `main.ts`, `worker.ts`) and admin UI (`admin.html`, `admin.ts`) |
+| `client` | browser client (`index.html`, `main.ts`, `worker.ts`; input and touch `input.ts`, controls `ui.ts`, `keyboard.ts`, `textentry.ts`, sound `audio.ts`) and admin UI (`admin.html`, `admin.ts`) |
 
 ## Frame path
 
@@ -113,10 +113,20 @@ only the network is modelled; a slow client still holds frames back):
   down to what the content happened to use (80 → 10 Mbit/s in 30 s with
   30 ms of ACK jitter), dragging the video cap along, and each cap change
   is a keyframe with NVENC.
-- **Proven vs. lower bound**: until the link has queued once, the estimate
-  only paces sending; what content the link affords (video vs. lossless,
-  bitrate cap, zstd) is planned against the configured `bandwidth_mbps`, so
-  a fast link with light content is not treated as slow.
+- **Start**: a new client starts at 5 Mbit/s whatever the link: the first
+  full screen sent at a fast link's rate takes a phone link seconds to
+  drain. While the link has not queued yet, every judging window in which
+  the content used at least half the estimate raises it, up to doubling it,
+  in proportion to the share used and never beyond twice what the link just
+  delivered with a short queue (doubling without that bound reached
+  270 Mbit/s on an 18 Mbit/s link before the first late ACK). The first
+  queue ends this phase. What the link affords (video vs. lossless, bitrate
+  cap, zstd below 100 Mbit/s) is always planned against the estimate,
+  bounded by `bandwidth_mbps`. Until the link has queued once, the video
+  cap is twice the video share (frame pacing keeps the bytes within the
+  share): video capped at the share could never show that the link carries
+  more. A cap 2.5 times the current one is applied after 500 ms instead of
+  the usual hold.
 - **Window**: estimated rate × (base RTT + jitter) with 10 % margin, so the
   frame rate is not bound by the round trip (was a fixed 2 frames); and the
   oldest unacknowledged frame must not be overdue, so a stalled client gets
@@ -125,9 +135,99 @@ only the network is modelled; a slow client still holds frames back):
 Over Tailscale Funnel (≈18 Mbit/s, ≈50 ms) this took the harness from
 10–34 fps to ~170 fps with lower latency; see `docs/RESULTS.md`.
 
+## Input
+
 Input goes through its own WebSocket (`/input`) so it never queues behind
-frame data; the server injects it through the selected display's
-`InputProvider` (display-relative coordinates, evdev key codes on the wire).
+frame data, or over the data channel when frames use it; the server injects
+it through the selected display's `InputProvider` (display-relative
+coordinates, evdev key codes on the wire).
+
+- **Held keys**: a key is down on the server from the client's press to its
+  release, so holding it repeats on the remote side (the browser's own
+  repeats are dropped). The X server repeats a held key by itself; Windows
+  only repeats keys of a real keyboard, so `input.rs` sends the last
+  non-modifier key again with the system's delay and rate. Each connection
+  remembers the keys and buttons it holds: they are released when it ends
+  or stays silent for 5 s (the client pings every second), so a dropped
+  connection leaves nothing stuck.
+- **Text** (`C_TEXT`): a phone's keyboard gives characters, not keys.
+  Windows types them with `KEYEVENTF_UNICODE`. X11 can only press keys:
+  the key of the current layout that gives the character is pressed (with
+  Shift when it is the key's second symbol); a character no key gives is
+  put on a keycode the layout leaves unused (eight of them in turn, since a
+  program looks the symbol up when it handles the press, possibly after
+  the next ones were typed) and they are emptied when the display closes.
+- **Touch** (client, `input.ts`): a trackpad, on the picture and around it.
+  One finger moves the pointer from where this client last put it, by as
+  much as the finger travelled over the picture; a tap is a left click, a
+  tap with two fingers a right click, two fingers dragged scroll. The
+  server only ever gets absolute positions. The browser shows no cursor
+  for a finger, so the remote cursor's shape (`S_CURSOR`) is drawn over
+  the picture at that position.
+- **Phone keyboard** (`textentry.ts`): a text field nobody sees takes the
+  focus, which opens it. Phone keyboards edit the field instead of sending
+  keys (composition, suggestions, swiped words), so each change is compared
+  with the previous content: what went away becomes Backspace presses, what
+  is new goes as text.
+- **On-screen keyboard** (`keyboard.ts`): positional evdev codes like a
+  real keyboard (the remote layout decides the characters), with US or
+  Spanish labels; modifiers latch until the next key.
+
+## Clipboard and display choice
+
+`Clipboard` (per opened display, text only, up to 1 MiB): the capture side
+keeps the last text with who set it in a watch channel; every client gets
+changes it did not make itself (`S_CLIPBOARD`), and the current text on
+connect; `C_CLIPBOARD` sets it. Windows: a message-only window on its own
+thread owns the clipboard when text is set and listens for
+`WM_CLIPBOARDUPDATE`; it reads 100 ms after the last update, because the
+program that copies is often still writing (OLE sets the data, then flushes
+it) and opening the clipboard under it makes its copy fail. X11: XFixes
+selection notifications on `CLIPBOARD`, `UTF8_STRING` conversion (INCR for
+large texts), and ownership of the selection, answering requests, when a
+client sets it.
+
+`C_DISPLAYS` asks for the display list (`S_DISPLAYS`, JSON with the current
+one), `C_DISPLAY` selects one, the same hot switch as the admin UI: every
+client gets a new HELLO.
+
+## Sound
+
+Best effort: video never depends on it. `audio.rs` runs one capture thread
+while at least one client listens (`C_AUDIO`): the platform's `AudioSource`
+gives 48 kHz stereo 16-bit samples, one encoder serves every listener, and
+each packet goes out on the clients' WebSockets (`S_AUDIO`), after an
+`S_AUDIO_INFO` that names codec and source or tells why there is no sound.
+Both the source and the encoder report everything they tried; that list is
+in the server log, in the admin status and in the client (overlay, tooltip
+of the `Sound` button, event log). A failure is tried again every 15 s.
+After a second of plain zeros nothing is sent until something plays.
+
+- **Encoder** (`crates/encoder/src/audio.rs`): libopus at 128 kbit/s in
+  10 ms frames, music mode only (no look-ahead); FFmpeg's own AAC encoder
+  when the build has no libopus (21 ms frames, one held back).
+- **Windows**: WASAPI loopback of the default playback device, converted
+  by the audio engine to our format, polled (loopback has no usable
+  event). It delivers nothing while nothing plays. The device is reopened
+  when the default one changes.
+- **Linux** has no one place to read what plays, so paths are tried in
+  order, each a helper program writing samples to a pipe (they fail with a
+  message worth logging, and no sound library has to be linked): `parec` on
+  the default sink's monitor of a PulseAudio-protocol server (PulseAudio
+  or pipewire-pulse; ours, the server user's, or any logged-in user's under
+  `/run/user`, with that user's cookie); `pw-record` on PipeWire's default
+  sink; `arecord` on an ALSA loopback card. Where no sound server runs at
+  all (a container), the platform starts one before the sessions:
+  PulseAudio with a null sink, else PipeWire + WirePlumber + pipewire-pulse
+  with a null sink and their own D-Bus session bus. Sessions started in
+  simulated displays get its address as `PULSE_SERVER`.
+- **Client** (`audio.ts`): WebCodecs `AudioDecoder`, each decoded piece
+  scheduled on an `AudioContext` right after the previous one, 60 ms ahead
+  of the clock when the queue is empty; pieces that would queue more than
+  250 ms ahead are dropped (a burst after a stall would otherwise stay
+  late for good). Browsers only play after a click or key, so sound is
+  asked for at the first one. No WebCodecs (plain HTTP): no sound, and the
+  client says so.
 
 ## Transport: WebSocket and WebRTC data channel
 
@@ -189,13 +289,16 @@ flowchart LR
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
-PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME); client →
-server PING, ACK (with client hold time and lost frames), KEYFRAME request
-(with the newest frame received: requests the last keyframe already answers
-are ignored, since the client sends one per undecodable frame), STATS (JSON
-for the admin UI), SIGNAL, HELLO_ACK, VISIBLE (a hidden tab gets no frames;
-changes accumulate into one frame for when it shows again), EVENT (text for
-the event log), MOVE, BUTTON, WHEEL, KEY.
+PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME), CLIPBOARD
+(text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
+there is no sound), AUDIO (one encoded packet); client → server PING, ACK
+(with client hold time and lost frames), KEYFRAME request (with the newest
+frame received: requests the last keyframe already answers are ignored,
+since the client sends one per undecodable frame), STATS (JSON for the
+admin UI), SIGNAL, HELLO_ACK, VISIBLE (a hidden tab gets no frames; changes
+accumulate into one frame for when it shows again), EVENT (text for the
+event log), CLIPBOARD, DISPLAYS, DISPLAY, AUDIO (on/off), MOVE, BUTTON,
+WHEEL, KEY, TEXT.
 
 ## Admin
 

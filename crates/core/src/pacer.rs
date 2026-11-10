@@ -27,12 +27,17 @@
 //! and the cut needs the queue to persist. Without that the estimate
 //! drifted down to whatever the content happened to use.
 //!
-//! Measured rates raise it directly (fast start on fast links):
+//! Measured rates raise it directly:
 //! - delivery rate, as in BBR: bytes ACKed over the longer of the send and
 //!   ACK spans since the frame's predecessor was delivered;
 //! - transmission time: a frame sent into an empty pipe takes base RTT plus
 //!   size / bandwidth, so size / (RTT - base RTT) once that excess clearly
 //!   exceeds jitter (large frames on slow links).
+//!
+//! It starts low and, until the link has queued once, doubles every window
+//! in which content used it and the queue stayed empty (slow start): content
+//! is planned against the estimate, so a slow link never gets a burst sized
+//! for a fast one, and a fast one is found within a few round trips.
 //!
 //! The send window covers base RTT plus typical jitter at the estimated rate,
 //! with 10 % margin: the pipe stays busy, so frame rate is not bound by RTT,
@@ -40,8 +45,13 @@
 
 use std::collections::VecDeque;
 
-/// Until measured: a modest WAN link. LAN links prove themselves within a few frames.
-const INITIAL_RATE: f64 = 25e6 / 8.0;
+/// Until measured: little traffic (see slow start).
+const INITIAL_RATE: f64 = 5e6 / 8.0;
+/// Growth per window of slow start.
+const SLOW_START: f64 = 2.0;
+/// Content delivering at least this share of the estimate tests it as much
+/// as content that waited for it.
+const BUSY_SHARE: f64 = 0.5;
 const MIN_RATE: f64 = 1e6 / 8.0;
 /// One sample can at most double the estimate (guards against ACK bunching).
 const MAX_GROWTH: f64 = 2.0;
@@ -241,6 +251,13 @@ impl Pacer {
         if alone {
             self.delivered_us = now;
             self.first_sent_us = now;
+            if self.judge_n == 0 {
+                // Nothing in flight and no ACK yet in this judging window: it
+                // starts here, not when the previous one ended (idle time
+                // would count as the estimate going unused).
+                self.judge_start_us = now;
+                self.judge_delivered = self.delivered;
+            }
         }
         self.inflight += bytes;
         self.sent.push_back(Sent {
@@ -319,11 +336,18 @@ impl Pacer {
         self.judge_best = self.judge_best.max(sample);
         let elapsed = now.saturating_sub(self.judge_start_us);
         let window = base.max(JUDGE_MIN_US);
-        let light = ((self.delivered - self.judge_delivered) as f64) < SPARSE_SHARE * self.rate * elapsed as f64 / 1e6;
-        let held = light && !self.judge_limited;
+        // Share of the estimate the content used in this window.
+        let used = (self.delivered - self.judge_delivered) as f64 / (self.rate * elapsed.max(1) as f64 / 1e6);
+        let held = used < SPARSE_SHARE && !self.judge_limited;
         if elapsed >= window && !(held && self.judge_n < JUDGE_SPARSE_ACKS && elapsed < JUDGE_SPARSE_US) {
-            // A window held open for more ACKs stands for that many windows.
-            self.judge(base, now, if held { (elapsed / window) as i32 } else { 1 });
+            // A window held open until it had enough ACKs stands for as
+            // many windows as it lasted; one that timed out with a few
+            // ACKs is no stronger than a single one.
+            let windows = match held && self.judge_n >= JUDGE_SPARSE_ACKS {
+                true => (elapsed / window).min(JUDGE_SPARSE_US / JUDGE_MIN_US) as i32,
+                false => 1,
+            };
+            self.judge(base, now, windows, used);
             self.judge_start_us = now;
             self.judge_delivered = self.delivered;
             self.judge_min_us = u64::MAX;
@@ -335,7 +359,8 @@ impl Pacer {
         self.rate = self.rate.max(MIN_RATE);
     }
 
-    fn judge(&mut self, base: u64, now: u64, windows: i32) {
+    /// `used`: share of the estimate delivered in the window.
+    fn judge(&mut self, base: u64, now: u64, windows: i32, used: f64) {
         let queue = self.judge_min_us;
         let spread = (self.judge_sum_us / self.judge_n - queue) as f64;
         self.jitter_us += (spread - self.jitter_us) / 4.0;
@@ -349,10 +374,12 @@ impl Pacer {
             // ACKs of frames sent before the last cut: no news yet.
             return;
         }
-        // Content below the estimate: the queue is not (only) ours, and with
-        // few ACKs per window its minimum is mostly jitter.
-        let limited = self.judge_limited;
-        if over && (limited || now.saturating_sub(self.over_since_us) >= PERSIST_US) {
+        // Content that waited for the estimate or used a good part of it
+        // tests it: a queue is its own, an empty one means there is room.
+        // Below that the queue is not (only) ours, and with few ACKs per
+        // window its minimum is mostly jitter.
+        let pushing = self.judge_limited || used >= BUSY_SHARE;
+        if over && (pushing || now.saturating_sub(self.over_since_us) >= PERSIST_US) {
             // Below the best delivery rate seen, so the queue drains; at most
             // 30 %: an app-limited best can be far below the link.
             self.ceiling = self.rate;
@@ -363,10 +390,17 @@ impl Pacer {
             self.up_streak = 0;
         } else {
             let off = ((TARGET_QUEUE_US - queue as f64) / TARGET_QUEUE_US).clamp(-1.0, 1.0);
-            let recovering = !limited && self.rate < self.backed;
+            let recovering = !pushing && self.rate < self.backed;
             if off < 0.0 {
                 self.rate *= (1.0 + GAIN * off).powi(windows);
-            } else if limited || recovering {
+            } else if pushing && self.ceiling == 0.0 {
+                // Slow start: up to twice what the link just carried, so the
+                // estimate never runs ahead of traffic that does not follow
+                // it (a capped encoder, light content); less as the queue
+                // nears its target.
+                let room = (SLOW_START * used - 1.0).clamp(GAIN, SLOW_START - 1.0);
+                self.rate *= 1.0 + room * off;
+            } else if pushing || recovering {
                 let accel = (1.0 + self.up_streak as f64 * ACCEL_PER_WINDOW).min(MAX_ACCEL);
                 self.rate *= (1.0 + GAIN * off * accel).powi(windows);
                 if recovering {
@@ -374,15 +408,15 @@ impl Pacer {
                 }
             }
             // Far below where the estimate has been: after a deep cut with
-            // content waiting, or after decreases nothing backed.
-            let far_below = self.rate < 0.8 * if limited { self.ceiling } else { self.backed };
-            if (limited || recovering) && queue < EMPTY_QUEUE_US && far_below {
+            // content pushing, or after decreases nothing backed.
+            let far_below = self.rate < 0.8 * if pushing { self.ceiling } else { self.backed };
+            if (pushing || recovering) && queue < EMPTY_QUEUE_US && far_below {
                 self.up_streak += 1;
             } else {
                 self.up_streak = 0;
             }
         }
-        if limited {
+        if pushing {
             self.backed = self.rate;
         }
     }
@@ -403,16 +437,19 @@ mod tests {
         busy_until: u64,
         last_ack: u64,
         lcg: u64,
+        /// Longest wait of a frame behind earlier ones, over the whole run.
+        worst_queue_us: u64,
     }
 
     impl Link {
         fn new(rate: f64, rtt_us: u64, jitter_us: u64) -> Self {
-            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1 }
+            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1, worst_queue_us: 0 }
         }
 
         /// ACK time of a frame handed to the link at `now`.
         fn deliver(&mut self, bytes: u64, now: u64) -> u64 {
             let start = self.busy_until.max(now);
+            self.worst_queue_us = self.worst_queue_us.max(start - now);
             self.busy_until = start + (bytes as f64 * 1e6 / self.rate) as u64;
             self.lcg = self.lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let jitter = if self.jitter_us == 0 { 0 } else { (self.lcg >> 33) % self.jitter_us };
@@ -473,6 +510,33 @@ mod tests {
         let mut p = Pacer::default();
         let (sent, _) = run(&mut p, &mut Link::new(2.5e6, 100_000, 0), 4, false, |_| (2_000, 6_060));
         assert!(sent as f64 >= 165.0 * 4.0 * 0.95, "sent {sent}");
+    }
+
+    /// Bulk content sized from the estimate, as refinement after a connect is:
+    /// one frame of 80 % of the estimate every 16 ms.
+    fn bulk(p: &Pacer) -> (u64, u64) {
+        ((p.rate() * 0.8 * 0.016) as u64, 16_000)
+    }
+
+    #[test]
+    fn slow_start_finds_a_fast_link_quickly() {
+        // 100 Mbit/s, 20 ms: found within a second from a 5 Mbit/s start.
+        let mut p = Pacer::default();
+        let mut link = Link::new(100e6 / 8.0, 20_000, 0);
+        run(&mut p, &mut link, 1, true, bulk);
+        assert!(p.rate() > 50e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+        assert!(link.worst_queue_us < 100_000, "worst queueing {} µs", link.worst_queue_us);
+    }
+
+    #[test]
+    fn slow_start_does_not_flood_a_slow_link() {
+        // 6 Mbit/s, 50 ms (mobile): the same content from the first frame on.
+        let mut p = Pacer::default();
+        let mut link = Link::new(6e6 / 8.0, 50_000, 0);
+        run(&mut p, &mut link, 3, true, bulk);
+        // Content takes 80 % of the estimate: it settles around 6 / 0.8 = 7.5.
+        assert!(p.proven() && p.rate() > 3e6 / 8.0 && p.rate() < 11e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+        assert!(link.worst_queue_us < 150_000, "worst queueing {} µs", link.worst_queue_us);
     }
 
     #[test]

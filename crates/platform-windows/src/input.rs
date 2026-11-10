@@ -1,19 +1,23 @@
 //! Input injection with SendInput into one display of the virtual desktop.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use remothing_core::platform::{Button, DisplayInfo, InputProvider};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
     MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WHEEL_DELTA,
-    XBUTTON1, XBUTTON2,
+    GetSystemMetrics, SystemParametersInfoW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED, SYSTEM_PARAMETERS_INFO_ACTION,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, XBUTTON1, XBUTTON2,
 };
 
 use crate::desktop::{self, Followed};
@@ -28,6 +32,12 @@ const RALT: u8 = 8;
 /// Delete / numpad '.' press turned into a SAS: its release is swallowed too.
 const SAS_DELETE: u8 = 16;
 const SAS_KPDOT: u8 = 32;
+
+/// A key went down or up (evdev code), for the repeat thread.
+enum Held {
+    Down(u16),
+    Up(u16),
+}
 
 pub struct SendInputProvider {
     /// Display origin and size in virtual-desktop pixels.
@@ -44,20 +54,31 @@ pub struct SendInputProvider {
     /// window instead, and reported once per blocked episode.
     uipi: ForegroundCheck,
     uipi_blocked: AtomicBool,
+    /// To the thread that repeats the held key.
+    repeat: mpsc::Sender<Held>,
 }
 
 impl SendInputProvider {
-    pub fn new(info: &DisplayInfo) -> Self {
-        Self {
-            x: info.x,
-            y: info.y,
-            width: info.width,
-            height: info.height,
-            keys: AtomicU8::new(0),
-            blocked: AtomicBool::new(false),
-            uipi: ForegroundCheck::new(),
-            uipi_blocked: AtomicBool::new(false),
-        }
+    pub fn new(info: &DisplayInfo) -> Arc<Self> {
+        let (repeat, held) = mpsc::channel();
+        Arc::new_cyclic(|provider| {
+            let provider = provider.clone();
+            std::thread::Builder::new()
+                .name("key-repeat".into())
+                .spawn(move || repeat_held_key(provider, held))
+                .expect("spawn key repeat thread");
+            Self {
+                x: info.x,
+                y: info.y,
+                width: info.width,
+                height: info.height,
+                keys: AtomicU8::new(0),
+                blocked: AtomicBool::new(false),
+                uipi: ForegroundCheck::new(),
+                uipi_blocked: AtomicBool::new(false),
+                repeat,
+            }
+        })
     }
 
     fn send(&self, inputs: &[INPUT]) -> Result<()> {
@@ -150,6 +171,51 @@ impl SendInputProvider {
     }
 }
 
+/// Typematic repeat. Windows repeats a held key in the keyboard driver, so
+/// an injected key-down stays one press however long the client holds it:
+/// the last key pressed is sent again here, after the user's keyboard delay
+/// and at the user's repeat rate, until it goes up or another key goes down
+/// (as a keyboard does). Ends when the provider is dropped.
+fn repeat_held_key(provider: Weak<SendInputProvider>, held: mpsc::Receiver<Held>) {
+    // The key and when it is due again.
+    let mut repeating: Option<(u16, Instant)> = None;
+    loop {
+        let event = match repeating {
+            Some((_, due)) => held.recv_timeout(due.saturating_duration_since(Instant::now())),
+            None => held.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match (event, repeating) {
+            (Ok(Held::Down(key)), _) => repeating = Some((key, Instant::now() + typematic(SPI_GETKEYBOARDDELAY))),
+            (Ok(Held::Up(key)), Some((down, _))) if key == down => repeating = None,
+            (Ok(Held::Up(_)), _) => {}
+            (Err(RecvTimeoutError::Timeout), Some((key, _))) => {
+                let (Some(provider), Some(code)) = (provider.upgrade(), keymap::lookup(key)) else { return };
+                // A rejected repeat is the same blocked episode `key` reported.
+                let _ = provider.send(&[provider.key_input(code, true)]);
+                repeating = Some((key, Instant::now() + typematic(SPI_GETKEYBOARDSPEED)));
+            }
+            (Err(_), _) => return,
+        }
+    }
+}
+
+/// The user's keyboard repeat delay (SPI_GETKEYBOARDDELAY: 0..=3 for 250 ms
+/// to 1 s) or interval (SPI_GETKEYBOARDSPEED: 0..=31 for 2.5 to 30 per second).
+fn typematic(setting: SYSTEM_PARAMETERS_INFO_ACTION) -> Duration {
+    let mut value = 0u32;
+    // SAFETY: both settings write one u32 to pvParam.
+    let read = unsafe {
+        SystemParametersInfoW(setting, 0, Some((&raw mut value).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0))
+    };
+    // Windows defaults when the setting cannot be read.
+    let value = if read.is_ok() { value } else if setting == SPI_GETKEYBOARDDELAY { 1 } else { 31 };
+    if setting == SPI_GETKEYBOARDDELAY {
+        Duration::from_millis(250 * (u64::from(value.min(3)) + 1))
+    } else {
+        Duration::from_secs_f64(1.0 / (2.5 + f64::from(value.min(31)) * 27.5 / 31.0))
+    }
+}
+
 fn mouse_input(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -217,7 +283,40 @@ impl InputProvider for SendInputProvider {
         if self.intercept_sas(evdev, down) {
             return Ok(());
         }
+        // Modifiers and locks do nothing when repeated.
+        if !keymap::is_modifier(evdev) {
+            let _ = self.repeat.send(if down { Held::Down(evdev) } else { Held::Up(evdev) });
+        }
         self.send(&[self.key_input(code, down)])
+    }
+
+    fn text(&self, text: &str) -> Result<()> {
+        let mut inputs = Vec::with_capacity(text.len() * 2);
+        let mut units = [0u16; 2];
+        for c in text.chars() {
+            match c {
+                '\r' => {}
+                // Programs expect these as keys, not as characters.
+                '\n' | '\t' => {
+                    let Some(code) = keymap::lookup(if c == '\n' { keymap::EV_ENTER } else { keymap::EV_TAB }) else { continue };
+                    inputs.extend([self.key_input(code, true), self.key_input(code, false)]);
+                }
+                // KEYEVENTF_UNICODE delivers the character itself, one
+                // UTF-16 unit per event, whatever the layout.
+                _ => {
+                    for &unit in c.encode_utf16(&mut units).iter() {
+                        for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+                            let ki = KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: unit, dwFlags: flags, time: 0, dwExtraInfo: 0 };
+                            inputs.push(INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } });
+                        }
+                    }
+                }
+            }
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        self.send(&inputs)
     }
 }
 

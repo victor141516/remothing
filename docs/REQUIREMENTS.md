@@ -8,7 +8,7 @@
 | R1.4 identical client and wire protocol | `client/` + `proto.rs` have no platform branches | done |
 | R2.1 DisplayProvider | `DisplayProvider::{list, open, virtual_displays}`, `DisplayInfo{id,name,size,refresh,position,primary,kind}` | done |
 | R2.2 CaptureSession | `FrameInfo{dirty, moved, capture_us}`, `read()` (CPU BGRX), `mapped()`, `gpu_surface()` | done |
-| R2.3 InputProvider | display-relative motion, buttons, wheel v/h, evdev keys mapped per platform (XTest keycodes / PS/2 scancodes) | done |
+| R2.3 InputProvider | display-relative motion, buttons, wheel v/h, evdev keys mapped per platform (XTest keycodes / PS/2 scancodes), held keys repeat and are released with their connection, text as characters (`KEYEVENTF_UNICODE` / X keysyms) | done |
 | R2.4 CursorProvider | `cursor_change()` → shape (RGBA + hotspot) / hidden; XFixes, DXGI pointer shape | done |
 | R2.5 EncoderProvider | FFmpeg H.264 low latency, IDR on demand; NVENC (CUDA / D3D11 zero copy), AMF (D3D11 / host), QuickSync (host), x264; startup probe reports unusable backends | done (AMF/QSV untested: no such GPU here) |
 | R2.6 hot display switch | `DisplayControl::select` → capture loop reopens, `Shared::reconfigure` bumps the epoch → clients get HELLO + full frame + IDR | done |

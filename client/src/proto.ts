@@ -9,6 +9,14 @@ export const S_SIGNAL = 5;
 /** Data-channel piece of a FRAME: flags u8, part u16, parts u16, pad u16, seq u32. */
 export const S_CHUNK = 6;
 export const CHUNK_HEADER_LEN = 12;
+/** UTF-8 text now on the remote clipboard. */
+export const S_CLIPBOARD = 7;
+/** UTF-8 JSON: `{displays: [...], current}`. */
+export const S_DISPLAYS = 8;
+/** UTF-8 JSON: the sound stream (`codec`, `rate`, `channels`, `description`) or why there is none. */
+export const S_AUDIO_INFO = 9;
+/** One encoded sound packet. */
+export const S_AUDIO = 10;
 
 export const C_PING = 1;
 /** Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, n_lost x lost seq u32. */
@@ -23,10 +31,21 @@ export const C_HELLO_ACK = 6;
 export const C_VISIBLE = 7;
 /** UTF-8 text for the server's event log. */
 export const C_EVENT = 8;
+/** UTF-8 text for the remote clipboard. */
+export const C_CLIPBOARD = 9;
 export const C_MOVE = 10;
 export const C_BUTTON = 11;
 export const C_WHEEL = 12;
+/** down u8, evdev code u16: held on the remote side until released. */
 export const C_KEY = 13;
+/** Asks for the display list. */
+export const C_DISPLAYS = 14;
+/** UTF-8 display id to stream. */
+export const C_DISPLAY = 15;
+/** UTF-8 text to type as characters (`\n` is Enter). */
+export const C_TEXT = 16;
+/** on u8: send the session's sound, or stop. */
+export const C_AUDIO = 17;
 
 export const ENC_RAW = 0;
 export const ENC_LZ4 = 1;

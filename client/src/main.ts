@@ -1,13 +1,15 @@
 // Main thread: input capture (sent the moment the event fires, over the
 // WebRTC input channel when frames use the data channel, else its own
-// WebSocket), the peer connection, cursor, stats overlay. Frames are handled
-// in worker.ts.
+// WebSocket), the peer connection, cursor, control bar, stats overlay.
+// Frames are handled in worker.ts.
 
+import { Sound } from './audio';
 import { Input } from './input';
 import { Peer } from './peer';
 import { InputProber } from './probe';
 import { C_PING, S_PONG, now } from './proto';
 import { Stats } from './stats';
+import { Ui, type DisplayEntry } from './ui';
 import type { FromWorker, ToWorker } from './worker';
 
 declare global {
@@ -53,9 +55,13 @@ connectInput();
 setInterval(pingInput, 1000);
 /** Frames go over the data channel (the worker's choice): input follows. */
 let dcPath = false;
-const input = new Input(canvas, (m) => {
-  if (!(dcPath && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
-});
+const input = new Input(
+  canvas,
+  (m) => {
+    if (!(dcPath && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
+  },
+  showPointer,
+);
 
 const stats = new Stats();
 let pingRtt = NaN;
@@ -64,6 +70,24 @@ const prober = new InputProber((x, y) => input.moveTo(x, y), (rtt) => stats.inpu
 
 const worker = new Worker('worker.js', { type: 'module' });
 const toWorker = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+
+const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
+  key: (evdev, down) => input.setKey(evdev, down),
+  text: (text) => input.text(text),
+  clipboard: (text) => toWorker({ type: 'clipboard', text }),
+  listDisplays: () => toWorker({ type: 'displays' }),
+  selectDisplay: (id) => toWorker({ type: 'display', id }),
+  toggleStats: () => (statsEl.hidden = !statsEl.hidden),
+  toggleSound: () => sound.toggle(),
+  layout,
+});
+
+const sound = new Sound({
+  request: (on) => toWorker({ type: 'audio', on }),
+  log: (text) => toWorker({ type: 'event', text }),
+  changed: () => ui.sound(sound.playing, sound.status),
+});
+ui.sound(sound.playing, sound.status);
 
 // `?transport=ws` keeps everything on the WebSocket, `?transport=webrtc` uses
 // the data channel whenever it is up (comparisons, troubleshooting); by
@@ -91,13 +115,37 @@ function onSignal(json: string): void {
 }
 
 // `?scale=1` shows remote pixels 1:1 (cropped when larger than the window);
-// by default a larger remote screen is scaled down to fit.
+// by default a larger remote screen is scaled down to fit what the
+// keyboards leave free (ours, and a phone's own: it shrinks the visual
+// viewport).
 const nativeScale = params.get('scale') === '1';
-function layout(width: number, height: number): void {
+function layout(): void {
+  const { screenWidth: width, screenHeight: height } = input;
+  if (width === 0) return;
   const dpr = window.devicePixelRatio || 1;
-  const fit = nativeScale ? 1 : Math.min(1, (window.innerWidth * dpr) / width, (window.innerHeight * dpr) / height);
+  const view = window.visualViewport;
+  const free = (view?.height ?? window.innerHeight) - ui.reservedBottom;
+  const fit = nativeScale ? 1 : Math.min(1, ((view?.width ?? window.innerWidth) * dpr) / width, (free * dpr) / height);
   canvas.style.width = `${(width * fit) / dpr}px`;
   canvas.style.height = `${(height * fit) / dpr}px`;
+  showPointer();
+}
+window.addEventListener('resize', layout);
+window.visualViewport?.addEventListener('resize', layout);
+
+const pointer = document.getElementById('pointer') as HTMLCanvasElement;
+/** Hot spot of the remote cursor's shape; null while the remote side hides its cursor. */
+let hotSpot: [number, number] | null = null;
+
+/** A finger has no cursor in the browser: with touch input the remote
+ * cursor's shape is drawn over the picture, where the pointer is. */
+function showPointer(): void {
+  pointer.hidden = !input.touch || hotSpot === null || input.screenWidth === 0;
+  if (pointer.hidden || hotSpot === null) return;
+  const r = canvas.getBoundingClientRect();
+  const x = r.left + (input.pointerX * r.width) / input.screenWidth - hotSpot[0];
+  const y = r.top + (input.pointerY * r.height) / input.screenHeight - hotSpot[1];
+  pointer.style.transform = `translate(${x}px, ${y}px)`;
 }
 
 function setCursor(buf: ArrayBuffer): void {
@@ -106,23 +154,23 @@ function setCursor(buf: ArrayBuffer): void {
   const h = v.getUint16(4, true);
   if (w === 0 || h === 0) {
     canvas.style.cursor = 'none';
-    return;
+    hotSpot = null;
+  } else {
+    pointer.width = w;
+    pointer.height = h;
+    pointer.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(buf, 12, w * h * 4), w, h), 0, 0);
+    hotSpot = [v.getUint16(6, true), v.getUint16(8, true)];
+    canvas.style.cursor = `url(${pointer.toDataURL()}) ${hotSpot[0]} ${hotSpot[1]}, default`;
   }
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(buf, 12, w * h * 4), w, h), 0, 0);
-  canvas.style.cursor = `url(${c.toDataURL()}) ${v.getUint16(6, true)} ${v.getUint16(8, true)}, default`;
+  showPointer();
 }
 
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
   switch (m.type) {
     case 'hello':
-      input.screenWidth = m.width;
-      input.screenHeight = m.height;
-      layout(m.width, m.height);
-      window.onresize = () => layout(m.width, m.height);
+      input.setScreen(m.width, m.height);
+      layout();
       break;
     case 'cursor':
       setCursor(m.buf);
@@ -144,6 +192,20 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case 'path':
       dcPath = m.webrtc;
       break;
+    case 'clipboard':
+      ui.remoteClipboard(m.text);
+      break;
+    case 'displays': {
+      const list = JSON.parse(m.json) as { displays: DisplayEntry[]; current: string | null };
+      ui.displays(list.displays, list.current);
+      break;
+    }
+    case 'audioinfo':
+      sound.info(m.json);
+      break;
+    case 'audio':
+      sound.packet(m.buf);
+      break;
   }
 };
 
@@ -155,7 +217,9 @@ toWorker(
   [offscreen],
 );
 statsEl.hidden = !(params.has('stats') || probeEnabled);
-if (!statsEl.hidden) setInterval(() => (statsEl.textContent = `${stats.text()}\n${pipeline}`), 500);
+setInterval(() => {
+  if (!statsEl.hidden) statsEl.textContent = `${stats.text()}\n${pipeline}\nsound ${sound.status}`;
+}, 500);
 // Recent stats go to the server for the admin UI.
 setInterval(() => toWorker({ type: 'report', json: JSON.stringify(stats.brief()) }), 1000);
 // A hidden tab asks for no frames: several open tabs would otherwise each

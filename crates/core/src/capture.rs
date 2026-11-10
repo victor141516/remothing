@@ -4,11 +4,12 @@
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use tokio::sync::watch;
 
 use crate::geom::{MovedRect, Rect};
 use crate::pixels::Differ;
-use crate::platform::{CaptureSession, DisplayInfo, InputProvider, OpenedDisplay, Platform};
+use crate::platform::{CaptureSession, Clipboard, DisplayInfo, InputProvider, OpenedDisplay, Platform};
 use crate::proto;
 use crate::shared::Shared;
 use crate::telemetry::Telemetry;
@@ -16,14 +17,32 @@ use crate::telemetry::Telemetry;
 /// Also bounds how late skipped CPU copies are refreshed after motion stops.
 const FRAME_WAIT: Duration = Duration::from_millis(50);
 const REOPEN_DELAY: Duration = Duration::from_millis(250);
+/// Longest clipboard text relayed between the session and the clients.
+const MAX_CLIPBOARD: usize = 1 << 20;
+
+/// Clipboard text as last seen, and the client that set it (None: the session itself).
+pub type ClipboardText = (Option<u64>, Arc<str>);
 
 /// Selected display, shared between the capture thread, the input socket and the admin API.
-#[derive(Default)]
 pub struct DisplayControl {
     /// Display id the capture thread should switch to.
     request: Mutex<Option<String>>,
     current: RwLock<Option<DisplayInfo>>,
     input: RwLock<Option<Arc<dyn InputProvider>>>,
+    clipboard: RwLock<Option<Arc<dyn Clipboard>>>,
+    clipboard_text: watch::Sender<ClipboardText>,
+}
+
+impl Default for DisplayControl {
+    fn default() -> Self {
+        Self {
+            request: Mutex::default(),
+            current: RwLock::default(),
+            input: RwLock::default(),
+            clipboard: RwLock::default(),
+            clipboard_text: watch::channel((None, Arc::from(""))).0,
+        }
+    }
 }
 
 impl DisplayControl {
@@ -37,6 +56,37 @@ impl DisplayControl {
 
     pub fn input(&self) -> Option<Arc<dyn InputProvider>> {
         self.input.read().unwrap().clone()
+    }
+
+    /// The session's clipboard text, followed across changes.
+    pub fn clipboard_text(&self) -> watch::Receiver<ClipboardText> {
+        self.clipboard_text.subscribe()
+    }
+
+    /// Client `client` put `text` on the session's clipboard.
+    pub fn set_clipboard(&self, client: u64, text: &str) -> Result<()> {
+        if text.len() > MAX_CLIPBOARD {
+            bail!("clipboard text of {} bytes is too long", text.len());
+        }
+        let clipboard = self.clipboard.read().unwrap().clone().context("no clipboard access on this display")?;
+        clipboard.set_text(text)?;
+        self.clipboard_changed(Some(client), text);
+        Ok(())
+    }
+
+    /// Publishes the text unless it is what was last seen (the session
+    /// reports a client's own change back).
+    fn clipboard_changed(&self, client: Option<u64>, text: &str) {
+        if text.len() > MAX_CLIPBOARD {
+            return;
+        }
+        self.clipboard_text.send_if_modified(|(by, last)| {
+            let changed = **last != *text;
+            if changed {
+                (*by, *last) = (client, Arc::from(text));
+            }
+            changed
+        });
     }
 
     fn take_request(&self) -> Option<String> {
@@ -96,7 +146,7 @@ impl CaptureLoop {
 
     /// Streams one display until a switch is requested (Ok) or the session fails (Err).
     fn stream(&self, opened: OpenedDisplay) -> Result<()> {
-        let OpenedDisplay { info, mut capture, input } = opened;
+        let OpenedDisplay { info, mut capture, input, clipboard } = opened;
         let layout = self.keyboard_layout.read().unwrap().clone();
         if let Err(e) = input.set_keyboard_layout(&layout) {
             eprintln!("keyboard layout {layout}: {e:#}");
@@ -108,6 +158,12 @@ impl CaptureLoop {
         let pixels = self.shared.reconfigure(width, height, capture.gpu_surface());
         *self.control.input.write().unwrap() = Some(input);
         *self.control.current.write().unwrap() = Some(info);
+        if let Some(c) = &clipboard {
+            let control = self.control.clone();
+            c.watch(Box::new(move |text| control.clipboard_changed(None, &text)));
+        }
+        // The previous display's clipboard (and its watcher) ends here.
+        *self.control.clipboard.write().unwrap() = clipboard;
 
         let stride = width as usize * 4;
         let mut diff = Differ::new(pixels.geometry);

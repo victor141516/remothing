@@ -1,4 +1,4 @@
-//! Video encoder contracts (lossy layer).
+//! Encoder contracts: video (lossy layer) and sound.
 
 use anyhow::Result;
 
@@ -30,6 +30,9 @@ pub trait EncoderProvider: Send + Sync {
         Vec::new()
     }
     fn create(&self, req: &EncoderRequest) -> Result<Box<dyn VideoEncoder>>;
+    /// Sound encoder for the platform's audio format, the best codec this
+    /// build has. Every codec tried goes to `tried` with its outcome.
+    fn audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioEncoder>>;
 }
 
 pub trait VideoEncoder: Send {
@@ -50,4 +53,17 @@ pub trait VideoEncoder: Send {
     /// quality stays at the encoder's fixed level whenever the cap allows.
     /// Returns false for backends that keep a fixed-quality mode.
     fn set_max_bitrate(&mut self, bits_per_sec: u64) -> bool;
+}
+
+pub trait AudioEncoder: Send {
+    /// The codec as WebCodecs names it: "opus", "mp4a.40.2".
+    fn codec(&self) -> &'static str;
+    /// Configuration the decoder needs besides the packets (AAC's
+    /// AudioSpecificConfig); empty when the packets say it all.
+    fn description(&self) -> &[u8];
+    /// Sample frames (one sample per channel) each `encode` call takes.
+    fn frame_samples(&self) -> usize;
+    /// Encodes one frame of interleaved samples and appends the packet to
+    /// `out`; false while the encoder still needs input for its first one.
+    fn encode(&mut self, pcm: &[i16], out: &mut Vec<u8>) -> Result<bool>;
 }

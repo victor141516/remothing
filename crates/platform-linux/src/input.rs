@@ -1,9 +1,11 @@
 //! Input injection through XTEST, relative to one display's area of the X screen.
 
+use std::sync::Mutex;
+
 use anyhow::{bail, Context, Result};
 use remothing_core::platform::{Button, InputProvider};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{self, Window};
+use x11rb::protocol::xproto::{self, ConnectionExt as _, Window};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
@@ -13,17 +15,46 @@ pub struct XTestInput {
     display: String,
     /// Position of the captured area on the X screen (RandR output origin).
     origin: (i32, i32),
+    spare: Mutex<SpareKeys>,
+}
+
+/// Keycodes the layout leaves without symbols, lent in turn to typed
+/// characters that no key of the layout gives (`text`). XTEST presses keys,
+/// not characters.
+#[derive(Default)]
+struct SpareKeys {
+    codes: Vec<u8>,
+    next: usize,
 }
 
 /// evdev keycodes map to X keycodes with this offset under the evdev XKB rules.
 const EVDEV_OFFSET: u16 = 8;
+const EV_LEFTSHIFT: u16 = 42;
+/// A program reads the key's new symbol when it handles the key press, which
+/// can be after the next characters were typed: with several keys in turn,
+/// the symbol it finds is still the one that was pressed.
+const SPARE_KEYS: usize = 8;
+const XK_TAB: u32 = 0xff09;
+const XK_RETURN: u32 = 0xff0d;
+
+/// The X keysym of a character.
+fn keysym(c: char) -> Option<u32> {
+    Some(match c {
+        '\n' => XK_RETURN,
+        '\t' => XK_TAB,
+        // Latin-1 keysyms are the code points; the rest of Unicode has its own range.
+        ' '..='~' | '\u{a0}'..='\u{ff}' => c as u32,
+        c if c.is_control() => return None,
+        c => 0x0100_0000 | c as u32,
+    })
+}
 
 impl XTestInput {
     pub fn new(display: &str, origin: (i32, i32)) -> Result<Self> {
         let (conn, screen) = x11rb::connect(Some(display)).context("connect to X for input")?;
         let root = conn.setup().roots[screen].root;
         conn.xtest_get_version(2, 2)?.reply()?;
-        Ok(Self { conn, root, display: display.to_string(), origin })
+        Ok(Self { conn, root, display: display.to_string(), origin, spare: Mutex::default() })
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
@@ -38,6 +69,19 @@ impl XTestInput {
             self.fake(xproto::BUTTON_RELEASE_EVENT, button, 0, 0)?;
         }
         Ok(())
+    }
+}
+
+impl Drop for XTestInput {
+    fn drop(&mut self) {
+        // The lent keycodes go back to having no symbol: the next input
+        // connection looks for free ones again.
+        if let Ok(spare) = self.spare.get_mut() {
+            for &code in &spare.codes {
+                let _ = self.conn.change_keyboard_mapping(1, code, 1, &[0]);
+            }
+            let _ = self.conn.flush();
+        }
     }
 }
 
@@ -69,6 +113,56 @@ impl InputProvider for XTestInput {
         let Ok(code) = u8::try_from(evdev + EVDEV_OFFSET) else { return Ok(()) };
         let kind = if down { xproto::KEY_PRESS_EVENT } else { xproto::KEY_RELEASE_EVENT };
         self.fake(kind, code, 0, 0)
+    }
+
+    fn text(&self, text: &str) -> Result<()> {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        // Read every time: the layout can change under us (setxkbmap).
+        let map = self.conn.get_keyboard_mapping(min, max - min + 1)?.reply()?;
+        let per = map.keysyms_per_keycode as usize;
+        let mut syms = map.keysyms;
+        let mut spare = self.spare.lock().unwrap();
+        if spare.codes.is_empty() {
+            spare.codes = (min..=max)
+                .rev()
+                .filter(|&code| syms[(code - min) as usize * per..][..per].iter().all(|&s| s == 0))
+                .take(SPARE_KEYS)
+                .collect();
+        }
+        let shift = (EV_LEFTSHIFT + EVDEV_OFFSET) as u8;
+        for c in text.chars() {
+            let Some(sym) = keysym(c) else { continue };
+            // The first two symbols of a key: alone and with Shift.
+            let key_with = |column: usize| {
+                syms.chunks(per).position(|row| row.get(column) == Some(&sym)).map(|i| min + i as u8)
+            };
+            let (code, shifted) = match (key_with(0), key_with(1)) {
+                (Some(code), _) => (code, false),
+                (None, Some(code)) => (code, true),
+                (None, None) => {
+                    if spare.codes.is_empty() {
+                        continue;
+                    }
+                    let code = spare.codes[spare.next];
+                    spare.next = (spare.next + 1) % spare.codes.len();
+                    self.conn.change_keyboard_mapping(1, code, 1, &[sym])?;
+                    let row = &mut syms[(code - min) as usize * per..][..per];
+                    row.fill(0);
+                    row[0] = sym;
+                    (code, false)
+                }
+            };
+            if shifted {
+                self.fake(xproto::KEY_PRESS_EVENT, shift, 0, 0)?;
+            }
+            self.fake(xproto::KEY_PRESS_EVENT, code, 0, 0)?;
+            self.fake(xproto::KEY_RELEASE_EVENT, code, 0, 0)?;
+            if shifted {
+                self.fake(xproto::KEY_RELEASE_EVENT, shift, 0, 0)?;
+            }
+        }
+        Ok(())
     }
 
     fn set_keyboard_layout(&self, layout: &str) -> Result<()> {

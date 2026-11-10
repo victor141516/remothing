@@ -19,7 +19,10 @@ cd client && npm install && npm run build && cd ..
 
 Requires FFmpeg development libraries (`libavcodec-dev libavformat-dev
 libavutil-dev libswscale-dev`), `libxcb1-dev`, clang (bindgen) and, at runtime,
-`Xvfb`, `setxkbmap` and an X server for real displays.
+`Xvfb`, `setxkbmap` and an X server for real displays. Sound needs `parec`
+(`pulseaudio-utils`) or `pw-record` to record the sound server in use, and
+`pulseaudio` (or PipeWire with WirePlumber, pipewire-pulse and
+`dbus-daemon`) where none runs, as in a container.
 
 ```sh
 cargo build --release -p remothing -p rt-testapp
@@ -38,7 +41,7 @@ docker run --gpus all --shm-size=1g -p 8080:8080 -p 8080:8080/udp -p 8081:8081 \
 ### Windows
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/windows-deps.ps1   # once: libclang + vcpkg static FFmpeg
+powershell -ExecutionPolicy Bypass -File scripts/windows-deps.ps1   # once: libclang + vcpkg static FFmpeg (with libopus)
 . scripts/windows-env.ps1
 cargo build --release -p remothing --features static-ffmpeg
 ```
@@ -59,6 +62,26 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   larger than the window is scaled down to fit (`&scale=1`: 1:1 pixels);
   `&stats` shows the latency overlay. A hidden tab receives nothing until
   it is shown again, so spare tabs cost neither an encoder nor bandwidth.
+  The handle at the top opens the controls: fullscreen (in Chromium over
+  HTTPS it also captures Alt+Tab, the Windows key and Esc for the remote
+  side; hold Esc to leave), which display is streamed, the remote
+  clipboard as a text box (what is copied there appears in it, what is
+  typed or pasted in it is copied there), an on-screen keyboard, and the
+  stats overlay. A held key repeats on the remote side, and everything a
+  client holds is released if it disconnects.
+- On a phone or tablet the screen works as a trackpad: one finger moves the
+  pointer, a tap clicks, a tap with two fingers is the right button, two
+  fingers dragged scroll. `Type` in the controls opens the device's own
+  keyboard.
+- Sound: what the remote session plays is sent along (Opus) and starts with
+  the first click or key in the page; `Sound` in the controls switches it
+  and its tooltip tells whether it plays or why not (so does the last line
+  of the `&stats` overlay, and the admin UI lists what the server tried).
+  Windows: whatever plays on the default playback device. Linux: the
+  PulseAudio or PipeWire server in use, or one started by remothing for
+  the programs of its simulated displays.
+- A stream starts at 5 Mbit/s and rises within the first second or two as
+  far as the link carries, so a slow link is not flooded on connect.
 - Admin UI: `http://127.0.0.1:8081/` (login with the admin token or
   password). Its status page lists what happened to each client's stream
   (path switches, estimate cuts, lost frames, stutters the client saw with

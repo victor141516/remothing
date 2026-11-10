@@ -4,6 +4,7 @@
 //! and [`encode`].
 
 pub mod admin;
+pub mod audio;
 pub mod app;
 pub mod assets;
 pub mod capture;

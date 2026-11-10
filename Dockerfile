@@ -29,9 +29,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && cp target/release/remothing target/release/rt-testapp /usr/local/bin/
 
 FROM base AS runtime
+# pulseaudio: the sound server for the simulated displays' programs (none
+# runs in a container); pulseaudio-utils: `parec`, which records it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11-utils x11-xkb-utils xkb-data openbox xterm fonts-dejavu-core iproute2 \
-      libavcodec60 libavformat60 libswscale7 \
+      libavcodec60 libavformat60 libswscale7 pulseaudio pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
 # NVENC needs the driver's video libraries injected by `--gpus`.
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video

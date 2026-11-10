@@ -5,13 +5,14 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::http::{HeaderName, HeaderValue};
 use axum::routing::get;
 use axum::Router;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::assets;
+use crate::audio::AudioHub;
 use crate::capture::{CaptureLoop, DisplayControl};
 use crate::config::{ConfigFile, Settings};
 use crate::platform::Platform;
@@ -24,6 +25,7 @@ pub struct App {
     pub shared: Arc<Shared>,
     pub control: Arc<DisplayControl>,
     pub telemetry: Arc<Telemetry>,
+    pub audio: Arc<AudioHub>,
     pub settings: RwLock<Settings>,
     pub config: ConfigFile,
     pub keyboard_layout: Arc<RwLock<String>>,
@@ -39,6 +41,16 @@ impl App {
         let mut s = self.settings.write().unwrap();
         f(&mut s);
         self.config.save(&s)
+    }
+
+    /// Streams display `id` from now on (every client follows) and
+    /// remembers it for the next start.
+    pub fn select_display(&self, id: &str) -> Result<()> {
+        if !self.platform.displays().list()?.iter().any(|d| d.id == id) {
+            bail!("unknown display {id}");
+        }
+        self.control.select(id);
+        self.update_settings(|s| s.server.display = id.to_string())
     }
 }
 
@@ -64,6 +76,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         shared: Arc::new(Shared::new(settings.server.tile)),
         control: Arc::new(DisplayControl::default()),
         telemetry: telemetry.clone(),
+        audio: AudioHub::new(platform.clone(), telemetry.clone()),
         keyboard_layout: Arc::new(RwLock::new(settings.input.keyboard_layout.clone())),
         settings: RwLock::new(settings.clone()),
         config,

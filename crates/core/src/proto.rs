@@ -26,6 +26,19 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// Chunk payload: data channel messages must stay within 64 KiB, the size
 /// every browser accepts without negotiation.
 pub const CHUNK_PAYLOAD: usize = 60 * 1024;
+/// UTF-8 text now on the session's clipboard (on connect when not empty,
+/// then on every change another client or the session itself makes).
+pub const S_CLIPBOARD: u8 = 7;
+/// UTF-8 JSON answering C_DISPLAYS or C_DISPLAY: `{"displays":[{"id",
+/// "name","width","height","primary",...}],"current":id}`.
+pub const S_DISPLAYS: u8 = 8;
+/// UTF-8 JSON, after C_AUDIO and whenever it changes: the sound stream
+/// `{"active":true,"codec","rate","channels","description":hex,"source"}`
+/// (`codec` as WebCodecs names it, `description` its out-of-band
+/// configuration) or `{"active":false,"reason","tried":[...]}`.
+pub const S_AUDIO_INFO: u8 = 9;
+/// One encoded sound packet.
+pub const S_AUDIO: u8 = 10;
 
 // Client -> server
 /// client_ts f64 at offset 8; answered with S_PONG on the same path (the
@@ -55,10 +68,24 @@ pub const C_VISIBLE: u8 = 7;
 /// UTF-8 text: something the client noticed (a freeze, a path change and
 /// why), for the server's event log.
 pub const C_EVENT: u8 = 8;
+/// UTF-8 text to put on the session's clipboard.
+pub const C_CLIPBOARD: u8 = 9;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
 pub const C_WHEEL: u8 = 12;
+/// down u8, evdev code u16. A key stays down on the remote side until its
+/// release arrives or the connection that pressed it goes away, so holding
+/// it repeats there as on a local keyboard.
 pub const C_KEY: u8 = 13;
+/// Asks for the display list (answered with S_DISPLAYS).
+pub const C_DISPLAYS: u8 = 14;
+/// UTF-8 display id: stream that display (for every client).
+pub const C_DISPLAY: u8 = 15;
+/// UTF-8 text to type as characters, whatever the remote keyboard layout
+/// (a phone's keyboard gives text, not keys). `\n` is the Enter key.
+pub const C_TEXT: u8 = 16;
+/// on u8: send this client the session's sound (S_AUDIO_INFO, S_AUDIO) or stop.
+pub const C_AUDIO: u8 = 17;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
@@ -99,8 +126,14 @@ pub fn hello(width: u32, height: u32, tile: u32, first_seq: u32) -> Vec<u8> {
 }
 
 pub fn signal(json: &serde_json::Value) -> Vec<u8> {
-    let mut m = vec![S_SIGNAL];
-    m.extend_from_slice(json.to_string().as_bytes());
+    text(S_SIGNAL, &json.to_string())
+}
+
+/// A tagged UTF-8 message.
+pub fn text(tag: u8, text: &str) -> Vec<u8> {
+    let mut m = Vec::with_capacity(1 + text.len());
+    m.push(tag);
+    m.extend_from_slice(text.as_bytes());
     m
 }
 

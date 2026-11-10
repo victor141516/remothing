@@ -107,6 +107,7 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
         "encoder_preferred": app.settings.read().unwrap().encoder.preferred,
         "gpus": gpus,
         "cpu_percent": cpu,
+        "sound": app.audio.status(),
         "clients": app.telemetry.clients(),
         "errors": app.telemetry.errors(),
         "events": app.telemetry.events(),
@@ -133,11 +134,7 @@ struct Select {
 
 async fn select_display(State(app): State<Arc<App>>, headers: HeaderMap, Json(s): Json<Select>) -> ApiResult {
     check(&app, &headers)?;
-    if !app.platform.displays().list().map_err(bad)?.iter().any(|d| d.id == s.id) {
-        return Err(bad(format!("unknown display {}", s.id)));
-    }
-    app.control.select(&s.id);
-    app.update_settings(|st| st.server.display = s.id.clone()).map_err(bad)?;
+    app.select_display(&s.id).map_err(bad)?;
     Ok(Json(json!({"ok": true})).into_response())
 }
 

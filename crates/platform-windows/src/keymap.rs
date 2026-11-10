@@ -24,6 +24,14 @@ pub const EV_DELETE: u16 = 111;
 /// Numpad '.' is Delete with NumLock off; it triggers the SAS on real keyboards too.
 pub const EV_KPDOT: u16 = 83;
 
+pub const EV_TAB: u16 = 15;
+pub const EV_ENTER: u16 = 28;
+
+/// Shift, Ctrl, Alt, Meta and the lock keys (evdev codes).
+pub fn is_modifier(evdev: u16) -> bool {
+    matches!(evdev, 29 | 42 | 54 | 56 | 58 | 69 | 70 | 97 | 100 | 125 | 126)
+}
+
 pub fn lookup(evdev: u16) -> Option<KeyCode> {
     let scan = |code| Some(KeyCode::Scan { code, extended: false });
     let ext = |code| Some(KeyCode::Scan { code, extended: true });

@@ -58,10 +58,12 @@ pub struct XvfbManager {
     instances: Mutex<BTreeMap<u32, Arc<XvfbInstance>>>,
     /// Started inside each new display (window manager, app...), via `sh -c`.
     session_command: Option<String>,
+    /// `PULSE_SERVER` for the sessions, when the sound server is our own.
+    pulse_server: Option<String>,
 }
 
 /// Children die with the server instead of lingering.
-fn die_with_parent(cmd: &mut Command) {
+pub(crate) fn die_with_parent(cmd: &mut Command) {
     // SAFETY: prctl is async-signal-safe.
     unsafe {
         cmd.pre_exec(|| {
@@ -72,8 +74,8 @@ fn die_with_parent(cmd: &mut Command) {
 }
 
 impl XvfbManager {
-    pub fn new(session_command: Option<String>) -> Self {
-        Self { instances: Mutex::new(BTreeMap::new()), session_command }
+    pub fn new(session_command: Option<String>, pulse_server: Option<String>) -> Self {
+        Self { instances: Mutex::new(BTreeMap::new()), session_command, pulse_server }
     }
 
     pub fn list(&self) -> Vec<Arc<XvfbInstance>> {
@@ -134,6 +136,9 @@ impl XvfbManager {
         if let Some(command) = &self.session_command {
             let mut session = Command::new("sh");
             session.args(["-c", command]).env("DISPLAY", instance.display()).stdin(Stdio::null());
+            if let Some(address) = &self.pulse_server {
+                session.env("PULSE_SERVER", address);
+            }
             die_with_parent(&mut session);
             let child = session.spawn().with_context(|| format!("start session command {command:?}"))?;
             instance.children.lock().unwrap().push(child);

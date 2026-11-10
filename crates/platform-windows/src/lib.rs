@@ -1,9 +1,11 @@
 //! Windows providers: DXGI Desktop Duplication capture into a shared D3D11
-//! texture, SendInput injection, input-desktop following, DXGI/NVML GPU
-//! monitor and the Windows service. The encoder provider is injected by the
-//! binary. Built only on Windows.
+//! texture, SendInput injection, input-desktop following, clipboard, WASAPI
+//! loopback sound, DXGI/NVML GPU monitor and the Windows service. The
+//! encoder provider is injected by the binary. Built only on Windows.
 #![cfg(windows)]
 
+mod audio;
+mod clipboard;
 mod cursor;
 mod desktop;
 mod dxgi;
@@ -18,10 +20,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use remothing_core::encode::EncoderProvider;
-use remothing_core::platform::{DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor};
+use remothing_core::platform::{
+    AudioSource, Clipboard, DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor,
+};
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
+use crate::clipboard::WindowClipboard;
 use crate::dxgi::DxgiSession;
 use crate::input::SendInputProvider;
 use crate::monitor::WindowsMonitor;
@@ -41,8 +46,13 @@ impl DisplayProvider for WindowsDisplays {
     fn open(&self, id: &str) -> Result<OpenedDisplay> {
         let out = dxgi::outputs()?.into_iter().find(|o| o.info.id == id).with_context(|| format!("display {id} not found"))?;
         let capture = DxgiSession::open(&out)?;
-        let input = Arc::new(SendInputProvider::new(&out.info));
-        Ok(OpenedDisplay { info: out.info, capture: Box::new(capture), input })
+        let input = SendInputProvider::new(&out.info);
+        // Streaming works without it (e.g. no access to the window station).
+        let clipboard = WindowClipboard::new()
+            .inspect_err(|e| eprintln!("clipboard unavailable: {e:#}"))
+            .ok()
+            .map(|c| Arc::new(c) as Arc<dyn Clipboard>);
+        Ok(OpenedDisplay { info: out.info, capture: Box::new(capture), input, clipboard })
     }
 }
 
@@ -91,5 +101,18 @@ impl Platform for WindowsPlatform {
 
     fn monitor(&self) -> &dyn SystemMonitor {
         &self.monitor
+    }
+
+    fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>> {
+        match audio::Loopback::open() {
+            Ok(loopback) => {
+                tried.push(format!("{}: ok", loopback.name()));
+                Ok(Box::new(loopback))
+            }
+            Err(e) => {
+                tried.push(format!("WASAPI loopback: {e:#}"));
+                Err(e)
+            }
+        }
     }
 }

@@ -223,3 +223,40 @@ Single-path profiles (WebSocket) are unchanged or better: LAN 264 / 175 /
 20 / 31 and full 19 / 24 (were 20 / 76 and 20 / 77), Wi-Fi 50M/10ms +-3 with
 2 % loss scroll 20 / 77 (was 22-30 / 245-309), mobile 6M/50ms +-10 with
 0.5 % loss 92 / 150 / 53 fps (were 99 / 154 / 52).
+
+## Start with little traffic
+
+A client used to start at the configured bandwidth: the first full screen
+went out as fast as a LAN takes it (a keyframe of about 500 KB, 0.7 s of a
+6 Mbit/s link by itself). Now it starts at 5 Mbit/s and the estimate
+follows what the link delivers (see ARCHITECTURE, link model). Same bench
+container and profiles as above, 10 s runs, capture→draw p50 / p99:
+
+| profile | first keyframe | estimate in the first 1.3 s | box | scroll | full |
+|---|---|---|---|---|---|
+| LAN | 69 KB at 0.25 s | video cap 7 → 58-123 Mbit/s at 0.5 s | 286 fps, 3 / 7 | 174 fps, 9 / 32 | 195 fps, 8 / 35 |
+| WAN 50M/20ms | 69 KB at 0.2 s | cap 7 → 34-39 at 0.5 s, → 105-109 at 1.0 s | 194 fps, 14 / 47 | 171 fps, 20 / 25 | 180 fps, 19 / 36 |
+| 18M/40ms | 69 KB at 0.2 s | cap 7 → 19-21 at 0.5 s; first cut at 22.5 Mbit/s (queue 37 ms) | 205 fps, 26 / 80 | 168 fps, 32 / 108 | 172 fps, 34 / 57 |
+| mobile 6M/50ms +-10, 0.5 % loss | 69 KB at 0.2 s | no rise; first cut at 6.6-7.2 Mbit/s (queue 37-43 ms) | 169 fps, 45 / 145 | 121 fps, 66 / 218 | 53 fps, 82 / 151 |
+| Wi-Fi 50M/10ms +-3, 2 % loss | 69 KB at 0.2 s | cap 7 → 31-33 at 0.5 s; cuts to 16-27 after | 189 fps, 13 / 74 | 140 fps, 26 / 105 | 96 fps, 38 / 146 |
+
+Doubling the estimate every window without the bound to what was delivered
+reached 270 Mbit/s on the 18 Mbit/s link before the first late ACK.
+
+## Sound
+
+A 3 s sine played by a program of the session, received in headless
+Chromium (pieces handed to the AudioContext, measured in the page):
+
+| server | capture path | codec | tone received | queued ahead of the clock |
+|---|---|---|---|---|
+| Windows 11 | WASAPI loopback | Opus, 10 ms packets | 3.0 s, level as played | 59-61 ms |
+| Linux container | own PulseAudio, `parec` | Opus | 3.00 s at 1000 Hz | 59-71 ms |
+| Linux, PipeWire only | own PipeWire, `parec` via pipewire-pulse | Opus | 3.01 s at 1001 Hz | 60-82 ms |
+| Linux, PipeWire without pulseaudio-utils | `pw-record` | Opus | 3.02 s | 31-72 ms |
+| Linux, a user's PulseAudio, server as root | `parec` on `/run/user/1000` | Opus | 3.00 s at 998 Hz | 59-71 ms |
+| Linux, no sound server and none installed | - | - | client and admin show what was tried | - |
+
+With FFmpeg built without libopus the same Windows capture went out as AAC
+(141 kbit/s measured). The ALSA loopback path was not exercised (no
+snd-aloop module in the test kernel).

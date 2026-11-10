@@ -1,9 +1,12 @@
 //! Linux providers: simulated displays (Xvfb + shared memory + XDamage) and
 //! real X11 displays (RandR outputs, XShm + XDamage); XTest input, XFixes
-//! cursor. The encoder provider is injected by the binary.
+//! cursor, X selections for the clipboard, sound through whatever sound
+//! server there is. The encoder provider is injected by the binary.
 //! Wayland sessions are not supported (would need PipeWire/portal or KMS).
 #![cfg(target_os = "linux")]
 
+mod audio;
+mod clipboard;
 mod cursor;
 mod input;
 mod monitor;
@@ -17,9 +20,11 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
-    DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor, VirtualDisplays,
+    AudioSource, Clipboard, DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor, VirtualDisplays,
 };
 
+use crate::audio::SoundServer;
+use crate::clipboard::X11Clipboard;
 use crate::input::XTestInput;
 use crate::monitor::LinuxMonitor;
 use crate::xvfb::XvfbManager;
@@ -80,11 +85,19 @@ impl DisplayProvider for LinuxDisplays {
     }
 
     fn open(&self, id: &str) -> Result<OpenedDisplay> {
+        // Streaming works without it (e.g. an X server without XFixes).
+        let clipboard = |display: &str| {
+            X11Clipboard::new(display)
+                .inspect_err(|e| eprintln!("clipboard unavailable on {display}: {e:#}"))
+                .ok()
+                .map(|c| Arc::new(c) as Arc<dyn Clipboard>)
+        };
         if let Some(instance) = self.xvfb.get(id) {
             let display = instance.display();
             let capture = XvfbSession::open(&display, instance.shmid, instance.clone())?;
             let input = Arc::new(XTestInput::new(&display, (0, 0))?);
-            return Ok(OpenedDisplay { info: instance.info(), capture: Box::new(capture), input });
+            let clipboard = clipboard(&display);
+            return Ok(OpenedDisplay { info: instance.info(), capture: Box::new(capture), input, clipboard });
         }
         if let Some(rest) = id.strip_prefix("x11:") {
             // id = "x11:<display>:<output>"; the display itself may contain ':'.
@@ -92,7 +105,7 @@ impl DisplayProvider for LinuxDisplays {
             let info = x11::list(display)?.into_iter().find(|i| i.id == id).context("output no longer active")?;
             let capture = x11::X11Session::open(display, &info)?;
             let input = Arc::new(XTestInput::new(display, (info.x, info.y))?);
-            return Ok(OpenedDisplay { info, capture: Box::new(capture), input });
+            return Ok(OpenedDisplay { info, capture: Box::new(capture), input, clipboard: clipboard(display) });
         }
         bail!("unknown display {id}")
     }
@@ -106,14 +119,19 @@ pub struct LinuxPlatform {
     displays: LinuxDisplays,
     encoders: Box<dyn EncoderProvider>,
     monitor: LinuxMonitor,
+    sound: SoundServer,
 }
 
 impl LinuxPlatform {
     pub fn new(options: LinuxOptions, encoders: Box<dyn EncoderProvider>) -> Result<Self> {
+        // Before the sessions: their programs are told where to play.
+        let sound = SoundServer::start();
+        let xvfb = XvfbManager::new(options.session_command, sound.address().map(Into::into));
         let p = Self {
-            displays: LinuxDisplays { xvfb: XvfbManager::new(options.session_command), x11_displays: options.x11_displays },
+            displays: LinuxDisplays { xvfb, x11_displays: options.x11_displays },
             encoders,
             monitor: LinuxMonitor::new(),
+            sound,
         };
         if let Some((w, h)) = options.virtual_on_start {
             p.displays.xvfb.create(w, h)?;
@@ -137,5 +155,9 @@ impl Platform for LinuxPlatform {
 
     fn monitor(&self) -> &dyn SystemMonitor {
         &self.monitor
+    }
+
+    fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>> {
+        self.sound.open(tried)
     }
 }
