@@ -1,9 +1,10 @@
-//! Latest screen contents, per-tile motion history and per-client state.
+//! Per-tile motion history and per-client state over the shared screen copy
+//! ([`Pixels`]).
 //!
-//! The capture thread is the only writer of `fb`. Each client pulls the union
-//! of tiles changed since its last frame, so a slow client skips intermediate
-//! frames instead of queueing them (bounded latency, always converges to the
-//! exact current screen).
+//! The capture thread updates pixels in place and commits tile metadata here.
+//! Each client pulls the union of tiles changed since its last frame, so a slow
+//! client skips intermediate frames instead of queueing them (bounded latency,
+//! always converges to the exact current screen).
 //!
 //! Every tile is shown by the client either from the lossless layer (exact
 //! pixels) or from the video layer (H.264 of the whole screen). Tiles that keep
@@ -19,6 +20,8 @@ use anyhow::Result;
 
 use crate::encode::VideoEncoder;
 use crate::geom::{MovedRect, Rect};
+pub use crate::pixels::Geometry;
+use crate::pixels::{Differ, Pixels};
 use crate::platform::GpuSurface;
 use crate::proto::{self, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
 
@@ -37,13 +40,8 @@ pub struct Shared {
 struct Inner {
     /// Bumped whenever the streamed display (and so the geometry) changes.
     epoch: u64,
-    width: u32,
-    height: u32,
     tile: u32,
-    tiles_x: u32,
-    tiles_y: u32,
-    /// BGRX, stride = width * 4.
-    fb: Vec<u8>,
+    pixels: Arc<Pixels>,
     /// Capture GPU surface for zero-copy encoders.
     surface: Option<GpuSurface>,
     /// Last three change times per tile, most recent first (0 = never).
@@ -55,6 +53,8 @@ struct Inner {
 struct ClientState {
     id: u64,
     epoch: u64,
+    /// The client's encoder reads the capture GPU surface (no CPU pixels needed for video).
+    gpu_input: bool,
     /// Content changed since last sent.
     dirty: Vec<bool>,
     /// Client currently shows this tile from the video layer.
@@ -86,13 +86,6 @@ impl ClientState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Geometry {
-    pub width: u32,
-    pub height: u32,
-    pub tile: u32,
-}
-
 pub enum Pull {
     Frame { msg: Vec<u8>, key: bool },
     /// The display changed: send HELLO, recreate the encoder, then pull again.
@@ -101,46 +94,11 @@ pub enum Pull {
     Idle { wake_at_us: Option<u64> },
 }
 
-/// Calls `f(tile_index)` for every tile overlapping `r` (already clipped).
-fn for_each_tile(r: Rect, g: &Geometry, mut f: impl FnMut(usize)) {
-    let (t, tiles_x) = (g.tile, g.width.div_ceil(g.tile));
-    if r.w == 0 || r.h == 0 {
-        return;
-    }
-    for ty in r.y / t..=(r.y + r.h - 1) / t {
-        for tx in r.x / t..=(r.x + r.w - 1) / t {
-            f((ty * tiles_x + tx) as usize);
-        }
-    }
-}
-
-/// Applies a screen move to a BGRX buffer, correct for overlapping source and destination.
-pub(crate) fn apply_move(buf: &mut [u8], stride: usize, m: &MovedRect) {
-    let (w, h) = (m.dst.w as usize * 4, m.dst.h as usize);
-    let (sx, dx) = (m.src_x as usize * 4, m.dst.x as usize * 4);
-    let row = |i: usize| -> (usize, usize) {
-        ((m.src_y as usize + i) * stride + sx, (m.dst.y as usize + i) * stride + dx)
-    };
-    // Moving down: walk rows bottom-up so unread source rows are not overwritten.
-    if m.dst.y > m.src_y {
-        for i in (0..h).rev() {
-            let (s, d) = row(i);
-            buf.copy_within(s..s + w, d);
-        }
-    } else {
-        for i in 0..h {
-            let (s, d) = row(i);
-            buf.copy_within(s..s + w, d);
-        }
-    }
-}
-
 /// Calls `f(first_tile, tile_count, rect)` for each horizontal run of set flags,
-/// clearing them when `clear`.
+/// clearing them when `clear`. Every rect lies within one tile row.
 fn for_each_run(flags: &mut [bool], g: &Geometry, clear: bool, mut f: impl FnMut(usize, usize, Rect)) {
-    let (t, tiles_x) = (g.tile, g.width.div_ceil(g.tile));
-    let tiles_y = g.height.div_ceil(t);
-    for ty in 0..tiles_y {
+    let (t, tiles_x) = (g.tile, g.tiles_x());
+    for ty in 0..g.height.div_ceil(t) {
         let row = &mut flags[(ty * tiles_x) as usize..((ty + 1) * tiles_x) as usize];
         let mut tx = 0;
         while tx < tiles_x {
@@ -162,22 +120,14 @@ fn for_each_run(flags: &mut [bool], g: &Geometry, clear: bool, mut f: impl FnMut
     }
 }
 
-impl Inner {
-    fn geometry(&self) -> Geometry {
-        Geometry { width: self.width, height: self.height, tile: self.tile }
-    }
-
-    fn configure(&mut self, width: u32, height: u32, surface: Option<GpuSurface>) {
-        self.width = width;
-        self.height = height;
-        self.tiles_x = width.div_ceil(self.tile);
-        self.tiles_y = height.div_ceil(self.tile);
-        let n = (self.tiles_x * self.tiles_y) as usize;
-        self.fb = vec![0; (width * height * 4) as usize];
-        self.surface = surface;
-        self.changes = vec![[0; 3]; n];
-        self.epoch += 1;
-    }
+/// What the capture thread may skip or must refresh (see [`Shared::capture_hints`]).
+pub struct CaptureHints {
+    /// Shown only from video by every client, all reading the GPU surface:
+    /// changes need no CPU readback.
+    pub skip: Vec<bool>,
+    /// Unchanged for a while: CPU copies skipped earlier should be refreshed
+    /// before the tile is refined back to lossless.
+    pub settled: Vec<bool>,
 }
 
 impl Shared {
@@ -185,12 +135,8 @@ impl Shared {
         Self {
             inner: Mutex::new(Inner {
                 epoch: 0,
-                width: 0,
-                height: 0,
                 tile,
-                tiles_x: 0,
-                tiles_y: 0,
-                fb: Vec::new(),
+                pixels: Arc::new(Pixels::new(Geometry { width: 0, height: 0, tile })),
                 surface: None,
                 changes: Vec::new(),
                 cursor: None,
@@ -200,18 +146,23 @@ impl Shared {
         }
     }
 
-    /// Switches to a new display: geometry, blank framebuffer, every client
-    /// resynchronised (HELLO + full frame + keyframe).
-    pub fn reconfigure(&self, width: u32, height: u32, surface: Option<GpuSurface>) {
+    /// Switches to a new display: geometry, blank screen copy, every client
+    /// resynchronised (HELLO + full frame + keyframe). Returns the new copy.
+    pub fn reconfigure(&self, width: u32, height: u32, surface: Option<GpuSurface>) -> Arc<Pixels> {
         let mut g = self.inner.lock().unwrap();
-        g.configure(width, height, surface);
+        let geometry = Geometry { width, height, tile: g.tile };
+        g.pixels = Arc::new(Pixels::new(geometry));
+        g.changes = vec![[0; 3]; geometry.tiles()];
+        g.surface = surface;
+        g.epoch += 1;
         for c in &g.clients {
             c.waker.unpark();
         }
+        g.pixels.clone()
     }
 
     pub fn geometry(&self) -> Geometry {
-        self.inner.lock().unwrap().geometry()
+        self.inner.lock().unwrap().pixels.geometry
     }
 
     pub fn new_client_id(&self) -> u64 {
@@ -226,6 +177,7 @@ impl Shared {
             id,
             // Forces a Reset on the first pull.
             epoch: u64::MAX,
+            gpu_input: false,
             dirty: Vec::new(),
             video: Vec::new(),
             stale: Vec::new(),
@@ -243,6 +195,13 @@ impl Shared {
 
     pub fn remove_client(&self, id: u64) {
         self.inner.lock().unwrap().clients.retain(|c| c.id != id);
+    }
+
+    /// Whether the client's current encoder reads the capture GPU surface.
+    pub fn set_gpu_input(&self, id: u64, gpu_input: bool) {
+        if let Some(c) = self.inner.lock().unwrap().clients.iter_mut().find(|c| c.id == id) {
+            c.gpu_input = gpu_input;
+        }
     }
 
     pub fn set_cursor(&self, msg: Vec<u8>) {
@@ -268,6 +227,7 @@ impl Shared {
     pub fn drop_video(&self, id: u64) {
         let mut g = self.inner.lock().unwrap();
         if let Some(c) = g.clients.iter_mut().find(|c| c.id == id) {
+            c.gpu_input = false;
             for t in 0..c.video.len() {
                 if std::mem::take(&mut c.video[t]) {
                     c.dirty[t] = true;
@@ -277,36 +237,46 @@ impl Shared {
         }
     }
 
-    /// Publishes the moves and the tiles found changed by `diff` (whose copy
-    /// holds the new pixels). Only changed tiles are copied under the lock.
-    pub fn commit(&self, diff: &TileDiff, capture_us: u64) {
+    /// Per-tile hints for the capture thread of a GPU-based session.
+    pub fn capture_hints(&self, now: u64) -> CaptureHints {
+        let g = self.inner.lock().unwrap();
+        let live: Vec<&ClientState> = g.clients.iter().filter(|c| c.epoch == g.epoch).collect();
+        let n = g.changes.len();
+        let skip = (0..n)
+            .map(|t| !live.is_empty() && live.iter().all(|c| c.gpu_input && c.video[t]))
+            .collect();
+        let settled = g.changes.iter().map(|ch| now.saturating_sub(ch[0]) >= COOL_US / 2).collect();
+        CaptureHints { skip, settled }
+    }
+
+    /// Publishes what `diff` found: replays its moves for every client and
+    /// marks its changed tiles. `refresh` = CPU copies caught up after being
+    /// skipped (not new screen changes: motion history is left alone).
+    pub fn commit(&self, diff: &Differ, capture_us: u64, refresh: bool) {
         if diff.changed.is_empty() && diff.moves.is_empty() {
             return;
         }
         let mut guard = self.inner.lock().unwrap();
         let g = &mut *guard;
-        let geometry = g.geometry();
+        let geometry = g.pixels.geometry;
         if geometry != diff.geometry {
             return;
         }
-        let stride = g.width as usize * 4;
+        let (t, tiles_x) = (geometry.tile, geometry.tiles_x());
         for m in &diff.moves {
-            apply_move(&mut g.fb, stride, m);
             let src = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
             let (dx, dy) = (m.dst.x as i64 - m.src_x as i64, m.dst.y as i64 - m.src_y as i64);
-            let t = geometry.tile;
-            let tiles_x = geometry.width.div_ceil(t);
             for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
-                for_each_tile(m.dst, &geometry, |i| c.stale[i] = true);
+                geometry.for_each_tile(m.dst, |i| c.stale[i] = true);
                 if c.copies.len() >= MAX_PENDING_COPIES {
-                    for_each_tile(m.dst, &geometry, |i| c.dirty[i] = true);
+                    geometry.for_each_tile(m.dst, |i| c.dirty[i] = true);
                     continue;
                 }
                 // The client replays the move on its lossless layer; source tiles it
                 // does not hold exactly (unsent changes, video) land shifted in the
                 // destination, so exactly those destination areas are resent.
                 let mut unsynced = Vec::new();
-                for_each_tile(src, &geometry, |i| {
+                geometry.for_each_tile(src, |i| {
                     if c.dirty[i] || c.video[i] {
                         let (tx, ty) = (i as u32 % tiles_x * t, i as u32 / tiles_x * t);
                         let x0 = (tx as i64).max(src.x as i64) + dx;
@@ -319,20 +289,21 @@ impl Shared {
                     }
                 });
                 for r in unsynced.into_iter().filter_map(|r| r.clip(geometry.width, geometry.height)) {
-                    for_each_tile(r, &geometry, |i| c.dirty[i] = true);
+                    geometry.for_each_tile(r, |i| c.dirty[i] = true);
                 }
                 c.copies.push(*m);
             }
         }
         for &idx in &diff.changed {
-            let (x0, len, y0, y1) = diff.tile_span(idx);
-            for o in (y0..y1).map(|y| y * stride + x0) {
-                g.fb[o..o + len].copy_from_slice(&diff.copy[o..o + len]);
+            if !refresh {
+                let ch = &mut g.changes[idx];
+                *ch = [capture_us, ch[0], ch[1]];
             }
-            let ch = &mut g.changes[idx];
-            *ch = [capture_us, ch[0], ch[1]];
             for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
-                c.dirty[idx] = true;
+                // A refreshed tile only matters to clients showing it losslessly.
+                if !refresh || !c.video[idx] {
+                    c.dirty[idx] = true;
+                }
                 c.stale[idx] = true;
             }
         }
@@ -346,14 +317,14 @@ impl Shared {
         }
     }
 
-    /// Builds the next FRAME for this client: lossless rects (horizontal runs
-    /// of tiles, LZ4), tile layer switches, and an H.264 frame when any video
-    /// tile changed. Without an encoder everything stays lossless.
+    /// Builds the next FRAME for this client: screen moves, lossless rects
+    /// (horizontal runs of tiles, LZ4), tile layer switches, and an H.264 frame
+    /// when any video tile changed. Without an encoder everything stays lossless.
     pub fn pull(&self, id: u64, codec: &mut ClientCodec, force_key: bool) -> Result<Pull> {
         let now = proto::now_us();
         let mut guard = self.inner.lock().unwrap();
-        let geometry = guard.geometry();
-        let Inner { epoch, fb, changes, clients, surface, .. } = &mut *guard;
+        let Inner { epoch, pixels, changes, clients, surface, .. } = &mut *guard;
+        let geometry = pixels.geometry;
         let Some(c) = clients.iter_mut().find(|c| c.id == id) else {
             return Ok(Pull::Idle { wake_at_us: None });
         };
@@ -362,6 +333,7 @@ impl Shared {
                 return Ok(Pull::Idle { wake_at_us: None });
             }
             c.epoch = *epoch;
+            c.gpu_input = false;
             c.reset(changes.len(), now);
             codec.cost = vec![geometry.tile * geometry.tile; changes.len()];
             return Ok(Pull::Reset(geometry));
@@ -413,19 +385,12 @@ impl Shared {
             return Ok(Pull::Idle { wake_at_us });
         }
 
-        // Gather lossless rects (raw) under the lock; compress after releasing it.
-        let stride = geometry.width as usize * 4;
-        codec.raw.clear();
         codec.rects.clear();
-        for_each_run(&mut c.send, &geometry, false, |first, n, r| {
-            let bx = r.x as usize * 4;
-            for y in r.y..r.y + r.h {
-                let o = y as usize * stride + bx;
-                codec.raw.extend_from_slice(&fb[o..o + r.w as usize * 4]);
-            }
-            codec.rects.push((r, first, n));
-        });
-
+        for_each_run(&mut c.send, &geometry, false, |first, n, r| codec.rects.push((r, first, n)));
+        codec.encoder_rects.clear();
+        if video_dirty {
+            for_each_run(&mut c.stale, &geometry, true, |_, _, r| codec.encoder_rects.push(r));
+        }
         if !c.pending {
             c.oldest_us = now;
             c.newest_us = now;
@@ -435,24 +400,33 @@ impl Shared {
         let (seq, oldest_us, newest_us) = (c.seq, c.oldest_us, c.newest_us);
         codec.copies.clear();
         codec.copies.append(&mut c.copies);
+        let (pixels, surface) = (pixels.clone(), surface.clone());
+        drop(guard);
 
+        // Pixels are read band by band without the metadata lock; content newer
+        // than the metadata is harmless (those tiles are dirty again).
+        codec.raw.clear();
+        for &(r, _, _) in &codec.rects {
+            pixels.read_rect(r, &mut codec.raw);
+        }
         let load_start = proto::now_us();
         let encoder = if video_dirty { codec.encoder.as_mut() } else { None };
         let loaded = encoder.is_some();
         if let Some(e) = encoder {
-            let mut stale = Vec::new();
-            if c.stale.iter().all(|&s| s) {
-                c.stale.fill(false);
-                stale.push(Rect::new(0, 0, geometry.width, geometry.height));
-            } else {
-                for_each_run(&mut c.stale, &geometry, true, |_, _, r| stale.push(r));
-            }
             match (e.gpu_input(), surface.as_ref()) {
-                (true, Some(s)) => e.load_gpu(s, &stale)?,
-                _ => e.load_cpu(fb, stride, &stale)?,
+                (true, Some(s)) => e.load_gpu(s, &codec.encoder_rects)?,
+                _ => {
+                    let stride = geometry.stride();
+                    for r in &codec.encoder_rects {
+                        // Rects come per tile row: hand the encoder that band.
+                        pixels.with_band(r.y / geometry.tile, |band, y0| {
+                            e.load_cpu(band, stride, &[Rect::new(r.x, r.y - y0, r.w, r.h)])
+                        })?;
+                    }
+                }
             }
         }
-        drop(guard);
+        let upload_us = proto::now_us() - load_start;
 
         let mut msg = Vec::with_capacity(FRAME_HEADER_LEN + codec.raw.len() / 2 + 64 * 1024);
         msg.resize(FRAME_HEADER_LEN, 0);
@@ -495,8 +469,9 @@ impl Shared {
         let mut key = false;
         let mut encode_us = 0u32;
         if loaded {
+            let encode_start = proto::now_us();
             let v = codec.encoder.as_mut().expect("loaded implies encoder").encode(force_key)?;
-            encode_us = (proto::now_us() - load_start) as u32;
+            encode_us = (proto::now_us() - encode_start) as u32;
             key = v.key;
             msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 };
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
@@ -510,6 +485,7 @@ impl Shared {
         msg[32..40].copy_from_slice(&now.to_le_bytes());
         msg[40..44].copy_from_slice(&encode_us.to_le_bytes());
         msg[44..46].copy_from_slice(&(codec.copies.len() as u16).to_le_bytes());
+        msg[46..48].copy_from_slice(&((upload_us / 10).min(u16::MAX as u64) as u16).to_le_bytes());
         Ok(Pull::Frame { msg, key })
     }
 
@@ -527,191 +503,6 @@ pub struct Tuning {
     pub max_lossless_frame_kb: u64,
 }
 
-/// Capture-thread tile differ: compares new pixels against its own copy of the
-/// screen without holding the shared lock, so only truly changed tiles are
-/// published (damage over-reports: blinking redraws, identical repaints...).
-pub struct TileDiff {
-    geometry: Geometry,
-    tiles_x: u32,
-    /// BGRX, stride = width * 4: the screen as last published.
-    copy: Vec<u8>,
-    touched: Vec<bool>,
-    changed: Vec<usize>,
-    /// Moves applied by the last `diff`, replayed by `commit`.
-    moves: Vec<MovedRect>,
-    /// Large changes to skip before trying scroll detection again after a miss
-    /// (keeps the cost off full-screen video content).
-    scroll_backoff: u32,
-    /// Scratch for scroll detection: old row hash -> row.
-    row_index: std::collections::HashMap<u64, u32>,
-}
-
-impl TileDiff {
-    pub fn new(geometry: Geometry) -> Self {
-        let tiles_x = geometry.width.div_ceil(geometry.tile);
-        let n = (tiles_x * geometry.height.div_ceil(geometry.tile)) as usize;
-        Self {
-            geometry,
-            tiles_x,
-            copy: vec![0; (geometry.width * geometry.height * 4) as usize],
-            touched: vec![false; n],
-            changed: Vec::new(),
-            moves: Vec::new(),
-            scroll_backoff: 0,
-            row_index: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Tile `idx` as (x offset in bytes, row length in bytes, first row, end row).
-    fn tile_span(&self, idx: usize) -> (usize, usize, usize, usize) {
-        let g = &self.geometry;
-        let t = g.tile;
-        let (tx, ty) = (idx as u32 % self.tiles_x, idx as u32 / self.tiles_x);
-        let x0 = (tx * t) as usize * 4;
-        let len = ((tx + 1) * t).min(g.width) as usize * 4 - x0;
-        (x0, len, (ty * t) as usize, ((ty + 1) * t).min(g.height) as usize)
-    }
-
-    /// Applies `moved` to the copy (so moved content is not seen as changed),
-    /// then compares the `rects` areas of `src` (full-display BGRX, `stride`
-    /// bytes per row) tile by tile; changed tiles are copied in and listed for `commit`.
-    pub fn diff(&mut self, src: &[u8], stride: usize, rects: &[Rect], moved: &[MovedRect]) -> usize {
-        let g = self.geometry;
-        let t = g.tile;
-        let own_stride = g.width as usize * 4;
-        self.moves.clear();
-        for m in moved {
-            let src_rect = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
-            if src_rect.clip(g.width, g.height) == Some(src_rect) && m.dst.clip(g.width, g.height) == Some(m.dst) {
-                apply_move(&mut self.copy, own_stride, m);
-                self.moves.push(*m);
-            }
-        }
-        if moved.is_empty() {
-            if let Some(m) = self.detect_scroll(src, stride, rects) {
-                apply_move(&mut self.copy, own_stride, &m);
-                self.moves.push(m);
-            }
-        }
-        for r in rects.iter().filter_map(|r| r.clip(g.width, g.height)) {
-            for ty in r.y / t..=(r.y + r.h - 1) / t {
-                for tx in r.x / t..=(r.x + r.w - 1) / t {
-                    self.touched[(ty * self.tiles_x + tx) as usize] = true;
-                }
-            }
-        }
-        self.changed.clear();
-        for idx in 0..self.touched.len() {
-            if !std::mem::take(&mut self.touched[idx]) {
-                continue;
-            }
-            let mut differs = false;
-            let (x0, len, y0, y1) = self.tile_span(idx);
-            for y in y0..y1 {
-                let s = &src[y * stride + x0..y * stride + x0 + len];
-                let d = &mut self.copy[y * own_stride + x0..y * own_stride + x0 + len];
-                // Rows above the first difference were equal, so the tile ends up exact.
-                if differs || s != d {
-                    differs = true;
-                    d.copy_from_slice(s);
-                }
-            }
-            if differs {
-                self.changed.push(idx);
-            }
-        }
-        self.changed.len()
-    }
-
-    /// Finds a vertical scroll inside the bounding box of `rects` (providers
-    /// like XDamage report no moves): sample rows of the new frame are looked
-    /// up by hash among the old rows, the shift with most votes is verified on
-    /// spread rows. Wrong guesses only cost bandwidth: the tile diff that
-    /// follows still compares every touched tile against the moved copy.
-    fn detect_scroll(&mut self, src: &[u8], stride: usize, rects: &[Rect]) -> Option<MovedRect> {
-        const MIN_HEIGHT: u32 = 128;
-        const MIN_WIDTH: u32 = 256;
-        const SAMPLES: u32 = 48;
-        const BACKOFF: u32 = 10;
-        let g = self.geometry;
-        let mut it = rects.iter().filter_map(|r| r.clip(g.width, g.height));
-        let first = it.next()?;
-        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x + first.w, first.y + first.h);
-        for r in it {
-            (x0, y0, x1, y1) = (x0.min(r.x), y0.min(r.y), x1.max(r.x + r.w), y1.max(r.y + r.h));
-        }
-        if y1 - y0 < MIN_HEIGHT || x1 - x0 < MIN_WIDTH {
-            return None;
-        }
-        if self.scroll_backoff > 0 {
-            self.scroll_backoff -= 1;
-            return None;
-        }
-        let own_stride = g.width as usize * 4;
-        let (bx, bw) = (x0 as usize * 4, (x1 - x0) as usize * 4);
-        let old_row = |y: u32| &self.copy[y as usize * own_stride + bx..y as usize * own_stride + bx + bw];
-        let new_row = |y: u32| &src[y as usize * stride + bx..y as usize * stride + bx + bw];
-
-        // Rows that repeat (blank lines, patterns) cannot tell the shift apart:
-        // they are marked ambiguous and never vote.
-        const AMBIGUOUS: u32 = u32::MAX;
-        self.row_index.clear();
-        for y in y0..y1 {
-            self.row_index.entry(row_hash(old_row(y))).and_modify(|v| *v = AMBIGUOUS).or_insert(y);
-        }
-        let mut votes: Vec<(i64, u32)> = Vec::new();
-        let mut samples = 0;
-        let step = ((y1 - y0) / (SAMPLES * 4)).max(1);
-        for y in (y0..y1).step_by(step as usize) {
-            let Some(&oy) = self.row_index.get(&row_hash(new_row(y))) else { continue };
-            if oy == AMBIGUOUS {
-                continue;
-            }
-            let dy = y as i64 - oy as i64;
-            match votes.iter_mut().find(|v| v.0 == dy) {
-                Some(v) => v.1 += 1,
-                None => votes.push((dy, 1)),
-            }
-            samples += 1;
-            if samples == SAMPLES {
-                break;
-            }
-        }
-        let found = votes.iter().filter(|v| v.0 != 0).max_by_key(|v| v.1).map(|v| v.0).filter(|&dy| {
-            let (top, bottom) = (y0 as i64 + dy.max(0), y1 as i64 + dy.min(0));
-            if bottom - top < (MIN_HEIGHT / 2) as i64 {
-                return false;
-            }
-            let check = ((bottom - top) / 32).max(1) as usize;
-            let (mut ok, mut total) = (0, 0);
-            for y in (top..bottom).step_by(check) {
-                total += 1;
-                ok += (new_row(y as u32) == old_row((y - dy) as u32)) as u32;
-            }
-            ok * 10 >= total * 7
-        });
-        let Some(dy) = found else {
-            self.scroll_backoff = BACKOFF;
-            return None;
-        };
-        let top = (y0 as i64 + dy.max(0)) as u32;
-        let h = ((y1 as i64 + dy.min(0)) - top as i64) as u32;
-        Some(MovedRect { src_x: x0, src_y: (top as i64 - dy) as u32, dst: Rect::new(x0, top, x1 - x0, h) })
-    }
-}
-
-fn row_hash(row: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    let mut chunks = row.chunks_exact(8);
-    for c in &mut chunks {
-        h = (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
-    }
-    for &b in chunks.remainder() {
-        h = (h ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-    h
-}
-
 /// Per-client state owned by its producer thread (outside the shared lock).
 pub struct ClientCodec {
     pub encoder: Option<Box<dyn VideoEncoder>>,
@@ -721,11 +512,21 @@ pub struct ClientCodec {
     /// Scratch: raw pixels and (rect, first tile, tile count) of lossless rects.
     raw: Vec<u8>,
     rects: Vec<(Rect, usize, usize)>,
+    /// Scratch: areas to refresh in the encoder input.
+    encoder_rects: Vec<Rect>,
     copies: Vec<MovedRect>,
 }
 
 impl ClientCodec {
     pub fn new(tuning: Tuning) -> Self {
-        Self { encoder: None, tuning, cost: Vec::new(), raw: Vec::new(), rects: Vec::new(), copies: Vec::new() }
+        Self {
+            encoder: None,
+            tuning,
+            cost: Vec::new(),
+            raw: Vec::new(),
+            rects: Vec::new(),
+            encoder_rects: Vec::new(),
+            copies: Vec::new(),
+        }
     }
 }

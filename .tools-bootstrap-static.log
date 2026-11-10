@@ -1,0 +1,479 @@
+Computing installation plan...
+The following packages will be built and installed:
+  * amd-amf:x64-windows-static@1.5.3#1
+    ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7
+  * ffnvcodec:x64-windows-static@13.1.15.0
+  * libvpl:x64-windows-static@2.17.0#1
+  * x264[asm,core,gpl]:x64-windows-static@0.165.3222
+Additional packages (*) will be modified to complete this operation.
+Detecting compiler hash for triplet x64-windows-static...
+Compiler found: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+Restored 0 package(s) from C:\Users\acento\AppData\Local\vcpkg\archives in 635 us. Use --debug to see more details.
+Installing 1/5 amd-amf:x64-windows-static@1.5.3#1...
+amd-amf:x64-windows-static@1.5.3#1 package ABI: 047c10ceaa91718bacc84babf0f85930b635e33211494d3db59c8eecae214dd0
+Building amd-amf:x64-windows-static@1.5.3#1...
+Downloading https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.3/AMF-headers-v1.5.3.tar.gz -> AMF-headers-v1.5.3.tar.gz
+Successfully downloaded AMF-headers-v1.5.3.tar.gz
+-- Extracting source C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/AMF-headers-v1.5.3.tar.gz
+-- Using source at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/amd-amf/src/headers-v1-efaa60c1e5.clean
+Downloading https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/AMF/v1.5.3/LICENSE.txt -> LICENSE.txt
+Successfully downloaded LICENSE.txt
+-- Up-to-date: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/Ambisonic2SRenderer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/AMFXInput.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/AudioCapture.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/Capture.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/ChromaKey.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/ColorSpace.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/Component.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/ComponentCaps.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/CursorCapture.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/DisplayCapture.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGAudioConverter.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGAudioDecoder.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGAudioEncoder.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGComponents.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGEncoderAV1.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGEncoderH264.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGEncoderHEVC.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGFileDemuxer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGFileMuxer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FFMPEGVideoDecoder.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/FRC.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/HQScaler.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/MediaSource.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/PreAnalysis.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/PreProcessing.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/SupportedCodecs.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoCapture.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoConverter.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoDecoderUVD.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoEncoderAV1.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoEncoderHEVC.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoEncoderVCE.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VideoStitch.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/VQEnhancer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/components/ZCamLiveStream.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/AudioBuffer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Buffer.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Compute.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/ComputeFactory.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Context.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/CurrentTime.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/D3D12AMF.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Data.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Debug.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Dump.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Factory.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Interface.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Plane.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Platform.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/PropertyStorage.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/PropertyStorageEx.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Result.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Surface.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Trace.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Variant.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/Version.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/include/AMF/core/VulkanAMF.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/amd-amf_x64-windows-static/share/amd-amf/copyright
+-- Performing post-build validation
+Starting submission of amd-amf:x64-windows-static@1.5.3#1 to 1 binary cache(s) in the background
+Elapsed time to handle amd-amf:x64-windows-static: 1.7 s
+Installing 2/5 ffnvcodec:x64-windows-static@13.1.15.0...
+ffnvcodec:x64-windows-static@13.1.15.0 package ABI: 7e8f509e4cf270731510dbe138d12751698716c1487a8ee3166b6a31fcc8dd15
+Building ffnvcodec:x64-windows-static@13.1.15.0...
+Downloading https://github.com/FFmpeg/nv-codec-headers/archive/n13.1.15.0.tar.gz -> FFmpeg-nv-codec-headers-n13.1.15.0.tar.gz
+Successfully downloaded FFmpeg-nv-codec-headers-n13.1.15.0.tar.gz
+-- Extracting source C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/FFmpeg-nv-codec-headers-n13.1.15.0.tar.gz
+-- Using source at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/ffnvcodec/src/n13.1.15.0-f53889a8e6.clean
+Downloading msys2-make-4.4.1-3-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/make-4.4.1-3-x86_64.pkg.tar.zst
+Successfully downloaded msys2-make-4.4.1-3-x86_64.pkg.tar.zst
+Downloading msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Downloading msys2-bash-5.3.020-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/bash-5.3.020-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-bash-5.3.020-1-x86_64.pkg.tar.zst
+Downloading msys2-coreutils-8.32-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/coreutils-8.32-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-coreutils-8.32-5-x86_64.pkg.tar.zst
+Downloading msys2-file-5.48-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/file-5.48-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-file-5.48-1-x86_64.pkg.tar.zst
+Downloading msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gawk-5.4.1-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst
+Downloading msys2-grep-1~3.0-7-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/grep-1~3.0-7-x86_64.pkg.tar.zst
+Successfully downloaded msys2-grep-1~3.0-7-x86_64.pkg.tar.zst
+Downloading msys2-gzip-1.15-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gzip-1.15-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gzip-1.15-1-x86_64.pkg.tar.zst
+Downloading msys2-diffutils-3.12-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/diffutils-3.12-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-diffutils-3.12-1-x86_64.pkg.tar.zst
+-- Using cached msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Downloading msys2-sed-4.9-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/sed-4.9-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-sed-4.9-1-x86_64.pkg.tar.zst
+Downloading msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Downloading msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libintl-0.22.5-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst
+Downloading msys2-libiconv-1.19-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libiconv-1.19-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libiconv-1.19-1-x86_64.pkg.tar.zst
+Downloading msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gmp-6.3.0-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst
+Downloading msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Downloading msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Downloading msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Downloading msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Downloading msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/zlib-1.3.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst
+Downloading msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Downloading msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Downloading msys2-libpcre-8.45-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libpcre-8.45-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libpcre-8.45-5-x86_64.pkg.tar.zst
+Downloading msys2-ncurses-6.6-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/ncurses-6.6-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-ncurses-6.6-2-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/bcb831613fed75b4
+-- Building  for Release
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/debug/lib/pkgconfig/ffnvcodec.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/lib/pkgconfig/ffnvcodec.pc
+Downloading msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst, trying https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+Successfully downloaded msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+-- Using cached msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/d5586eb050429df1
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/debug/lib/pkgconfig/ffnvcodec.pc
+-- Up-to-date: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include
+-- Up-to-date: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec/dynlink_cuda.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec/dynlink_cuviddec.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec/dynlink_loader.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec/dynlink_nvcuvid.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/include/ffnvcodec/nvEncodeAPI.h
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffnvcodec_x64-windows-static/share/ffnvcodec/copyright
+-- Performing post-build validation
+Starting submission of ffnvcodec:x64-windows-static@13.1.15.0 to 1 binary cache(s) in the background
+Elapsed time to handle ffnvcodec:x64-windows-static: 21 s
+Completed submission of amd-amf:x64-windows-static@1.5.3#1 to 1 binary cache(s) in 438 ms
+Installing 3/5 libvpl:x64-windows-static@2.17.0#1...
+libvpl:x64-windows-static@2.17.0#1 package ABI: b57bc1fdc6b19c698c34cb8b2871fa1c6691dc73cd232bd010324624a80521fb
+Building libvpl:x64-windows-static@2.17.0#1...
+Downloading https://github.com/intel/libvpl/archive/v2.17.0.tar.gz -> intel-libvpl-v2.17.0.tar.gz
+Successfully downloaded intel-libvpl-v2.17.0.tar.gz
+-- Extracting source C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/intel-libvpl-v2.17.0.tar.gz
+-- Applying patch 001-fix-pkgconfig.patch
+-- Applying patch 002-fix-cmake-config.patch
+-- Using source at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/libvpl/src/v2.17.0-4203e0c35c.clean
+-- Configuring x64-windows-static
+-- Building x64-windows-static-dbg
+-- Building x64-windows-static-rel
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/libvpl_x64-windows-static/lib/pkgconfig/vpl.pc
+Downloading msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst, trying https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+Successfully downloaded msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+Downloading msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/d5586eb050429df1
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/libvpl_x64-windows-static/debug/lib/pkgconfig/vpl.pc
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/libvpl_x64-windows-static/share/libvpl/copyright
+-- Performing post-build validation
+Starting submission of libvpl:x64-windows-static@2.17.0#1 to 1 binary cache(s) in the background
+Elapsed time to handle libvpl:x64-windows-static: 26 s
+Completed submission of ffnvcodec:x64-windows-static@13.1.15.0 to 1 binary cache(s) in 122 ms
+Installing 4/5 x264[asm,core,gpl]:x64-windows-static@0.165.3222...
+x264[asm,core,gpl]:x64-windows-static@0.165.3222 package ABI: bf8a2ae167d35ae7fbf0d40f50d4afcde30fd9777ae0083bed7d03a193f626e8
+Building x264[asm,core,gpl]:x64-windows-static@0.165.3222...
+Downloading https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz -> videolan-x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz
+Successfully downloaded videolan-x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz
+-- Extracting source C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/videolan-x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz
+-- Applying patch C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/x264/src/version-0.165.3222.diff
+-- Applying patch uwp-cflags.patch
+-- Applying patch parallel-install.patch
+-- Applying patch allow-clang-cl.patch
+-- Applying patch configure.patch
+-- Using source at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/x264/src/34aef41d55-08294fa5d4.clean
+-- Getting CMake variables for x64-windows-static
+-- Loading CMake variables from C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/x264/cmake-get-vars_ASM_C_CXX-x64-windows-static.cmake.log
+Downloading msys2-autoconf-wrapper-20260320-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/autoconf-wrapper-20260320-1-any.pkg.tar.zst
+Successfully downloaded msys2-autoconf-wrapper-20260320-1-any.pkg.tar.zst
+Downloading msys2-automake-wrapper-20260320-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake-wrapper-20260320-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake-wrapper-20260320-1-any.pkg.tar.zst
+Downloading msys2-autoconf-archive-2024.10.16-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/autoconf-archive-2024.10.16-1-any.pkg.tar.zst
+Successfully downloaded msys2-autoconf-archive-2024.10.16-1-any.pkg.tar.zst
+Downloading msys2-binutils-2.47-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/binutils-2.47-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-binutils-2.47-1-x86_64.pkg.tar.zst
+Downloading msys2-libtool-2.6.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libtool-2.6.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libtool-2.6.2-1-x86_64.pkg.tar.zst
+Downloading msys2-make-4.4.1-3-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/make-4.4.1-3-x86_64.pkg.tar.zst
+Successfully downloaded msys2-make-4.4.1-3-x86_64.pkg.tar.zst
+Downloading msys2-which-2.25-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/which-2.25-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-which-2.25-1-x86_64.pkg.tar.zst
+Downloading msys2-bash-5.3.020-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/bash-5.3.020-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-bash-5.3.020-1-x86_64.pkg.tar.zst
+Downloading msys2-coreutils-8.32-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/coreutils-8.32-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-coreutils-8.32-5-x86_64.pkg.tar.zst
+Downloading msys2-file-5.48-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/file-5.48-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-file-5.48-1-x86_64.pkg.tar.zst
+Downloading msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gawk-5.4.1-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst
+Downloading msys2-grep-1~3.0-7-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/grep-1~3.0-7-x86_64.pkg.tar.zst
+Successfully downloaded msys2-grep-1~3.0-7-x86_64.pkg.tar.zst
+Downloading msys2-gzip-1.15-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gzip-1.15-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gzip-1.15-1-x86_64.pkg.tar.zst
+Downloading msys2-diffutils-3.12-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/diffutils-3.12-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-diffutils-3.12-1-x86_64.pkg.tar.zst
+Downloading msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Downloading msys2-sed-4.9-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/sed-4.9-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-sed-4.9-1-x86_64.pkg.tar.zst
+Downloading msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Downloading msys2-autoconf2.73-2.73-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/autoconf2.73-2.73-1-any.pkg.tar.zst
+Successfully downloaded msys2-autoconf2.73-2.73-1-any.pkg.tar.zst
+Downloading msys2-autoconf2.72-2.72-4-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/autoconf2.72-2.72-4-any.pkg.tar.zst
+Successfully downloaded msys2-autoconf2.72-2.72-4-any.pkg.tar.zst
+Downloading msys2-automake1.16-1.16.5-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.16-1.16.5-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.16-1.16.5-1-any.pkg.tar.zst
+Downloading msys2-automake1.17-1.17-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.17-1.17-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.17-1.17-1-any.pkg.tar.zst
+Downloading msys2-automake1.18-1.18.1-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.18-1.18.1-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.18-1.18.1-1-any.pkg.tar.zst
+Downloading msys2-libiconv-1.19-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libiconv-1.19-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libiconv-1.19-1-x86_64.pkg.tar.zst
+Downloading msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libintl-0.22.5-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst
+Downloading msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/zlib-1.3.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst
+Downloading msys2-zstd-1.5.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/zstd-1.5.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-zstd-1.5.7-1-x86_64.pkg.tar.zst
+Downloading msys2-findutils-4.11.0-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/findutils-4.11.0-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-findutils-4.11.0-2-x86_64.pkg.tar.zst
+Downloading msys2-tar-1.35-3-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/tar-1.35-3-x86_64.pkg.tar.zst
+Successfully downloaded msys2-tar-1.35-3-x86_64.pkg.tar.zst
+Downloading msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gmp-6.3.0-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst
+Downloading msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Downloading msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Downloading msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Downloading msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Downloading msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Downloading msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Downloading msys2-libpcre-8.45-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libpcre-8.45-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libpcre-8.45-5-x86_64.pkg.tar.zst
+Downloading msys2-m4-1.4.21-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/m4-1.4.21-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-m4-1.4.21-1-x86_64.pkg.tar.zst
+Downloading msys2-perl-5.42.3-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/perl-5.42.3-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-perl-5.42.3-2-x86_64.pkg.tar.zst
+Downloading msys2-ncurses-6.6-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/ncurses-6.6-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-ncurses-6.6-2-x86_64.pkg.tar.zst
+Downloading msys2-libxcrypt-4.5.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libxcrypt-4.5.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libxcrypt-4.5.2-1-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/27ddd6925c777801
+-- Configuring x64-windows-static-dbg
+-- Configuring x64-windows-static-rel
+-- Using cached msys2-autoconf-wrapper-20260320-1-any.pkg.tar.zst
+-- Using cached msys2-automake-wrapper-20260320-1-any.pkg.tar.zst
+-- Using cached msys2-autoconf-archive-2024.10.16-1-any.pkg.tar.zst
+-- Using cached msys2-binutils-2.47-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libtool-2.6.2-1-x86_64.pkg.tar.zst
+-- Using cached msys2-make-4.4.1-3-x86_64.pkg.tar.zst
+-- Using cached msys2-which-2.25-1-x86_64.pkg.tar.zst
+-- Using cached msys2-bash-5.3.020-1-x86_64.pkg.tar.zst
+-- Using cached msys2-coreutils-8.32-5-x86_64.pkg.tar.zst
+-- Using cached msys2-file-5.48-1-x86_64.pkg.tar.zst
+-- Using cached msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst
+-- Using cached msys2-grep-1~3.0-7-x86_64.pkg.tar.zst
+-- Using cached msys2-gzip-1.15-1-x86_64.pkg.tar.zst
+-- Using cached msys2-diffutils-3.12-1-x86_64.pkg.tar.zst
+-- Using cached msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+-- Using cached msys2-sed-4.9-1-x86_64.pkg.tar.zst
+-- Using cached msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+-- Using cached msys2-autoconf2.73-2.73-1-any.pkg.tar.zst
+-- Using cached msys2-autoconf2.72-2.72-4-any.pkg.tar.zst
+-- Using cached msys2-automake1.16-1.16.5-1-any.pkg.tar.zst
+-- Using cached msys2-automake1.17-1.17-1-any.pkg.tar.zst
+-- Using cached msys2-automake1.18-1.18.1-1-any.pkg.tar.zst
+-- Using cached msys2-libiconv-1.19-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst
+-- Using cached msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst
+-- Using cached msys2-zstd-1.5.7-1-x86_64.pkg.tar.zst
+-- Using cached msys2-findutils-4.11.0-2-x86_64.pkg.tar.zst
+-- Using cached msys2-tar-1.35-3-x86_64.pkg.tar.zst
+-- Using cached msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst
+-- Using cached msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst
+-- Using cached msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst
+-- Using cached msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst
+-- Using cached msys2-libpcre-8.45-5-x86_64.pkg.tar.zst
+-- Using cached msys2-m4-1.4.21-1-x86_64.pkg.tar.zst
+-- Using cached msys2-perl-5.42.3-2-x86_64.pkg.tar.zst
+-- Using cached msys2-ncurses-6.6-2-x86_64.pkg.tar.zst
+-- Using cached msys2-libxcrypt-4.5.2-1-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/27ddd6925c777801
+-- Building/Installing x64-windows-static-dbg
+-- Making target 'all' for x64-windows-static-dbg
+-- Making target 'install' for x64-windows-static-dbg
+-- Building/Installing x64-windows-static-rel
+-- Making target 'all' for x64-windows-static-rel
+-- Making target 'install' for x64-windows-static-rel
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/x264_x64-windows-static/lib/pkgconfig/x264.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/x264_x64-windows-static/debug/lib/pkgconfig/x264.pc
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/x264_x64-windows-static/share/x264/copyright
+-- Performing post-build validation
+Starting submission of x264[asm,core,gpl]:x64-windows-static@0.165.3222 to 1 binary cache(s) in the background
+Elapsed time to handle x264:x64-windows-static: 2.3 min
+Completed submission of libvpl:x64-windows-static@2.17.0#1 to 1 binary cache(s) in 1.4 s
+Installing 5/5 ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7...
+ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7 package ABI: a71f16c3f6b4af2a56664c3c89b76225b2b603e761d85b616e7589cb6f373f78
+Building ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7...
+Downloading https://github.com/ffmpeg/ffmpeg/archive/n9.0.2.tar.gz -> ffmpeg-ffmpeg-n9.0.2.tar.gz
+Successfully downloaded ffmpeg-ffmpeg-n9.0.2.tar.gz
+-- Extracting source C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/ffmpeg-ffmpeg-n9.0.2.tar.gz
+-- Applying patch 0003-fix-windowsinclude.patch
+-- Applying patch 0004-dependencies.patch
+-- Applying patch 0005-fix-nasm.patch
+-- Applying patch 0007-fix-lib-naming.patch
+-- Applying patch 0013-define-WINVER.patch
+-- Applying patch 0024-fix-osx-host-c11.patch
+-- Applying patch 0040-ffmpeg-add-av_stream_get_first_dts-for-chromium.patch
+-- Applying patch 0045-use-prebuilt-bin2c.patch
+-- Applying patch 0046-fix-msvc-detection.patch
+-- Applying patch 0047-fix-msvc-utf8.patch
+-- Applying patch 0049-fix-twolame-pkgconfig.patch
+-- Applying patch 0050-fix-test-ld-absolute-lib-paths.patch
+-- Applying patch 0051-fix-msvc-undef-flags.patch
+-- Applying patch 0052-fix-disable-unstable-swscale-link.patch
+-- Using source at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/ffmpeg/src/n9.0.2-2dce354851.clean
+-- Getting CMake variables for x64-windows-static
+-- Loading CMake variables from C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/buildtrees/ffmpeg/cmake-get-vars_C_CXX-x64-windows-static.cmake.log
+Downloading msys2-automake-wrapper-20260320-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake-wrapper-20260320-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake-wrapper-20260320-1-any.pkg.tar.zst
+Downloading msys2-bash-5.3.020-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/bash-5.3.020-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-bash-5.3.020-1-x86_64.pkg.tar.zst
+Downloading msys2-coreutils-8.32-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/coreutils-8.32-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-coreutils-8.32-5-x86_64.pkg.tar.zst
+Downloading msys2-file-5.48-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/file-5.48-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-file-5.48-1-x86_64.pkg.tar.zst
+Downloading msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gawk-5.4.1-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gawk-5.4.1-1-x86_64.pkg.tar.zst
+Downloading msys2-grep-1~3.0-7-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/grep-1~3.0-7-x86_64.pkg.tar.zst
+Successfully downloaded msys2-grep-1~3.0-7-x86_64.pkg.tar.zst
+Downloading msys2-gzip-1.15-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gzip-1.15-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gzip-1.15-1-x86_64.pkg.tar.zst
+Downloading msys2-diffutils-3.12-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/diffutils-3.12-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-diffutils-3.12-1-x86_64.pkg.tar.zst
+Downloading msys2-make-4.4.1-3-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/make-4.4.1-3-x86_64.pkg.tar.zst
+Successfully downloaded msys2-make-4.4.1-3-x86_64.pkg.tar.zst
+Downloading msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-pkgconf-3.0.7-1-x86_64.pkg.tar.zst
+Downloading msys2-sed-4.9-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/sed-4.9-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-sed-4.9-1-x86_64.pkg.tar.zst
+Downloading msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+Downloading msys2-automake1.16-1.16.5-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.16-1.16.5-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.16-1.16.5-1-any.pkg.tar.zst
+Downloading msys2-automake1.17-1.17-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.17-1.17-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.17-1.17-1-any.pkg.tar.zst
+Downloading msys2-automake1.18-1.18.1-1-any.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/automake1.18-1.18.1-1-any.pkg.tar.zst
+Successfully downloaded msys2-automake1.18-1.18.1-1-any.pkg.tar.zst
+Downloading msys2-libiconv-1.19-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libiconv-1.19-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libiconv-1.19-1-x86_64.pkg.tar.zst
+Downloading msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libintl-0.22.5-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libintl-0.22.5-1-x86_64.pkg.tar.zst
+Downloading msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gmp-6.3.0-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gmp-6.3.0-2-x86_64.pkg.tar.zst
+Downloading msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-gcc-libs-15.3.0-1-x86_64.pkg.tar.zst
+Downloading msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libbz2-1.0.8-4-x86_64.pkg.tar.zst
+Downloading msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-liblzma-5.8.4-1-x86_64.pkg.tar.zst
+Downloading msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libzstd-1.5.7-1-x86_64.pkg.tar.zst
+Downloading msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/zlib-1.3.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-zlib-1.3.2-1-x86_64.pkg.tar.zst
+Downloading msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libreadline-8.3.006-1-x86_64.pkg.tar.zst
+Downloading msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-mpfr-4.2.2-1-x86_64.pkg.tar.zst
+Downloading msys2-libpcre-8.45-5-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libpcre-8.45-5-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libpcre-8.45-5-x86_64.pkg.tar.zst
+Downloading msys2-perl-5.42.3-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/perl-5.42.3-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-perl-5.42.3-2-x86_64.pkg.tar.zst
+Downloading msys2-ncurses-6.6-2-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/ncurses-6.6-2-x86_64.pkg.tar.zst
+Successfully downloaded msys2-ncurses-6.6-2-x86_64.pkg.tar.zst
+Downloading msys2-libxcrypt-4.5.2-1-x86_64.pkg.tar.zst, trying https://mirror.msys2.org/msys/x86_64/libxcrypt-4.5.2-1-x86_64.pkg.tar.zst
+Successfully downloaded msys2-libxcrypt-4.5.2-1-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/d86ee7d2edfe16ee
+Downloading msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst, trying https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+Successfully downloaded msys2-mingw-w64-x86_64-pkgconf-1~3.0.7-1-any.pkg.tar.zst
+-- Using cached msys2-msys2-runtime-3.6.10-4-x86_64.pkg.tar.zst
+-- Using msys root at C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/d5586eb050429df1
+-- Building Options: --toolchain=msvc --enable-pic --disable-doc --enable-runtime-cpudetect --disable-autodetect --target-os=win32 --enable-w32threads --enable-d3d11va --enable-d3d12va --enable-dxva2 --enable-mediafoundation --cc=cl.exe --host-cc=cl.exe --cxx=cl.exe --windres=rc.exe --ld=link.exe --ar='ar-lib lib.exe' --ranlib=: --enable-gpl --disable-ffmpeg --disable-ffplay --disable-ffprobe --enable-avcodec --disable-avdevice --enable-avformat --disable-avfilter --disable-swresample --enable-swscale --disable-alsa --enable-amf --disable-libaom --disable-libass --disable-avisynth --disable-bzlib --disable-libdav1d --disable-libsvtav1 --disable-libfdk-aac --disable-libfontconfig --disable-libharfbuzz --disable-libfreetype --disable-libfribidi --disable-iconv --disable-libilbc --disable-lzma --disable-libmp3lame --disable-libmodplug --enable-cuda --enable-nvenc --enable-nvdec --enable-cuvid --enable-ffnvcodec --disable-opencl --disable-opengl --disable-libopenh264 --disable-libopenjpeg --disable-libopenmpt --disable-network --disable-openssl --disable-schannel --disable-securetransport --disable-libopus --disable-sdl2 --disable-libsnappy --disable-libsoxr --disable-libspeex --disable-libssh --disable-libtensorflow --disable-libtesseract --disable-libtheora --disable-libtwolame --disable-libvorbis --disable-libvpx --disable-vulkan --disable-libwebp --enable-libx264 --disable-libx265 --disable-libxml2 --disable-zlib --disable-libsrt --enable-libvpl --enable-encoder=h264_qsv --enable-decoder=h264_qsv --disable-vaapi --disable-libzmq --disable-librubberband --enable-cross-compile --extra-cflags=-DHAVE_UNISTD_H=0 --pkg-config="C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/downloads/tools/msys2/d5586eb050429df1/mingw64/bin/pkg-config.exe" --pkg-config-flags=--static
+-- Building Release Options: --enable-optimizations --extra-cflags=-MT --extra-ldflags=-libpath:"C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/installed/x64-windows-static/lib"
+-- Building ffmpeg for Release
+-- Building Debug Options: --disable-optimizations --enable-debug --extra-cflags=-MTd --extra-ldflags=-libpath:"C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/installed/x64-windows-static/debug/lib"
+-- Building ffmpeg for Debug
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/lib/pkgconfig/libavcodec.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/lib/pkgconfig/libavformat.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/lib/pkgconfig/libavutil.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/lib/pkgconfig/libswscale.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/debug/lib/pkgconfig/libavcodec.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/debug/lib/pkgconfig/libavformat.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/debug/lib/pkgconfig/libavutil.pc
+-- Fixing pkgconfig file: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/debug/lib/pkgconfig/libswscale.pc
+-- Dependencies (release): libx264;mfuuid;strmiids;vpl;advapi32;ole32;user32;bcrypt
+-- Dependencies (debug):   libx264;mfuuid;strmiids;vpld;advapi32;ole32;user32;bcrypt
+-- Installing: C:/Users/acento/Documents/Code/Mine/remothing/.tools/vcpkg/packages/ffmpeg_x64-windows-static/share/ffmpeg/usage
+-- Performing post-build validation
+Starting submission of ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7 to 1 binary cache(s) in the background
+Elapsed time to handle ffmpeg:x64-windows-static: 11 min
+Total install time: 14 min
+Installed contents are licensed to you by owners. Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
+Some packages did not declare an SPDX license. Check the `copyright` file for each package for more information about their licensing.
+Packages installed in this vcpkg installation declare the following licenses:
+GPL-2.0-or-later
+MIT
+ffmpeg provides CMake integration:
+
+  find_package(FFMPEG REQUIRED)
+  target_include_directories(main PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  target_link_directories(main PRIVATE ${FFMPEG_LIBRARY_DIRS})
+  target_link_libraries(main PRIVATE ${FFMPEG_LIBRARIES})
+
+ffmpeg provides pkg-config modules:
+
+  # FFmpeg codec library
+  libavcodec
+
+  # FFmpeg device handling library
+  libavdevice
+
+  # FFmpeg audio/video filtering library
+  libavfilter
+
+  # FFmpeg container format library
+  libavformat
+
+  # FFmpeg utility library
+  libavutil
+
+  # FFmpeg audio resampling library
+  libswresample
+
+  # FFmpeg image rescaling library
+  libswscale
+
+Completed submission of x264[asm,core,gpl]:x64-windows-static@0.165.3222 to 1 binary cache(s) in 1.7 s
+Waiting for 1 remaining binary cache submissions...
+Completed submission of ffmpeg[amf,avcodec,avformat,core,gpl,nvcodec,qsv,swscale,x264]:x64-windows-static@9.0.2#7 to 1 binary cache(s) in 10 s (1/1)
+All requested installations completed successfully in: 14 min

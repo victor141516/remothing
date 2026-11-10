@@ -228,6 +228,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
 
 fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): (u32, u32), pref: &str) {
     codec.encoder = None;
+    app.shared.set_gpu_input(id, false);
     let req = EncoderRequest {
         width,
         height,
@@ -237,6 +238,7 @@ fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): 
     match app.platform.encoders().create(&req) {
         Ok(e) => {
             app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
+            app.shared.set_gpu_input(id, e.gpu_input());
             codec.encoder = Some(e);
         }
         Err(e) => {

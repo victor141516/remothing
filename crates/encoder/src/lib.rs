@@ -73,20 +73,38 @@ impl Backend {
 
 pub struct FfmpegEncoders {
     available: Vec<Backend>,
+    /// Compiled-in backends that failed the startup probe, with the reason.
+    unavailable: Vec<(String, String)>,
 }
 
 impl FfmpegEncoders {
+    /// Probes every compiled-in backend once (small host-memory encoder), so
+    /// status and fallback choices reflect what this machine can actually run.
     pub fn new() -> Result<Self> {
         ff::init()?;
         ff::util::log::set_level(ff::util::log::Level::Error);
-        let available = ALL.into_iter().filter(|b| ff::encoder::find_by_name(b.ffmpeg_name()).is_some()).collect();
-        Ok(Self { available })
+        let mut available = Vec::new();
+        let mut unavailable = Vec::new();
+        for b in ALL {
+            if ff::encoder::find_by_name(b.ffmpeg_name()).is_none() {
+                continue;
+            }
+            match FfmpegEncoder::open(b, InputKind::Host, 256, 256, None) {
+                Ok(_) => available.push(b),
+                Err(e) => unavailable.push((b.name().to_string(), format!("{e:#}"))),
+            }
+        }
+        Ok(Self { available, unavailable })
     }
 }
 
 impl EncoderProvider for FfmpegEncoders {
     fn backends(&self) -> Vec<&'static str> {
         self.available.iter().map(|b| b.name()).collect()
+    }
+
+    fn unavailable(&self) -> Vec<(String, String)> {
+        self.unavailable.clone()
     }
 
     fn create(&self, req: &EncoderRequest) -> Result<Box<dyn VideoEncoder>> {

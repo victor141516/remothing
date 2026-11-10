@@ -105,6 +105,7 @@ impl SystemMonitor for WindowsMonitor {
         // enumeration order, which both follow the PCI order.
         let mut nvml = self.nvml.as_ref().map(Nvml::devices).unwrap_or_default();
         let mut out = Vec::new();
+        let mut seen = Vec::new();
         // SAFETY: DXGI enumeration; descriptors are plain data.
         let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return out };
         for i in 0.. {
@@ -115,6 +116,15 @@ impl SystemMonitor for WindowsMonitor {
             if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
                 continue;
             }
+            // The same GPU can be enumerated twice (second LUID, no outputs, e.g. for
+            // cross-adapter/virtualization paths); an identical outputless twin is hidden.
+            let identity = (desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision);
+            // SAFETY: as above.
+            let has_outputs = unsafe { adapter.EnumOutputs(0) }.is_ok();
+            if seen.contains(&identity) && !has_outputs {
+                continue;
+            }
+            seen.push(identity);
             let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
             let name = String::from_utf16_lossy(&desc.Description[..len]);
             let utilization = if desc.VendorId == VENDOR_NVIDIA {

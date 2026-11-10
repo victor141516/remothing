@@ -1,0 +1,4 @@
+# Windows: link the C runtime statically so remothing.exe needs no VC++
+# redistributable (FFmpeg comes from the matching vcpkg x64-windows-static triplet).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

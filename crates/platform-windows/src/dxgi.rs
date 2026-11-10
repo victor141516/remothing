@@ -21,13 +21,14 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, RECT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, RECT, S_OK};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Query, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_MODE_ROTATION_IDENTITY,
@@ -228,6 +229,8 @@ pub struct DxgiSession {
     dupl: Option<IDXGIOutputDuplication>,
     /// CPU-readable copy target for `read`, created on first use.
     staging: Option<ID3D11Texture2D>,
+    /// Signals when the staging copies are done, so `read` waits without the context lock.
+    copied: Option<ID3D11Query>,
     width: u32,
     height: u32,
     /// Next frame copies and reports the whole display (first frame, re-duplication).
@@ -262,6 +265,7 @@ impl DxgiSession {
             frame: Arc::new(D3D11Frame::new(device, context, texture, width, height)),
             dupl: Some(dupl),
             staging: None,
+            copied: None,
             width,
             height,
             full_pending: true,
@@ -434,6 +438,19 @@ impl DxgiSession {
         self.staging = Some(t.clone());
         Ok(t)
     }
+
+    fn copied_query(&mut self) -> Result<ID3D11Query> {
+        if let Some(q) = &self.copied {
+            return Ok(q.clone());
+        }
+        let desc = D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 };
+        let mut q = None;
+        // SAFETY: valid descriptor and out pointer.
+        unsafe { self.frame.device.CreateQuery(&desc, Some(&mut q)) }.context("create event query")?;
+        let q = q.context("CreateQuery returned no query")?;
+        self.copied = Some(q.clone());
+        Ok(q)
+    }
 }
 
 /// Validates a fresh duplication and returns its size. The mode format is not
@@ -536,18 +553,39 @@ impl CaptureSession for DxgiSession {
             bail!("read: destination too small ({} < {end} bytes)", dst.len());
         }
         let staging = self.staging()?;
+        let copied = self.copied_query()?;
         let frame = &self.frame;
+        frame.with_context(|ctx| {
+            for r in clipped() {
+                let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
+                // SAFETY: rects clipped to the (equal) texture sizes.
+                unsafe { ctx.CopySubresourceRegion(&staging, 0, r.x, r.y, 0, &frame.texture, 0, Some(&b)) };
+            }
+            // SAFETY: query created on this device.
+            unsafe {
+                ctx.End(&copied);
+                ctx.Flush();
+            }
+        });
+        // Wait for the GPU with the context unlocked: encoders keep submitting
+        // meanwhile (a blocking Map would hold the lock for the whole copy).
+        loop {
+            // The safe wrapper folds S_FALSE ("not done yet") into Ok; call the
+            // vtable entry to get the raw HRESULT.
+            // SAFETY: event query of this device; no output data requested.
+            let done = frame.with_context(|ctx| unsafe {
+                (Interface::vtable(ctx).GetData)(Interface::as_raw(ctx), copied.as_raw(), std::ptr::null_mut(), 0, 0)
+            });
+            if done == S_OK {
+                break;
+            }
+            done.ok().context("wait for staging copy")?;
+            std::thread::yield_now();
+        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         frame
-            .with_context(|ctx| {
-                for r in clipped() {
-                    let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
-                    // SAFETY: rects clipped to the (equal) texture sizes.
-                    unsafe { ctx.CopySubresourceRegion(&staging, 0, r.x, r.y, 0, &frame.texture, 0, Some(&b)) };
-                }
-                // SAFETY: staging texture with CPU read access; waits for the copies.
-                unsafe { ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
-            })
+            // SAFETY: staging texture with CPU read access; the copies are complete.
+            .with_context(|ctx| unsafe { ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) })
             .context("map staging texture")?;
         // Rows are copied without the context lock: a mapped resource stays
         // valid while encoders use the context.

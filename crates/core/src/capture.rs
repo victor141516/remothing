@@ -6,13 +6,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::geom::Rect;
-use crate::platform::{DisplayInfo, InputProvider, OpenedDisplay, Platform};
+use crate::geom::{MovedRect, Rect};
+use crate::pixels::Differ;
+use crate::platform::{CaptureSession, DisplayInfo, InputProvider, OpenedDisplay, Platform};
 use crate::proto;
-use crate::shared::{Shared, TileDiff};
+use crate::shared::Shared;
 use crate::telemetry::Telemetry;
 
-const FRAME_WAIT: Duration = Duration::from_millis(100);
+/// Also bounds how late skipped CPU copies are refreshed after motion stops.
+const FRAME_WAIT: Duration = Duration::from_millis(50);
 const REOPEN_DELAY: Duration = Duration::from_millis(250);
 
 /// Selected display, shared between the capture thread, the input socket and the admin API.
@@ -101,36 +103,85 @@ impl CaptureLoop {
         }
         let (width, height) = capture.size();
         eprintln!("streaming display {} ({}x{})", info.id, width, height);
-        self.shared.reconfigure(width, height, capture.gpu_surface());
+        // GPU-based sessions can skip CPU readback of tiles shown only from video.
+        let gpu = capture.gpu_surface().is_some();
+        let pixels = self.shared.reconfigure(width, height, capture.gpu_surface());
         *self.control.input.write().unwrap() = Some(input);
         *self.control.current.write().unwrap() = Some(info);
 
         let stride = width as usize * 4;
-        let mut diff = TileDiff::new(self.shared.geometry());
+        let mut diff = Differ::new(pixels.geometry);
         // Only for sessions without directly mapped pixels.
         let mut staging = Vec::new();
         let mut rects: Vec<Rect> = Vec::new();
+        let mut read_and_diff = |capture: &mut Box<dyn CaptureSession>,
+                                 diff: &mut Differ,
+                                 tiles: &[Rect],
+                                 moved: &[MovedRect],
+                                 find_scroll: bool|
+         -> Result<()> {
+            match capture.mapped() {
+                Some((src, src_stride)) => diff.diff(&pixels, src, src_stride, tiles, moved, find_scroll),
+                None => {
+                    staging.resize(stride * height as usize, 0);
+                    capture.read(tiles, &mut staging, stride)?;
+                    diff.diff(&pixels, &staging, stride, tiles, moved, find_scroll);
+                }
+            }
+            Ok(())
+        };
         while !self.control.has_request() {
             if let Some(state) = capture.cursor_change()? {
                 self.shared.set_cursor(proto::cursor(&state));
             }
-            let Some(frame) = capture.next_frame(FRAME_WAIT)? else { continue };
+            let frame = capture.next_frame(FRAME_WAIT)?;
+            let hints = gpu.then(|| self.shared.capture_hints(proto::now_us()));
+            if let Some(h) = &hints {
+                // CPU copies skipped while a tile was video-only catch up once it
+                // settles or is shown losslessly again, before its lossless refine.
+                let stale = diff.stale_tiles(|i| !h.skip[i] || h.settled[i]);
+                if !stale.is_empty() {
+                    diff.changed.clear();
+                    read_and_diff(&mut capture, &mut diff, &stale, &[], false)?;
+                    self.shared.commit(&diff, proto::now_us(), true);
+                }
+            }
+            let Some(frame) = frame else { continue };
             rects.clear();
             rects.extend(frame.dirty.iter().filter_map(|r| r.clip(width, height)));
             rects.extend(frame.moved.iter().filter_map(|m| m.dst.clip(width, height)));
             if rects.is_empty() {
                 continue;
             }
-            match capture.mapped() {
-                Some((pixels, src_stride)) => diff.diff(pixels, src_stride, &rects, &frame.moved),
-                None => {
-                    staging.resize(stride * height as usize, 0);
-                    capture.read(&rects, &mut staging, stride)?;
-                    diff.diff(&staging, stride, &rects, &frame.moved)
+            // `mark_rects` lists the skipped tiles as changed; `diff` appends the read ones.
+            let t0 = std::time::Instant::now();
+            let tiles = diff.mark_rects(&rects, hints.as_ref().map_or(&[][..], |h| &h.skip));
+            let skipped = diff.changed.len();
+            read_and_diff(&mut capture, &mut diff, &tiles, &frame.moved, true)?;
+            let t1 = t0.elapsed();
+            self.shared.commit(&diff, frame.capture_us, false);
+            let t2 = t0.elapsed();
+            PROBE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.0 += 1;
+                p.1 += (proto::now_us() - frame.capture_us) - t2.as_micros() as u64;
+                p.2 += t1.as_micros() as u64;
+                p.3 += (t2 - t1).as_micros() as u64;
+                p.4 += skipped as u64;
+                p.5 += tiles.iter().map(|r| (r.w * r.h) as u64).sum::<u64>() / 4096;
+                if p.0 == 300 {
+                    eprintln!(
+                        "capture/frame: pre {}us read+diff {}us commit {}us skipped {} read-tiles {}",
+                        p.1 / 300, p.2 / 300, p.3 / 300, p.4 / 300, p.5 / 300
+                    );
+                    *p = Default::default();
                 }
-            };
-            self.shared.commit(&diff, frame.capture_us);
+            });
         }
         Ok(())
     }
+}
+
+thread_local! {
+    static PROBE: std::cell::RefCell<(u64, u64, u64, u64, u64, u64)> = Default::default();
 }

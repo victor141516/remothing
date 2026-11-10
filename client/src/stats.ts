@@ -15,7 +15,8 @@ export interface Summary {
 export const SERIES = [
   'server', // oldest capture -> sent
   'serverWait', // oldest capture -> frame build started (ACK window / scheduling)
-  'encode', // video load + encode
+  'upload', // video encoder input upload (changed regions)
+  'encode', // H.264 encode
   'net', // sent -> received
   'decode', // received -> video picture decoded
   'client', // received -> drawn
@@ -140,6 +141,7 @@ export class Stats {
       `            p50 / p99 ms`,
       `server      ${line(this.series.server)}`,
       `  wait      ${line(this.series.serverWait)}`,
+      `  upload    ${line(this.series.upload)}`,
       `  encode    ${line(this.series.encode)}`,
       `network     ${line(this.series.net)}`,
       `client      ${line(this.series.client)}`,

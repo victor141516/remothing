@@ -204,7 +204,10 @@ function apply(f: Frame): void {
   rec.frame(f.buf.byteLength, !!f.picture);
   rec.push('server', f.sent - f.oldest);
   rec.push('serverWait', Number(v.getBigUint64(32, true)) / 1000 - f.oldest);
-  if (f.picture) rec.push('encode', v.getUint32(40, true) / 1000);
+  if (f.picture) {
+    rec.push('upload', v.getUint16(46, true) / 100);
+    rec.push('encode', v.getUint32(40, true) / 1000);
+  }
   rec.push('net', f.received + offset - f.sent);
   rec.push('client', drawn - f.received);
   rec.push('total', drawn + offset - f.oldest);

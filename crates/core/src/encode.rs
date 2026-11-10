@@ -21,8 +21,12 @@ pub struct Encoded {
 }
 
 pub trait EncoderProvider: Send + Sync {
-    /// Backends compiled in, in default preference order.
+    /// Backends usable on this machine, in default preference order.
     fn backends(&self) -> Vec<&'static str>;
+    /// Backends present in the build but not usable here (name, reason), for status.
+    fn unavailable(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
     fn create(&self, req: &EncoderRequest) -> Result<Box<dyn VideoEncoder>>;
 }
 

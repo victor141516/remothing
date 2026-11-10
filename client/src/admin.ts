@@ -31,6 +31,8 @@ interface Status {
   provider: string;
   display: DisplayInfo | null;
   encoders: string[];
+  /** Compiled-in backends that failed the startup probe: [name, reason]. */
+  encoders_unavailable: [string, string][];
   encoder_preferred: string;
   gpus: { name: string; vendor: string; utilization: number | null }[];
   cpu_percent: number;
@@ -280,6 +282,14 @@ function renderStatus(s: Status) {
       h('dd', {}, d ? `${d.name} (${d.id}) ${fmtRes(d)} @ ${fmtHz(d.refresh_hz)}` : h('span', { class: 'dim' }, 'none')),
       h('dt', {}, 'Encoders'),
       h('dd', {}, s.encoders.length ? s.encoders.join(', ') : h('span', { class: 'dim' }, 'none (lossless tiles only)')),
+      h('dt', {}, 'Unavailable encoders'),
+      h(
+        'dd',
+        {},
+        s.encoders_unavailable.length
+          ? h('ul', { class: 'plain' }, ...s.encoders_unavailable.map(([name, why]) => h('li', {}, h('b', {}, name), ': ', why)))
+          : h('span', { class: 'dim' }, 'none'),
+      ),
       h('dt', {}, 'Preferred encoder'),
       h('dd', {}, s.encoder_preferred),
       h('dt', {}, 'CPU'),
