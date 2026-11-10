@@ -1,6 +1,6 @@
 # Games: stalls of 200-450 ms, and a motion mode (whole screen as video)
 
-- Status: under discussion (step 1 is agreed as the first thing to do)
+- Status: under discussion (one question left: how video goes over UDP)
 - Created: 2026-11-10
 
 ## Goal
@@ -12,18 +12,11 @@ with no composition and no detection of changed areas, would solve it.
 
 ## Open questions
 
-1. **Transport without retransmission stalls.** The user asked what this
-   means; it was explained on 2026-11-10 (today a lost packet makes
-   everything behind it wait for TCP to send it again; Sunshine never
-   resends, it rebuilds the packet from redundancy or skips the frame). No
-   decision yet. Decide after step 1 shows how much of the problem is the
-   network. See step 3.
-2. **"The whole screen is moving a lot"**, in numbers. Proposed: at least
-   half of the screen's area is in the video layer, in every second. To be
-   tuned with real sessions; confirm the idea, not the number.
-3. **"The client's resolution"**: taken here as the client's screen in
-   device pixels, not the size of its browser window (a window can be
-   resized at any moment, and each size change costs a keyframe). Confirm.
+1. **How video goes over UDP from a browser.** The user wants UDP first,
+   direct, with fallback (decided, below). A web page cannot open a UDP
+   socket of its own; it has two ways to UDP, compared in "Video over
+   UDP": a WebRTC video track (recommended) or WebTransport datagrams.
+   Which one?
 
 ## Decided (user, 2026-11-10)
 
@@ -31,8 +24,17 @@ with no composition and no detection of changed areas, would solve it.
   through Sunshine was on the same Wi-Fi. That network, the MacBook and
   the server are all in Madrid. So the client is powerful, the distance is
   short, and both comparisons used the same network.
-- **Order**: measure first which stage stalls (step 1), as the initial
-  analysis.
+- **Video over UDP first, no measuring before it.** A lost packet on TCP
+  shows as a hard stall; over UDP what is lost does not hold up what comes
+  after it. Try UDP at every connection, direct to the server, without
+  relay servers. If it cannot connect for whatever reason (a proxy that
+  does not carry UDP, a closed port), fall back to the other transports,
+  down to TCP.
+- **Measuring which stage stalls** is still wanted as analysis, but it
+  does not come before UDP any more.
+- **"The whole screen is moving a lot"**: at least half of the screen in
+  the video layer during each second, as the first implementation; tune
+  later.
 - **The mode is fully automatic**, no button, and deliberately slow to
   change. It is for anything that moves the whole screen: a game, a
   full-screen video.
@@ -48,9 +50,13 @@ with no composition and no detection of changed areas, would solve it.
   the exact picture to finish it, as today. If the screen changes while
   that is being sent, what is left of it no longer matters: go back to
   sending video of what is on the screen.
-- **Size and frame rate per client**: they may go down to what the client
-  has and never below. A 1080p client of a 4K server may get 1080p, not
-  less. The same for frames per second.
+- **Size per client**: the size of the browser window is the least the
+  stream may be, not what it always is. When the link carries more, stream
+  larger than the window, up to the display's own size: adaptive. A window
+  being resized passes through many sizes; follow it only once it has
+  settled (about 3 s), not at every step of the drag.
+- **Frame rate per client**: may go down to what the client shows, never
+  below.
 
 ## What was found
 
@@ -106,16 +112,17 @@ Reasoned, not measured:
 
 ## Why Sunshine does not show it
 
-`docs/SUNSHINE.md` has the full comparison, from its source. The parts that
-match what was found here:
+`tasks/003-performance-ideas-from-sunshine.md` has the full comparison, from
+its source (the candidate numbers below are its). The parts that match what
+was found here:
 
 - No retransmission: UDP with forward error correction, so a lost packet
-  delays nothing (item 10). We use TCP, and the WebRTC data channel is
+  delays nothing (candidate 10). We use TCP, and the WebRTC data channel is
   reliable and ordered too.
 - Process, thread and GPU priority raised, so a game cannot starve capture
-  and encoding (items 1, 2, 4). We do none of it.
-- Fixed bitrate agreed at connect, no keyframe for rate changes (items 5
-  and 7). Our cap changes cost a keyframe each with NVENC through FFmpeg.
+  and encoding (candidates 1, 2, 4). We do none of it.
+- Fixed bitrate agreed at connect, no keyframe for rate changes (candidates
+  5 and 7). Our cap changes cost a keyframe each with NVENC through FFmpeg.
 - Whole frames at the size and rate the client asked for (general
   knowledge of Moonlight, not read in the source).
 
@@ -132,7 +139,8 @@ The user's idea, with their decisions above. Two modes per display:
 
 - The measure is a property of the screen, not of a client, so the mode is
   per display and every client of that display is in the same mode.
-- Each second is judged "moving" or "quiet" (open question 2).
+- Each second is judged "moving" (at least half of the screen's area in
+  the video layer) or "quiet".
 - Tile -> motion: 10 s of "moving" in a row. One quiet second starts the
   count again.
 - Motion -> tile: 40 s of "quiet" in a row (the user's range is 30-60 s;
@@ -150,12 +158,27 @@ The user's idea, with their decisions above. Two modes per display:
   A change on the screen while it is being sent drops what is left of it
   and video goes on; the next exact picture needs another 5 s of
   stillness. Pauses shorter than 5 s stay lossy.
-- **Size per client**: scaled down to the client's screen when that is
-  smaller than the display, never below it (open question 3). Pixels the
-  client cannot show are not encoded, sent or decoded.
+- **Size per client**, between two limits:
+  - least: the picture's size in the client's window, in device pixels.
+    The client reports it 3 s after the last resize, so dragging a window
+    edge changes the stream once.
+  - most: the display's own size.
+  - in between: the largest size the link affords. A size needs pixels x
+    frames per second x a bits-per-pixel constant (to be tuned); it is
+    afforded when that fits in the video share of the link estimate. Sizes
+    come from a short ladder (the least, the display's, and fixed fractions
+    of it between them), since every change is an encoder restart and a
+    keyframe.
+  - larger only after the link has had room for 10 s; smaller as soon as
+    it has not. Never below the least: there the bitrate drops instead.
+  - Pixels beyond the window's are scaled away by the client. What a
+    larger stream buys is colour detail (4:2:0 video stores colour at half
+    size, so coloured edges and text are sharper after scaling down); what
+    it costs is encoder and decoder work. The user chose it knowing that
+    the stream may exceed the window.
 - **Frame rate per client**: capped at the client's refresh rate, never
   below it. Frames the client cannot show are not encoded.
-- The client reports its screen size and refresh rate; encoders are per
+- The client reports its picture size and refresh rate; encoders are per
   client already.
 
 ### What it removes and what it does not
@@ -168,12 +191,12 @@ through the video encoder. Motion mode removes:
 - the lossless bursts when part of the picture stops (HUD, menus, pause),
   which compete with the video for the link and cost CPU on both sides;
 - tiles moving between the two layers;
-- with the per-client size and rate: decoding more pixels and frames than
-  the client shows.
+- with the per-client rate: encoding and decoding frames the client never
+  shows.
 
-It does not remove a TCP retransmission stall, nor the encoder waiting for
-a GPU the game keeps busy. Alone it is unlikely to make the stalls go away;
-that is why step 1 comes first.
+By itself it does not remove a TCP retransmission stall (that is what
+"Video over UDP" is for), nor the encoder waiting for a GPU the game keeps
+busy (step 5).
 
 ### Costs and risks
 
@@ -185,28 +208,68 @@ that is why step 1 comes first.
 - The exact picture of a whole 4K screen is large; on a slow link it takes
   seconds and is the first thing dropped when the screen moves again.
 
+## Video over UDP
+
+Decided: UDP first, direct, fallback to what exists. Open: which of the
+two ways a browser has (open question 1).
+
+Why it helps, and what it does not do by itself: compressed video frames
+build on the previous ones, so a frame that lost a packet cannot just be
+skipped; the following ones need it. Over UDP nothing waits for TCP's
+timer, but the loss still has to be dealt with: ask again for that one
+packet (a round trip, here a few ms), rebuild it from redundancy sent
+along, or give up and ask for a keyframe.
+
+| | WebRTC video track | WebTransport datagrams |
+|---|---|---|
+| what it is | the browser's own real-time video path (RTP): it asks again only for the missing packet, can use redundancy, asks for a keyframe when it gives up, decodes and shows the frames itself | bare unreliable packets over QUIC; everything about loss (redundancy, skipping, keyframes) is ours to write, on both sides |
+| connects through | the UDP port and direct path the data channel already uses (`rtc.rs`, str0m) | a new HTTP/3 listener on a UDP port |
+| browsers | all, phones included | Chrome and Firefox; Safari to be checked |
+| certificate | nothing new | a CA certificate, or a self-signed one pinned by hash and renewed every two weeks |
+| our pipeline | the browser shows the video (a `<video>` element), outside our decoder and compositor: fits motion mode, where the whole picture is video | stays ours: decoder, compositor, link model |
+| cost | medium: media in str0m, keyframes on request, bitrate from its feedback | very high: a third transport, plus error correction in the client |
+| main risk | the browser's own buffering adds delay; to be measured (cloud gaming in browsers uses this path) | each loss the redundancy cannot repair costs a keyframe until the encoder can invalidate references (task 003, candidate 5) |
+
+Recommended: the WebRTC video track, carrying the video of motion mode.
+
+- **Direct, no relay**: TURN is a relay server; none is used and none is
+  added. STUN only lets the server find its public address by itself and is
+  optional (`webrtc.stun_servers`); `webrtc.advertise` with a forwarded UDP
+  port does the same by hand. Either way the browser sends straight to the
+  server's address and port.
+- **Order of attempts**: the UDP path is tried at every connection, as
+  today. When it is up, motion-mode video uses it: no comparing round
+  trips first (today the data channel is only chosen when it is clearly
+  shorter, because a reliable channel over the same path gains nothing).
+  When it does not come up within a few seconds, or dies (the existing
+  dead-path detection), motion-mode video goes as today's frames over the
+  data channel or the WebSocket.
+- **Tile mode** keeps the reliable transports: lossless data needs every
+  byte. Video areas inside tile mode (a video in a window, or a game in
+  its first 10 s) therefore still ride on them.
+- **Already tried, do not repeat**: an unreliable data channel with our
+  own retransmission. The browser's SCTP counts what it abandons as loss
+  and shrinks its window; 0 fps at 1 % loss (`docs/RESULTS.md`).
+
 ## Proposed steps
 
-1. **Find the stage** (agreed as the first analysis). Put the server's own
-   split into the late-frame report: waiting for the window, upload, encode
-   (the client already has the three numbers per frame), and whether a
-   frame was waiting for an ACK. Then play a real match for some minutes
-   and read the event log. Small: the report is built in
-   `client/src/worker.ts`.
-2. **If it is the GPU**: items 1, 2 and 4 of `docs/SUNSHINE.md` (process
-   and thread priority, GPU priority, MMCSS for the compositor). Small.
+1. **Motion mode** over the transports that exist: the mode decision next
+   to the capture loop, a path in `crates/core/src/shared.rs` and
+   `stream.rs` that bypasses the tile policy, the exact picture after 5 s
+   still, and a client that draws video only while the mode is on.
+2. **Video over UDP** for motion mode, as open question 1 is answered,
+   with the fallback order above.
+3. **Per-client size and rate**: the client's report (debounced), the
+   ladder, scalers in `crates/encoder`.
+4. **Find the stage of what is left** (analysis, small, any time): put the
+   server's own split into the late-frame report: waiting for the window,
+   upload, encode (the client already has the three numbers per frame).
+   The report is built in `client/src/worker.ts`. It tells whether the
+   "almost all server" stalls are the GPU.
+5. **If it is the GPU**: candidates 1, 2 and 4 of task 003 (process and
+   thread priority, GPU priority, MMCSS for the compositor). Small.
    GPU priority above normal may need the elevated or service process.
-3. **If it is TCP**: no cheap fix (open question 1). Options are a WebRTC
-   video track (the browser brings RTP, loss recovery and its own jitter
-   buffer; `rtc.rs` uses str0m for data channels only today) or
-   WebTransport datagrams with our own error correction
-   (`docs/SUNSHINE.md` item 10). Either is a third transport and a task of
-   its own.
-4. **Motion mode**, as described above. Needs a path in
-   `crates/core/src/shared.rs` and `stream.rs` that bypasses the tile
-   policy, the mode decision next to the capture loop, scalers in
-   `crates/encoder`, and a client that draws video only while it is on.
-5. **Estimate without bound** on short paths: reproduce on the current
+6. **Estimate without bound** on short paths: reproduce on the current
    build and bound it (separate small fix, whatever the rest).
 
 ## Testing
@@ -215,24 +278,31 @@ that is why step 1 comes first.
   plays, the event log is read afterwards. `AGENTS.md`: do not type or
   click into the live session.
 - For repeatable numbers: a GPU-bound load next to `rt-testapp --mode
-  full` on a private instance, before and after steps 2 and 4, compared
-  with the profiles in `docs/RESULTS.md`. `docs/SUNSHINE.md` asks for the
-  same baseline under load ("Orden de trabajo sugerido", step 1).
-- Loss: the Linux bench container with `netem loss`, where the 2 % Wi-Fi
-  profile is the reference for step 3.
+  full` on a private instance, before and after steps 1 and 5, compared
+  with the profiles in `docs/RESULTS.md`. Task 003 holds the baseline
+  under load measured so far ("Measured under load").
+- Loss: the Linux bench container with `netem loss` on UDP and on TCP
+  separately (`tc` filters by protocol), 2 % Wi-Fi profile:
+  late frames and worst capture-to-draw with the UDP video against the
+  same video on the WebSocket. Also UDP blocked from the start and cut in
+  the middle of a session: the stream must go on over the fallback.
 - Mode switching is logic that can be judged without a machine: a unit
   test of the decision with the user's own case (10 s of video, some
   seconds of folders, again and again) must show no flip-flopping, plus
   the two thresholds and the reset of each count.
 - Still picture: stop `rt-testapp` for 6 s and check the client's picture
   is pixel-exact; move again at 5.5 s and check the video resumes at once.
-- Per-client size and rate: a client with a smaller screen and a 60 Hz
-  refresh next to a full-size one; check what each receives.
+- Per-client size and rate: a small window and a 60 Hz client next to a
+  full-size one, check what each receives; drag a window edge for some
+  seconds and check one size change; shape the link down and up and check
+  the ladder moves, never below the window.
 
 ## Not verified
 
-- Which of the two readings of "server" time is the real one. Everything
-  after step 1 depends on it.
+- Which of the two readings of "server" time is the real one (step 4).
+- How much delay the browser's own buffering adds to a WebRTC video track
+  on each browser, and whether Safari has WebTransport with pinned
+  certificates. Both from general knowledge, not tried here.
 - That the stalls in the log happened during a match and not in the
   launcher or on the desktop.
 - Decoder limits on the clients, and how Moonlight was configured
