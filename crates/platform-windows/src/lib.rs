@@ -7,6 +7,7 @@
 mod cursor;
 mod desktop;
 mod dxgi;
+mod gpu_diff;
 mod input;
 mod keymap;
 mod monitor;

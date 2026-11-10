@@ -43,14 +43,24 @@ flowchart LR
 ## Frame path
 
 1. **Capture** (`CaptureSession::next_frame`): the provider reports dirty
-   rectangles (XDamage / DXGI dirty+move rects) and a capture timestamp.
-2. **Diff** (`TileDiff`, capture thread, no lock): 64×64 tiles touched by the
-   damage are compared with the last published copy; only really changed tiles
-   go on. Pixels come straight from mapped memory (Xvfb shm) or via `read()`
-   (XShm, D3D11 staging copy of the dirty rects only).
-3. **Commit** (`Shared::commit`, short lock): changed tiles are copied into the
-   shared framebuffer, motion history updated, client threads woken.
-4. **Per-client producer** (`stream.rs::produce`, one OS thread per client):
+   rectangles (XDamage / DXGI dirty+move rects), optional move rects and a
+   capture timestamp.
+2. **Moves**: provider moves (DXGI) — or, for damage-only providers, a
+   vertical scroll detected by row hashing (`Differ::detect_scroll`) — are
+   applied to the shared screen copy first, so scrolled content is not seen as
+   changed; clients replay them as GPU copies on their lossless layer and only
+   the newly exposed strip travels.
+3. **Diff** (`pixels::Differ`, capture thread): 64×64 tiles touched by the
+   damage are compared with the shared screen copy (`pixels::Pixels`, one lock
+   per tile row) and changed tiles are written in place. Pixels come straight
+   from mapped memory (Xvfb shm) or via `read()` (XShm, D3D11 staging copy of
+   the dirty tiles only). With a GPU capture surface, tiles that every client
+   shows from video and whose encoder reads the GPU surface are not read back
+   at all; their CPU copy is refreshed once they settle, before the lossless
+   refine.
+4. **Commit** (`Shared::commit`, short metadata lock): motion history, per
+   client dirty/encoder-stale flags and pending moves; client threads woken.
+5. **Per-client producer** (`stream.rs::produce`, one OS thread per client):
    when the ACK window (2 frames in flight) allows, `Shared::pull` builds a
    frame:
    - tiles changing ≥20 Hz whose lossless cost exceeds the per-frame limit or
@@ -60,10 +70,11 @@ flowchart LR
      stops moving becomes pixel-exact;
    - when a video tile changed, only the changed tiles are uploaded to the
      encoder input (CUDA surface / D3D11 texture copy / host frame) and one
-     H.264 access unit is encoded (no B-frames, no lookahead, IDR on demand).
-5. **Client** (`worker.ts`): frames are applied in order and atomically —
-   lossless rects to one texture, decoded VideoFrame to another, per-tile mask
-   picks the layer in the WebGL2 shader. ACK after drawing.
+     H.264 access unit is encoded (no B-frames, no lookahead, IDR on demand,
+     SPS marked "no reordering" so browsers output each picture immediately).
+6. **Client** (`worker.ts`): frames are applied in order and atomically —
+   moves, then lossless rects to one texture, decoded VideoFrame to another;
+   a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing.
 
 Input goes through its own WebSocket (`/input`) so it never queues behind
 frame data; the server injects it through the selected display's

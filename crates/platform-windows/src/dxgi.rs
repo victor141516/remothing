@@ -3,6 +3,8 @@
 //! Each session owns a D3D11 device on the output's adapter and a persistent
 //! BGRA texture (the `D3D11Frame` shared with encoders) kept equal to the
 //! desktop image by copying only the changed areas of every acquired frame.
+//! The DXGI dirty areas are narrowed to the tiles that really changed on the
+//! GPU (`gpu_diff`) before they are reported.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,14 +23,13 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO,
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, RECT, S_OK};
+use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HANDLE, HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Query, ID3D11Texture2D,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_QUERY_DESC, D3D11_QUERY_EVENT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_STAGING,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_MODE_ROTATION_IDENTITY,
@@ -41,12 +42,19 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
 };
 use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+use windows::Win32::System::Threading::{
+    CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE,
+    TIMER_ALL_ACCESS,
+};
 
 use crate::cursor::{self, CursorTracker};
 use crate::desktop;
+use crate::gpu_diff::{GpuDiff, GpuFence};
 
 /// Minimum delay between re-duplication attempts while the desktop is not capturable.
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// Delay between non-blocking AcquireNextFrame polls (see `next_frame`).
+const POLL_INTERVAL: Duration = Duration::from_micros(250);
 
 /// One attached output of one adapter.
 pub struct Output {
@@ -226,11 +234,12 @@ fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> windows::core::Res
 pub struct DxgiSession {
     output: IDXGIOutput1,
     frame: Arc<D3D11Frame>,
+    diff: GpuDiff,
     dupl: Option<IDXGIOutputDuplication>,
     /// CPU-readable copy target for `read`, created on first use.
     staging: Option<ID3D11Texture2D>,
     /// Signals when the staging copies are done, so `read` waits without the context lock.
-    copied: Option<ID3D11Query>,
+    copied: GpuFence,
     width: u32,
     height: u32,
     /// Next frame copies and reports the whole display (first frame, re-duplication).
@@ -242,6 +251,7 @@ pub struct DxgiSession {
     move_buf: Vec<DXGI_OUTDUPL_MOVE_RECT>,
     shape_buf: Vec<u8>,
     cursor: CursorTracker,
+    poll_timer: PollTimer,
 }
 
 // SAFETY: D3D11/DXGI objects are free-threaded (the device is multithread
@@ -260,12 +270,14 @@ impl DxgiSession {
             bail!("duplication is {width}x{height} but the output is {}x{}", out.info.width, out.info.height);
         }
         let texture = create_texture(&device, width, height, D3D11_USAGE_DEFAULT.0, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0)?;
+        let frame = Arc::new(D3D11Frame::new(device, context, texture, width, height));
         Ok(Self {
             output,
-            frame: Arc::new(D3D11Frame::new(device, context, texture, width, height)),
+            diff: GpuDiff::new(&frame).context("GPU tile diff")?,
+            copied: GpuFence::new(&frame)?,
+            frame,
             dupl: Some(dupl),
             staging: None,
-            copied: None,
             width,
             height,
             full_pending: true,
@@ -275,6 +287,7 @@ impl DxgiSession {
             move_buf: Vec::new(),
             shape_buf: Vec::new(),
             cursor: CursorTracker::default(),
+            poll_timer: PollTimer::new()?,
         })
     }
 
@@ -319,13 +332,15 @@ impl DxgiSession {
 
     /// Copies the changed areas of the acquired image into the persistent
     /// texture and describes them. Runs between Acquire and ReleaseFrame.
+    /// `true` with the frame: its dirty areas are still being narrowed on the
+    /// GPU and must be collected with [`GpuDiff::collect`].
     fn process(
         &mut self,
         dupl: &IDXGIOutputDuplication,
         info: &DXGI_OUTDUPL_FRAME_INFO,
         resource: Option<IDXGIResource>,
         capture_us: u64,
-    ) -> Result<Option<FrameInfo>> {
+    ) -> Result<Option<(FrameInfo, bool)>> {
         if info.LastMouseUpdateTime != 0 {
             self.cursor.set_visible(info.PointerPosition.Visible.as_bool());
         }
@@ -354,10 +369,14 @@ impl DxgiSession {
         let mut moved = Vec::new();
         if self.full_pending {
             self.full_pending = false;
-            // SAFETY: same size and format family (checked above).
-            self.frame.with_context(|ctx| unsafe { ctx.CopyResource(&self.frame.texture, &image) });
+            let (frame, diff) = (&self.frame, &self.diff);
+            frame.with_context(|ctx| {
+                // SAFETY: same size and format family (checked above).
+                unsafe { ctx.CopyResource(&frame.texture, &image) };
+                diff.reset(ctx, &frame.texture);
+            });
             dirty.push(Rect::new(0, 0, w, h));
-            return Ok(Some(FrameInfo { capture_us, dirty, moved }));
+            return Ok(Some((FrameInfo { capture_us, dirty, moved }, false)));
         }
         if info.TotalMetadataBufferSize == 0 {
             return Ok(None);
@@ -375,21 +394,26 @@ impl DxgiSession {
             moved.push(MovedRect { src_x: sx as u32, src_y: sy as u32, dst });
         }
         dirty.extend(self.dirty_buf.iter().filter_map(|r| clip(r, w, h)));
-        if dirty.is_empty() && moved.is_empty() {
+        if !self.diff.select(dirty.iter().chain(moved.iter().map(|m| &m.dst))) {
             return Ok(None);
         }
         // The acquired image already is the complete new desktop, so moved
         // areas are copied from their destination like any damage: no
         // overlapping self-copies in the persistent texture.
-        let frame = &self.frame;
-        frame.with_context(|ctx| {
+        let (frame, diff) = (&self.frame, &mut self.diff);
+        let compared = frame.with_context(|ctx| {
             for r in dirty.iter().chain(moved.iter().map(|m| &m.dst)) {
                 let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
                 // SAFETY: box clipped to both textures (same size).
                 unsafe { ctx.CopySubresourceRegion(&frame.texture, 0, r.x, r.y, 0, &image, 0, Some(&b)) };
             }
-        });
-        Ok(Some(FrameInfo { capture_us, dirty, moved }))
+            diff.submit(ctx, &frame.texture)
+        })?;
+        if compared {
+            // Replaced by the tiles that really changed; move destinations stay reported through `moved`.
+            dirty.clear();
+        }
+        Ok(Some((FrameInfo { capture_us, dirty, moved }, compared)))
     }
 
     fn read_metadata(&mut self, dupl: &IDXGIOutputDuplication, total: usize) -> Result<()> {
@@ -438,19 +462,6 @@ impl DxgiSession {
         self.staging = Some(t.clone());
         Ok(t)
     }
-
-    fn copied_query(&mut self) -> Result<ID3D11Query> {
-        if let Some(q) = &self.copied {
-            return Ok(q.clone());
-        }
-        let desc = D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 };
-        let mut q = None;
-        // SAFETY: valid descriptor and out pointer.
-        unsafe { self.frame.device.CreateQuery(&desc, Some(&mut q)) }.context("create event query")?;
-        let q = q.context("CreateQuery returned no query")?;
-        self.copied = Some(q.clone());
-        Ok(q)
-    }
 }
 
 /// Validates a fresh duplication and returns its size. The mode format is not
@@ -465,7 +476,7 @@ fn check_mode(dupl: &IDXGIOutputDuplication) -> Result<(u32, u32)> {
     Ok((desc.ModeDesc.Width, desc.ModeDesc.Height))
 }
 
-fn create_texture(device: &ID3D11Device, width: u32, height: u32, usage: i32, bind: u32, cpu: u32) -> Result<ID3D11Texture2D> {
+pub(crate) fn create_texture(device: &ID3D11Device, width: u32, height: u32, usage: i32, bind: u32, cpu: u32) -> Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
@@ -491,6 +502,41 @@ fn clip(r: &RECT, w: u32, h: u32) -> Option<Rect> {
     let rr = (r.right.max(0) as u32).min(w);
     let b = (r.bottom.max(0) as u32).min(h);
     (l < rr && t < b).then(|| Rect::new(l, t, rr - l, b - t))
+}
+
+/// Sub-millisecond sleeps between AcquireNextFrame polls (`Sleep` rounds up
+/// to the system timer resolution, typically 1–15.6 ms).
+struct PollTimer(HANDLE);
+
+impl PollTimer {
+    fn new() -> Result<Self> {
+        // SAFETY: unnamed timer, default security. High-resolution timers need
+        // Windows 10 1803+; older systems get a coarser plain timer.
+        let timer = unsafe {
+            CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+                .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
+        }
+        .context("CreateWaitableTimerEx")?;
+        Ok(Self(timer))
+    }
+
+    fn sleep(&self, d: Duration) -> Result<()> {
+        // Negative due time: relative, in 100 ns units.
+        let due = -((d.as_nanos() / 100).max(1) as i64);
+        // SAFETY: timer owned by self; no completion routine.
+        unsafe {
+            SetWaitableTimer(self.0, &due, 0, None, None, false).context("SetWaitableTimer")?;
+            WaitForSingleObject(self.0, INFINITE);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PollTimer {
+    fn drop(&mut self) {
+        // SAFETY: handle created in `new`, closed once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
 }
 
 impl CursorProvider for DxgiSession {
@@ -519,16 +565,27 @@ impl CaptureSession for DxgiSession {
         let dupl = self.dupl.clone().expect("duplication present");
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
-        let ms = timeout.as_millis().min(u128::from(u32::MAX)) as u32;
-        // SAFETY: valid out pointers; frames are always released below.
-        match unsafe { dupl.AcquireNextFrame(ms, &mut info, &mut resource) } {
-            Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
-            Err(e) if transient(e.code()) => {
-                self.lost(&e);
-                return Ok(None);
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Never waits inside AcquireNextFrame: it would hold the
+            // multithread-protected device lock for the whole wait and stall
+            // the encoder's D3D11 calls (NVENC, FFmpeg) on this device.
+            // SAFETY: valid out pointers; frames are always released below.
+            match unsafe { dupl.AcquireNextFrame(0, &mut info, &mut resource) } {
+                Ok(()) => break,
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(None);
+                    }
+                    self.poll_timer.sleep(POLL_INTERVAL.min(deadline - now))?;
+                }
+                Err(e) if transient(e.code()) => {
+                    self.lost(&e);
+                    return Ok(None);
+                }
+                Err(e) => return Err(e).context("AcquireNextFrame"),
             }
-            Err(e) => return Err(e).context("AcquireNextFrame"),
         }
         let capture_us = proto::now_us();
         let result = self.process(&dupl, &info, resource, capture_us);
@@ -540,7 +597,15 @@ impl CaptureSession for DxgiSession {
                 return Err(e).context("ReleaseFrame");
             }
         }
-        result
+        // The tile diff is collected after the release: DXGI can compose the next frame meanwhile.
+        let Some((mut frame, pending)) = result? else { return Ok(None) };
+        if pending {
+            self.diff.collect(&self.frame, &mut frame.dirty)?;
+            if frame.dirty.is_empty() && frame.moved.is_empty() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(frame))
     }
 
     fn read(&mut self, rects: &[Rect], dst: &mut [u8], dst_stride: usize) -> Result<()> {
@@ -553,35 +618,18 @@ impl CaptureSession for DxgiSession {
             bail!("read: destination too small ({} < {end} bytes)", dst.len());
         }
         let staging = self.staging()?;
-        let copied = self.copied_query()?;
-        let frame = &self.frame;
+        let (frame, copied) = (&self.frame, &mut self.copied);
         frame.with_context(|ctx| {
             for r in clipped() {
                 let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
                 // SAFETY: rects clipped to the (equal) texture sizes.
                 unsafe { ctx.CopySubresourceRegion(&staging, 0, r.x, r.y, 0, &frame.texture, 0, Some(&b)) };
             }
-            // SAFETY: query created on this device.
-            unsafe {
-                ctx.End(&copied);
-                ctx.Flush();
-            }
-        });
+            copied.signal(ctx)
+        })?;
         // Wait for the GPU with the context unlocked: encoders keep submitting
         // meanwhile (a blocking Map would hold the lock for the whole copy).
-        loop {
-            // The safe wrapper folds S_FALSE ("not done yet") into Ok; call the
-            // vtable entry to get the raw HRESULT.
-            // SAFETY: event query of this device; no output data requested.
-            let done = frame.with_context(|ctx| unsafe {
-                (Interface::vtable(ctx).GetData)(Interface::as_raw(ctx), copied.as_raw(), std::ptr::null_mut(), 0, 0)
-            });
-            if done == S_OK {
-                break;
-            }
-            done.ok().context("wait for staging copy")?;
-            std::thread::yield_now();
-        }
+        copied.wait().context("wait for staging copy")?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         frame
             // SAFETY: staging texture with CPU read access; the copies are complete.
