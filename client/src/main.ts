@@ -3,7 +3,7 @@
 
 import { Input } from './input';
 import { InputProber } from './probe';
-import { Series, p50p99 } from './stats';
+import { Stats } from './stats';
 import type { FromWorker, ToWorker } from './worker';
 
 declare global {
@@ -30,12 +30,13 @@ const input = new Input(canvas, (m) => {
   if (inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
 });
 
-const inputRtt = new Series();
-const prober = new InputProber((x, y) => input.moveTo(x, y), (rtt) => inputRtt.push(rtt));
+const stats = new Stats();
+let pingRtt = NaN;
+let pipeline = '';
+const prober = new InputProber((x, y) => input.moveTo(x, y), (rtt) => stats.inputRtt.push(rtt));
 
 const worker = new Worker('worker.js', { type: 'module' });
 const toWorker = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
-let reportWaiter: ((r: Record<string, unknown>) => void) | null = null;
 
 function layout(width: number, height: number): void {
   const dpr = window.devicePixelRatio || 1;
@@ -74,30 +75,28 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       prober.observed(m.marker, m.at);
       break;
     case 'stats':
-      if (!statsEl.hidden) statsEl.textContent = `${m.text}\ninput rtt   ${p50p99(inputRtt.summary())}`;
-      break;
-    case 'report':
-      reportWaiter?.(m.report);
+      stats.add(m.batch);
+      pingRtt = m.pingRtt;
+      pipeline = m.pipeline;
       break;
   }
 };
 
 const offscreen = canvas.transferControlToOffscreen();
-toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}/ws`, probe: probeEnabled }, [offscreen]);
+// `noread` keeps timing stats but skips the GPU readback the barcode probe needs.
+const readBarcode = probeEnabled && !params.has('noread');
+toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}/ws`, probe: readBarcode }, [offscreen]);
 statsEl.hidden = !(params.has('stats') || probeEnabled);
+if (!statsEl.hidden) setInterval(() => (statsEl.textContent = `${stats.text()}\n${pipeline}`), 500);
 
 if (benchSeconds > 0) {
   window.__bench = { done: false };
   setTimeout(() => {
-    toWorker({ type: 'reset' });
-    inputRtt.clear();
+    stats.reset();
     prober.start();
     setTimeout(() => {
       prober.stop();
-      reportWaiter = (report) => {
-        window.__bench = { done: true, result: { ...report, inputRtt: inputRtt.summary() } };
-      };
-      toWorker({ type: 'report' });
+      window.__bench = { done: true, result: { ...stats.report(), pingRtt } };
     }, benchSeconds * 1000);
   }, 2000);
 } else if (probeEnabled) {

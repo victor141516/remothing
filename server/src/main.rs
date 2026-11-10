@@ -19,6 +19,7 @@ struct Args {
     listen: SocketAddr,
     web: PathBuf,
     tile: u32,
+    tuning: net::Tuning,
 }
 
 fn parse_args() -> Result<Args> {
@@ -28,6 +29,7 @@ fn parse_args() -> Result<Args> {
         listen: "0.0.0.0:8080".parse()?,
         web: "/opt/remothing/web".into(),
         tile: 64,
+        tuning: net::Tuning { bandwidth_mbps: 200.0, max_lossless_frame_kb: 96 },
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -38,6 +40,8 @@ fn parse_args() -> Result<Args> {
             "--listen" => a.listen = val()?.parse()?,
             "--web" => a.web = val()?.into(),
             "--tile" => a.tile = val()?.parse()?,
+            "--bandwidth-mbps" => a.tuning.bandwidth_mbps = val()?.parse()?,
+            "--max-lossless-frame-kb" => a.tuning.max_lossless_frame_kb = val()?.parse()?,
             _ => bail!("unknown flag {flag}"),
         }
     }
@@ -63,7 +67,7 @@ fn main() -> Result<()> {
         }
     })?;
 
-    let app = Arc::new(net::App { shared, injector });
+    let app = Arc::new(net::App { shared, injector, tuning: args.tuning });
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()

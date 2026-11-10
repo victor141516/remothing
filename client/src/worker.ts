@@ -5,25 +5,22 @@
 // waits for its decoded picture, and later frames wait behind it, so lossless
 // rects, tile layer switches and the video picture always match.
 
+import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_KEYFRAME, C_PING, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
+  C_ACK, C_KEYFRAME, C_PING, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
   S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
 } from './proto';
 import { Renderer } from './renderer';
-import { Stats } from './stats';
+import { Recorder, type Batch } from './stats';
 
-export type ToWorker =
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean }
-  | { type: 'reset' }
-  | { type: 'report' };
+export type ToWorker = { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
   | { type: 'cursor'; buf: ArrayBuffer }
   | { type: 'marker'; marker: number; at: number }
-  | { type: 'stats'; text: string }
-  | { type: 'report'; report: Record<string, unknown> };
+  | { type: 'stats'; batch: Batch; pipeline: string; pingRtt: number };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -41,13 +38,14 @@ interface Frame {
 }
 
 let renderer: Renderer;
+/** Decompression target, one row of tiles. */
+let staging = new Uint8Array(0);
 let barcode: BarcodeReader | null = null;
 let ws: WebSocket;
 let decoder: VideoDecoder;
 let awaitingKey = true;
-let debugOutputs = 0;
 const queue: Frame[] = [];
-const stats = new Stats();
+const rec = new Recorder();
 
 // Clock sync: offset = server ms - client ms, from the lowest-RTT ping of a sliding window.
 let offset = 0;
@@ -69,7 +67,6 @@ function ping(): void {
 function createDecoder(): void {
   decoder = new VideoDecoder({
     output: (picture) => {
-      debugOutputs++;
       const f = queue.find((q) => q.hasVideo && !q.picture && q.seq === picture.timestamp);
       if (!f) {
         picture.close();
@@ -151,7 +148,14 @@ function apply(f: Frame): void {
     const enc = v.getUint8(off + 8);
     const len = v.getUint32(off + 12, true);
     off += RECT_HEADER_LEN;
-    if (enc === ENC_RAW) renderer.upload(x, y, w, h, new Uint8Array(f.buf, off, len));
+    const data = new Uint8Array(f.buf, off, len);
+    if (enc === ENC_RAW) {
+      renderer.upload(x, y, w, h, data);
+    } else if (enc === ENC_LZ4) {
+      const out = staging.subarray(0, w * h * 4);
+      lz4Decode(data, out);
+      renderer.upload(x, y, w, h, out);
+    }
     off += len;
   }
   const switches = v.getUint16(f.switchesAt, true);
@@ -160,7 +164,7 @@ function apply(f: Frame): void {
   if (f.picture) {
     renderer.uploadVideo(f.picture);
     f.picture.close();
-    stats.decode.push(f.decoded - f.received);
+    rec.push('decode', f.decoded - f.received);
   }
   renderer.draw();
   // Probe mode reads back pixels, which waits for the GPU to execute the draw:
@@ -176,22 +180,20 @@ function apply(f: Frame): void {
   if (code) {
     if (code.ts !== lastTs) {
       lastTs = code.ts;
-      stats.appToDraw.push(barcodeAge(code.ts, drawn + offset));
+      rec.push('appToDraw', barcodeAge(code.ts, drawn + offset));
     }
     if (code.marker !== lastMarker) {
       lastMarker = code.marker;
       post({ type: 'marker', marker: code.marker, at: drawn });
     }
   }
-  stats.frames++;
-  if (f.picture) stats.videoFrames++;
-  stats.bytes += f.buf.byteLength;
-  stats.server.push(f.sent - f.oldest);
-  stats.serverWait.push(Number(v.getBigUint64(32, true)) / 1000 - f.oldest);
-  if (f.picture) stats.encode.push(v.getUint32(40, true) / 1000);
-  stats.net.push(f.received + offset - f.sent);
-  stats.client.push(drawn - f.received);
-  stats.total.push(drawn + offset - f.oldest);
+  rec.frame(f.buf.byteLength, !!f.picture);
+  rec.push('server', f.sent - f.oldest);
+  rec.push('serverWait', Number(v.getBigUint64(32, true)) / 1000 - f.oldest);
+  if (f.picture) rec.push('encode', v.getUint32(40, true) / 1000);
+  rec.push('net', f.received + offset - f.sent);
+  rec.push('client', drawn - f.received);
+  rec.push('total', drawn + offset - f.oldest);
 }
 
 function connect(url: string): void {
@@ -215,7 +217,9 @@ function connect(url: string): void {
       case S_HELLO: {
         const width = v.getUint32(4, true);
         const height = v.getUint32(8, true);
-        renderer.resize(width, height, v.getUint32(12, true));
+        const tile = v.getUint32(12, true);
+        renderer.resize(width, height, tile);
+        staging = new Uint8Array(width * tile * 4);
         queue.length = 0;
         resetDecoder();
         post({ type: 'hello', width, height });
@@ -244,15 +248,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       connect(m.url);
       setInterval(ping, 1000);
       setInterval(() => {
-        const pipeline = `queue ${queue.length} [${queue.map((q) => `${q.seq}${q.hasVideo ? 'v' : ''}${q.picture ? 'p' : ''}`).join(',')}]  decoder ${decoder.state} q${decoder.decodeQueueSize} out ${debugOutputs}${awaitingKey ? ' awaiting key' : ''}`;
-        post({ type: 'stats', text: `${stats.text()}\n${pipeline}` });
-      }, 500);
-      break;
-    case 'reset':
-      stats.reset();
-      break;
-    case 'report':
-      post({ type: 'report', report: { ...stats.report(), pingRtt: Math.min(...syncSamples.map((s) => s.rtt)) } });
+        const pipeline = `queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
+        const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
+        post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
+      }, 250);
       break;
   }
 };

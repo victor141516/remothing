@@ -29,4 +29,5 @@ case "$MODE" in
   *) echo "unknown MODE $MODE" >&2; exit 1 ;;
 esac
 
-exec remothing-server --shmid "$SHMID" --listen 0.0.0.0:8080 --web /opt/remothing/web
+# shellcheck disable=SC2086 # SERVER_ARGS is a flag list
+exec remothing-server --shmid "$SHMID" --listen 0.0.0.0:8080 --web /opt/remothing/web ${SERVER_ARGS:-}

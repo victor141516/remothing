@@ -14,6 +14,7 @@ export const C_WHEEL = 12;
 export const C_KEY = 13;
 
 export const ENC_RAW = 0;
+export const ENC_LZ4 = 1;
 
 export const FLAG_VIDEO = 1;
 export const FLAG_KEY = 2;

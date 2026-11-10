@@ -18,6 +18,8 @@ pub const C_KEY: u8 = 13;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
+/// LZ4 block (lz4_flex::block) of the raw BGRX rows.
+pub const ENC_LZ4: u8 = 1;
 
 /// FRAME flags.
 pub const FLAG_VIDEO: u8 = 1;

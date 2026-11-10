@@ -18,7 +18,6 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use axum::Router;
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tower_http::services::ServeDir;
@@ -26,7 +25,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::input::Injector;
 use crate::proto;
-use crate::shared::{Pull, Shared};
+use crate::shared::{ClientCodec, Pull, Shared};
 use crate::video::VideoEncoder;
 
 /// Frames sent but not yet acknowledged by the client. Caps queueing in
@@ -37,6 +36,15 @@ const MAX_INFLIGHT: i32 = 2;
 pub struct App {
     pub shared: Arc<Shared>,
     pub injector: Injector,
+    pub tuning: Tuning,
+}
+
+#[derive(Clone, Copy)]
+pub struct Tuning {
+    /// Lossless bandwidth budget; moving areas beyond half of it go to video.
+    pub bandwidth_mbps: f64,
+    /// Moving areas costing more than this per frame go to video (transfer time is latency).
+    pub max_lossless_frame_kb: u64,
 }
 
 pub async fn serve(addr: SocketAddr, web_dir: PathBuf, app: Arc<App>) -> Result<()> {
@@ -98,12 +106,12 @@ async fn session(socket: WebSocket, app: Arc<App>) {
         key_request: AtomicBool::new(false),
         stop: AtomicBool::new(false),
     });
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Bytes>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let producer = {
-        let (shared, link, out_tx) = (app.shared.clone(), link.clone(), out_tx.clone());
+        let (shared, link, out_tx, tuning) = (app.shared.clone(), link.clone(), out_tx.clone(), app.tuning);
         std::thread::Builder::new()
             .name(format!("client-{}", link.id))
-            .spawn(move || produce(&shared, &link, &out_tx))
+            .spawn(move || produce(&shared, &link, tuning, &out_tx))
             .expect("spawn client thread")
     };
     let waker = producer.thread().clone();
@@ -118,7 +126,7 @@ async fn session(socket: WebSocket, app: Arc<App>) {
                 match (b.first().copied(), b.len()) {
                     (Some(proto::C_PING), 16..) => {
                         let ts = f64::from_le_bytes(b[8..16].try_into().unwrap());
-                        let _ = out_tx.send(proto::pong(ts).into());
+                        let _ = out_tx.send(proto::pong(ts));
                     }
                     (Some(proto::C_ACK), 8..) => {
                         // Signed: a client acking unknown frames only hurts its own pacing.
@@ -139,8 +147,12 @@ async fn session(socket: WebSocket, app: Arc<App>) {
         }
     };
     let writer = async {
-        while let Some(m) = out_rx.recv().await {
-            if tx.send(Message::Binary(m)).await.is_err() {
+        while let Some(mut m) = out_rx.recv().await {
+            if m[0] == proto::S_FRAME {
+                // Send time is taken here so "network" excludes the hop to this task.
+                m[24..32].copy_from_slice(&proto::now_us().to_le_bytes());
+            }
+            if tx.send(Message::Binary(m.into())).await.is_err() {
                 break;
             }
         }
@@ -156,30 +168,31 @@ async fn session(socket: WebSocket, app: Arc<App>) {
 }
 
 /// Client thread: pulls frames whenever the window allows, parks otherwise.
-fn produce(shared: &Shared, link: &ClientLink, out: &mpsc::UnboundedSender<Bytes>) {
+fn produce(shared: &Shared, link: &ClientLink, tuning: Tuning, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let g = shared.geometry();
-    let mut enc = match VideoEncoder::new(g.width, g.height) {
+    let enc = match VideoEncoder::new(g.width, g.height) {
         Ok(e) => Some(e),
         Err(e) => {
             eprintln!("video layer disabled: {e:#}");
             None
         }
     };
+    let mut codec = ClientCodec::new(&g, enc, tuning.bandwidth_mbps, tuning.max_lossless_frame_kb);
     let mut need_key = true;
     while !link.stop.load(Ordering::Acquire) {
         if let Some(c) = shared.take_cursor(link.id) {
-            if out.send(Bytes::copy_from_slice(&c)).is_err() {
+            if out.send(c.to_vec()).is_err() {
                 return;
             }
         }
         let mut wake_at_us = None;
         if link.inflight.load(Ordering::Acquire) < MAX_INFLIGHT {
             need_key |= link.key_request.swap(false, Ordering::AcqRel);
-            match shared.pull(link.id, enc.as_mut(), need_key) {
+            match shared.pull(link.id, &mut codec, need_key) {
                 Ok(Pull::Frame { msg, key }) => {
                     need_key &= !key;
                     link.inflight.fetch_add(1, Ordering::AcqRel);
-                    if out.send(msg.into()).is_err() {
+                    if out.send(msg).is_err() {
                         return;
                     }
                     continue;
@@ -187,7 +200,7 @@ fn produce(shared: &Shared, link: &ClientLink, out: &mpsc::UnboundedSender<Bytes
                 Ok(Pull::Idle { wake_at_us: w }) => wake_at_us = w,
                 Err(e) => {
                     eprintln!("video encode failed, lossless only from now: {e:#}");
-                    enc = None;
+                    codec.encoder = None;
                     shared.drop_video(link.id);
                     continue;
                 }

@@ -16,7 +16,7 @@ use std::thread::Thread;
 
 use anyhow::Result;
 
-use crate::proto::{self, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
+use crate::proto::{self, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
 use crate::video::VideoEncoder;
 use crate::xfb::XvfbFramebuffer;
 
@@ -24,8 +24,6 @@ use crate::xfb::XvfbFramebuffer;
 const HOT_WINDOW_US: u64 = 150_000;
 /// A video tile unchanged for this long is refined back to lossless.
 const COOL_US: u64 = 250_000;
-/// Smaller moving areas stay lossless: cheap enough and always exact.
-const MIN_VIDEO_TILES: usize = 4;
 
 pub struct Shared {
     inner: Mutex<Inner>,
@@ -239,9 +237,9 @@ impl Shared {
     }
 
     /// Builds the next FRAME for this client: lossless rects (horizontal runs
-    /// of tiles), tile layer switches, and an H.264 frame when any video tile
-    /// changed. `enc == None` keeps everything lossless.
-    pub fn pull(&self, id: u64, mut enc: Option<&mut VideoEncoder>, force_key: bool) -> Result<Pull> {
+    /// of tiles, LZ4), tile layer switches, and an H.264 frame when any video
+    /// tile changed. Without an encoder everything stays lossless.
+    pub fn pull(&self, id: u64, codec: &mut ClientCodec, force_key: bool) -> Result<Pull> {
         let now = proto::now_us();
         let mut guard = self.inner.lock().unwrap();
         let Inner { width, height, tile, tiles_x, tiles_y, fb, changes, clients, .. } = &mut *guard;
@@ -250,9 +248,18 @@ impl Shared {
             return Ok(Pull::Idle { wake_at_us: None });
         };
 
+        // Moving tiles go to video only when keeping them lossless would cost
+        // too much: per frame (transfer time adds latency) or per second (budget).
         let hot = |i: usize| changes[i][2] != 0 && now.saturating_sub(changes[i][2]) < HOT_WINDOW_US;
-        let hot_count = (0..changes.len()).filter(|&i| hot(i)).count();
-        let allow_video = enc.is_some() && hot_count >= MIN_VIDEO_TILES;
+        let (mut hot_frame_bytes, mut hot_rate) = (0u64, 0f64);
+        for i in (0..changes.len()).filter(|&i| hot(i) && !c.video[i]) {
+            let cost = codec.cost[i] as u64;
+            hot_frame_bytes += cost;
+            hot_rate += cost as f64 * 2e6 / (changes[i][0] - changes[i][2]).max(1) as f64;
+        }
+        let allow_video = codec.encoder.is_some()
+            && (hot_frame_bytes > codec.max_lossless_frame_bytes || hot_rate > codec.budget_bytes_per_sec / 2.0);
+
         let mut switches: Vec<u16> = Vec::new();
         let mut video_dirty = false;
         let mut wake_at_us: Option<u64> = None;
@@ -261,7 +268,7 @@ impl Shared {
             c.send[i] = false;
             if c.video[i] {
                 let cools_at = changes[i][0] + COOL_US;
-                if now >= cools_at || enc.is_none() {
+                if now >= cools_at || codec.encoder.is_none() {
                     c.video[i] = false;
                     c.send[i] = true;
                     switches.push(i as u16);
@@ -285,10 +292,10 @@ impl Shared {
             return Ok(Pull::Idle { wake_at_us });
         }
 
+        // Gather lossless rects (raw) under the lock; compress after releasing it.
         let stride = width as usize * 4;
-        let mut msg = Vec::with_capacity(FRAME_HEADER_LEN + 64 * 1024);
-        msg.resize(FRAME_HEADER_LEN, 0);
-        let mut n_rects: u16 = 0;
+        codec.raw.clear();
+        codec.rects.clear();
         for ty in 0..tiles_y {
             let row = &c.send[(ty * tiles_x) as usize..((ty + 1) * tiles_x) as usize];
             let mut tx = 0;
@@ -301,28 +308,16 @@ impl Shared {
                 while tx < tiles_x && row[tx as usize] {
                     tx += 1;
                 }
-                let x = start * t;
-                let y = ty * t;
+                let (x, y) = (start * t, ty * t);
                 let w = (tx * t).min(width) - x;
                 let h = ((ty + 1) * t).min(height) - y;
-                let len = w * h * 4;
-                msg.extend_from_slice(&(x as u16).to_le_bytes());
-                msg.extend_from_slice(&(y as u16).to_le_bytes());
-                msg.extend_from_slice(&(w as u16).to_le_bytes());
-                msg.extend_from_slice(&(h as u16).to_le_bytes());
-                msg.extend_from_slice(&[ENC_RAW, 0, 0, 0]);
-                msg.extend_from_slice(&len.to_le_bytes());
                 let bx = x as usize * 4;
                 for yy in y..y + h {
                     let o = yy as usize * stride + bx;
-                    msg.extend_from_slice(&fb[o..o + w as usize * 4]);
+                    codec.raw.extend_from_slice(&fb[o..o + w as usize * 4]);
                 }
-                n_rects += 1;
+                codec.rects.push(([x, y, w, h], (ty * tiles_x + start) as usize, (tx - start) as usize));
             }
-        }
-        msg.extend_from_slice(&(switches.len() as u16).to_le_bytes());
-        for s in &switches {
-            msg.extend_from_slice(&s.to_le_bytes());
         }
 
         if !c.pending {
@@ -331,17 +326,13 @@ impl Shared {
         }
         c.pending = false;
         c.seq = c.seq.wrapping_add(1);
-        msg[2..4].copy_from_slice(&n_rects.to_le_bytes());
-        msg[4..8].copy_from_slice(&c.seq.to_le_bytes());
-        msg[8..16].copy_from_slice(&c.oldest_us.to_le_bytes());
-        msg[16..24].copy_from_slice(&c.newest_us.to_le_bytes());
-        msg[0] = proto::S_FRAME;
+        let (seq, oldest_us, newest_us) = (c.seq, c.oldest_us, c.newest_us);
 
-        let encoder = if video_dirty { enc.as_deref_mut() } else { None };
-        let mut key = false;
         let mut encode_us = 0u32;
+        let encoder = if video_dirty { codec.encoder.as_mut() } else { None };
+        let loaded = encoder.is_some();
+        let load_start = proto::now_us();
         if let Some(e) = encoder {
-            let t0 = proto::now_us();
             if c.stale.iter().all(|&s| s) {
                 e.load_rect(fb, stride, 0, 0, width, height)?;
                 c.stale.fill(false);
@@ -364,20 +355,86 @@ impl Shared {
                     }
                 }
             }
-            drop(guard);
-            let v = e.encode(force_key)?;
-            encode_us = (proto::now_us() - t0) as u32;
+        }
+        drop(guard);
+
+        let mut msg = Vec::with_capacity(FRAME_HEADER_LEN + codec.raw.len() / 2 + 64 * 1024);
+        msg.resize(FRAME_HEADER_LEN, 0);
+        let mut raw_at = 0;
+        for &([x, y, w, h], first_tile, n_tiles) in &codec.rects {
+            let raw = &codec.raw[raw_at..raw_at + (w * h * 4) as usize];
+            raw_at += raw.len();
+            msg.extend_from_slice(&(x as u16).to_le_bytes());
+            msg.extend_from_slice(&(y as u16).to_le_bytes());
+            msg.extend_from_slice(&(w as u16).to_le_bytes());
+            msg.extend_from_slice(&(h as u16).to_le_bytes());
+            let header_at = msg.len();
+            msg.extend_from_slice(&[ENC_RAW, 0, 0, 0, 0, 0, 0, 0]);
+            let data_at = msg.len();
+            msg.resize(data_at + lz4_flex::block::get_maximum_output_size(raw.len()), 0);
+            let len = match lz4_flex::block::compress_into(raw, &mut msg[data_at..]) {
+                Ok(n) if n < raw.len() => {
+                    msg[header_at] = ENC_LZ4;
+                    n
+                }
+                _ => {
+                    msg[data_at..data_at + raw.len()].copy_from_slice(raw);
+                    raw.len()
+                }
+            };
+            msg.truncate(data_at + len);
+            msg[header_at + 4..header_at + 8].copy_from_slice(&(len as u32).to_le_bytes());
+            let per_tile = (len / n_tiles) as u32;
+            codec.cost[first_tile..first_tile + n_tiles].fill(per_tile.max(1));
+        }
+        msg.extend_from_slice(&(switches.len() as u16).to_le_bytes());
+        for s in &switches {
+            msg.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let mut key = false;
+        if loaded {
+            let v = codec.encoder.as_mut().expect("loaded implies encoder").encode(force_key)?;
+            encode_us = (proto::now_us() - load_start) as u32;
             key = v.key;
             msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 };
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
             msg.extend_from_slice(&v.data);
-        } else {
-            drop(guard);
         }
+        msg[0] = proto::S_FRAME;
+        msg[2..4].copy_from_slice(&(codec.rects.len() as u16).to_le_bytes());
+        msg[4..8].copy_from_slice(&seq.to_le_bytes());
+        msg[8..16].copy_from_slice(&oldest_us.to_le_bytes());
+        msg[16..24].copy_from_slice(&newest_us.to_le_bytes());
         msg[32..40].copy_from_slice(&now.to_le_bytes());
         msg[40..44].copy_from_slice(&encode_us.to_le_bytes());
-        let send_us = proto::now_us();
-        msg[24..32].copy_from_slice(&send_us.to_le_bytes());
         Ok(Pull::Frame { msg, key })
+    }
+}
+
+/// Per-client state owned by its producer thread (outside the shared lock).
+pub struct ClientCodec {
+    pub encoder: Option<VideoEncoder>,
+    /// Last compressed size per tile when sent losslessly; drives the video decision.
+    cost: Vec<u32>,
+    budget_bytes_per_sec: f64,
+    max_lossless_frame_bytes: u64,
+    /// Scratch: raw pixels and geometry ([x, y, w, h], first tile, tile count) of lossless rects.
+    raw: Vec<u8>,
+    rects: Vec<([u32; 4], usize, usize)>,
+}
+
+impl ClientCodec {
+    pub fn new(g: &Geometry, encoder: Option<VideoEncoder>, budget_mbps: f64, max_lossless_frame_kb: u64) -> Self {
+        let n = (g.width.div_ceil(g.tile) * g.height.div_ceil(g.tile)) as usize;
+        Self {
+            encoder,
+            // Until measured, assume ~4:1 compression.
+            cost: vec![g.tile * g.tile; n],
+            budget_bytes_per_sec: budget_mbps * 1e6 / 8.0,
+            max_lossless_frame_bytes: max_lossless_frame_kb * 1024,
+            raw: Vec::new(),
+            rects: Vec::new(),
+        }
     }
 }
