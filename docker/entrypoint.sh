@@ -1,6 +1,6 @@
 #!/bin/bash
 # Container launcher. The server itself creates the simulated display (Xvfb).
-#   MODE=desktop  openbox + xterm in a WIDTHxHEIGHT virtual display (default)
+#   MODE=desktop  XFCE session (desktop image) or openbox + xterm, in a WIDTHxHEIGHT virtual display (default)
 #   MODE=app      openbox + the command given as arguments
 #   MODE=bench    rt-testapp only (BENCH_ARGS), no window manager
 # STREAM_TOKEN / ADMIN_TOKEN override the tokens of a freshly created config.
@@ -22,7 +22,14 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 case "${MODE:-desktop}" in
-  desktop) SESSION="openbox & exec xterm" ;;
+  desktop)
+    if command -v xfce4-session >/dev/null; then
+      # Apps run as an unprivileged user; the server keeps root for Xvfb management.
+      SESSION="exec su user -c 'HOME=/home/user dbus-launch --exit-with-session xfce4-session'"
+    else
+      SESSION="openbox & exec xterm"
+    fi
+    ;;
   app) SESSION="openbox & exec $*" ;;
   bench) SESSION="exec rt-testapp ${BENCH_ARGS:-}" ;;
   *) echo "unknown MODE ${MODE}" >&2; exit 1 ;;

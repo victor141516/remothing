@@ -40,3 +40,22 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 EXPOSE 8080 8081
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Full Ubuntu desktop for trying it out: `docker build --target desktop -t remothing-desktop .`
+FROM runtime AS desktop
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xfce4 xfce4-terminal thunar mousepad ristretto dbus-x11 at-spi2-core \
+      fonts-noto-core fonts-noto-color-emoji adwaita-icon-theme-full ca-certificates curl gpg locales \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+         > /etc/apt/sources.list.d/mozilla.list \
+    && printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla \
+    && apt-get update && apt-get install -y --no-install-recommends firefox \
+    && sed -i 's/# es_ES.UTF-8/es_ES.UTF-8/' /etc/locale.gen && locale-gen \
+    && useradd -m -s /bin/bash user \
+    && rm -rf /var/lib/apt/lists/*
+ENV LANG=es_ES.UTF-8
+
+# Default build target: the slim image (simulated display + openbox/xterm).
+FROM runtime

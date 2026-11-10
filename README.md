@@ -31,10 +31,14 @@ Optional Docker deployment (simulated display + NVENC when started with `--gpus 
 docker build -t remothing .
 docker run --gpus all -p 8080:8080 -p 8081:8081 -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret remothing
 ```
+Optional Docker deployment (simulated display + NVENC when started with `--gpus all`):
 
-### Windows
-
-```powershell
+```sh
+docker build -t remothing .                                  # slim: openbox + xterm
+docker build --target desktop -t remothing-desktop .         # full XFCE desktop + Firefox
+docker run --gpus all --shm-size=1g -p 8080:8080 -p 8081:8081 \
+  -e WIDTH=2560 -e HEIGHT=1440 -e KB_LAYOUT=es -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret remothing-desktop
+```
 powershell -ExecutionPolicy Bypass -File scripts/windows-deps.ps1   # once: libclang + vcpkg static FFmpeg
 . scripts/windows-env.ps1
 cargo build --release -p remothing --features static-ffmpeg
