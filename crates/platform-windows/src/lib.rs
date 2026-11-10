@@ -12,6 +12,7 @@ mod input;
 mod keymap;
 mod monitor;
 pub mod service;
+mod uipi;
 
 use std::sync::Arc;
 

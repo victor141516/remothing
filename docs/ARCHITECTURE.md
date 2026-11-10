@@ -111,4 +111,7 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
   driver. Secure desktops (lock screen, UAC, Ctrl+Alt+Del) and other sessions
   need the service (LocalSystem), which runs the server inside the active
   console session and relaunches it on session changes. Input to elevated
-  windows needs the elevated/service process (UIPI).
+  windows and UIAccess tools (Magnifier, On-Screen Keyboard: high integrity)
+  needs the elevated/service process (UIPI). Windows drops such input without
+  telling SendInput, so a non-elevated server checks the foreground window's
+  integrity level and reports the blocked episode once (log and admin UI).

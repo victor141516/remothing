@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::desktop::{self, Followed};
 use crate::keymap::{self, KeyCode};
+use crate::uipi::ForegroundCheck;
 
 // Held-key bits for Ctrl+Alt+Delete detection.
 const LCTRL: u8 = 1;
@@ -39,6 +40,10 @@ pub struct SendInputProvider {
     /// blocked episode (secure desktop, elevated foreground window) is
     /// reported once instead of for every mouse move.
     blocked: AtomicBool,
+    /// UIPI drops are invisible to SendInput: checked against the foreground
+    /// window instead, and reported once per blocked episode.
+    uipi: ForegroundCheck,
+    uipi_blocked: AtomicBool,
 }
 
 impl SendInputProvider {
@@ -50,11 +55,22 @@ impl SendInputProvider {
             height: info.height,
             keys: AtomicU8::new(0),
             blocked: AtomicBool::new(false),
+            uipi: ForegroundCheck::new(),
+            uipi_blocked: AtomicBool::new(false),
         }
     }
 
     fn send(&self, inputs: &[INPUT]) -> Result<()> {
         desktop::follow_input_desktop(false);
+        // Input is still sent: a wrong guess must not cost working input.
+        let uipi = self.uipi.blocked();
+        let newly_blocked = match &uipi {
+            Some(_) => !self.uipi_blocked.swap(true, Ordering::Relaxed),
+            None => {
+                self.uipi_blocked.store(false, Ordering::Relaxed);
+                false
+            }
+        };
         let size = std::mem::size_of::<INPUT>() as i32;
         // SAFETY: `inputs` are fully initialized INPUT structures.
         let mut sent = unsafe { SendInput(inputs, size) } as usize;
@@ -64,6 +80,12 @@ impl SendInputProvider {
         }
         if sent == inputs.len() {
             self.blocked.store(false, Ordering::Relaxed);
+            if let (true, Some(reason)) = (newly_blocked, uipi) {
+                bail!(
+                    "Windows drops this input (UIPI): the foreground window belongs to {reason}. \
+                     Bring a normal window to the front, close it, or run remothing as the service"
+                );
+            }
             return Ok(());
         }
         let err = windows::core::Error::from_win32();
