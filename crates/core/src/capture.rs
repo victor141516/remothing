@@ -154,34 +154,10 @@ impl CaptureLoop {
                 continue;
             }
             // `mark_rects` lists the skipped tiles as changed; `diff` appends the read ones.
-            let t0 = std::time::Instant::now();
             let tiles = diff.mark_rects(&rects, hints.as_ref().map_or(&[][..], |h| &h.skip));
-            let skipped = diff.changed.len();
             read_and_diff(&mut capture, &mut diff, &tiles, &frame.moved, true)?;
-            let t1 = t0.elapsed();
             self.shared.commit(&diff, frame.capture_us, false);
-            let t2 = t0.elapsed();
-            PROBE.with(|p| {
-                let mut p = p.borrow_mut();
-                p.0 += 1;
-                p.1 += (proto::now_us() - frame.capture_us) - t2.as_micros() as u64;
-                p.2 += t1.as_micros() as u64;
-                p.3 += (t2 - t1).as_micros() as u64;
-                p.4 += skipped as u64;
-                p.5 += tiles.iter().map(|r| (r.w * r.h) as u64).sum::<u64>() / 4096;
-                if p.0 == 300 {
-                    eprintln!(
-                        "capture/frame: pre {}us read+diff {}us commit {}us skipped {} read-tiles {}",
-                        p.1 / 300, p.2 / 300, p.3 / 300, p.4 / 300, p.5 / 300
-                    );
-                    *p = Default::default();
-                }
-            });
         }
         Ok(())
     }
-}
-
-thread_local! {
-    static PROBE: std::cell::RefCell<(u64, u64, u64, u64, u64, u64)> = Default::default();
 }

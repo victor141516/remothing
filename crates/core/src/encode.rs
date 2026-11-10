@@ -37,8 +37,9 @@ pub trait VideoEncoder: Send {
     fn fallback_reason(&self) -> Option<String>;
     /// True when input comes from the capture GPU surface (`load_gpu`).
     fn gpu_input(&self) -> bool;
-    /// Copies `rects` of a BGRX frame (`stride` bytes per row) into the encoder input.
-    fn load_cpu(&mut self, src: &[u8], stride: usize, rects: &[Rect]) -> Result<()>;
+    /// Copies `rects` (display coordinates) into the encoder input from a BGRX
+    /// buffer whose first row is display row `src_y0` (`stride` bytes per row).
+    fn load_cpu(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) -> Result<()>;
     /// Copies `rects` of the capture surface into the encoder input (GPU-side).
     fn load_gpu(&mut self, surface: &GpuSurface, rects: &[Rect]) -> Result<()>;
     /// Low-latency H.264, no reordering; `force_key` produces an IDR.

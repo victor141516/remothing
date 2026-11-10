@@ -78,10 +78,10 @@ impl Canvas<'_> {
                 let end = (x + word).min(row.len() - 24);
                 let shade = (0x20 + (seed >> 24) / 4) * 0x010101;
                 for (i, p) in row[x..end].iter_mut().enumerate() {
-                    // Glyph-like strokes that differ per row, as real text does
-                    // (scroll detection relies on rows not repeating).
-                    let bits = (i as u32).wrapping_mul(0x9E37_79B9) ^ (in_line as u32).wrapping_mul(0x85EB_CA6B) ^ seed;
-                    if bits >> 29 > 2 {
+                    // Glyph-like strokes: regular within a row (compresses like real
+                    // text) but with a phase unique to each row of a line, so rows do
+                    // not repeat (scroll detection relies on that, as with real glyphs).
+                    if (i + in_line * 7 + (seed as usize & 3)) % 13 < 7 {
                         *p = shade;
                     }
                 }

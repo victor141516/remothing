@@ -65,6 +65,7 @@ impl FfmpegEncoder {
         width: u32,
         height: u32,
         surface: Option<&GpuSurface>,
+        overrides: &[(String, String)],
     ) -> Result<Self> {
         let name = backend.ffmpeg_name();
         let codec = ff::encoder::find_by_name(name).ok_or_else(|| anyhow!("{name} not compiled into FFmpeg"))?;
@@ -122,6 +123,12 @@ impl FfmpegEncoder {
         opts.set("profile", "high");
         match backend {
             Backend::Nvenc => {
+                // Measured (examples/d3d11_bench, 3168x1440, RTX 4080 S): p1/ull
+                // run at the encoder's macroblock throughput (~3 ms per frame,
+                // static or moving); p2/ll/refs/surfaces/explicit-off AQ,
+                // lookahead, multipass change nothing, p3+ cost more. CAVLC or
+                // a bitrate cap only pays off for noise-like content (CABAC-bound
+                // at ~800 KiB/frame) and costs bitrate or keyframe quality elsewhere.
                 opts.set("preset", "p1");
                 opts.set("tune", "ull");
                 opts.set("zerolatency", "1");
@@ -152,6 +159,9 @@ impl FfmpegEncoder {
                 opts.set("forced-idr", "1");
             }
         }
+        for (k, v) in overrides {
+            opts.set(k, v);
+        }
         let enc = enc.open_as_with(codec, opts).with_context(|| format!("open {name}"))?;
         Ok(Self { enc, input, packet: ff::Packet::empty(), pts: 0, backend, kind, fallback: None })
     }
@@ -174,10 +184,10 @@ impl VideoEncoder for FfmpegEncoder {
         false
     }
 
-    fn load_cpu(&mut self, src: &[u8], stride: usize, rects: &[Rect]) -> Result<()> {
+    fn load_cpu(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) -> Result<()> {
         match &mut self.input {
             #[cfg(target_os = "linux")]
-            Input::Cuda(s) => rects.iter().try_for_each(|r| s.upload(src, stride, r.x, r.y, r.w, r.h)),
+            Input::Cuda(s) => rects.iter().try_for_each(|r| s.upload(src, stride, src_y0, *r)),
             #[cfg(windows)]
             Input::D3D11(_) => Err(anyhow!("D3D11 encoder input is fed from the capture surface")),
             Input::Host { bgrx, .. } => {
@@ -186,8 +196,8 @@ impl VideoEncoder for FfmpegEncoder {
                 for r in rects {
                     let (xb, wb) = (r.x as usize * 4, r.w as usize * 4);
                     for row in r.y as usize..(r.y + r.h) as usize {
-                        dst[row * dst_stride + xb..row * dst_stride + xb + wb]
-                            .copy_from_slice(&src[row * stride + xb..row * stride + xb + wb]);
+                        let s = (row - src_y0 as usize) * stride + xb;
+                        dst[row * dst_stride + xb..row * dst_stride + xb + wb].copy_from_slice(&src[s..s + wb]);
                     }
                 }
                 Ok(())
@@ -239,6 +249,27 @@ impl VideoEncoder for FfmpegEncoder {
         }
         Ok(out)
     }
+}
+
+/// Whether `codec` (or every encoder, via AVCodecContext) has option `name`.
+pub(crate) fn has_option(codec: ff::Codec, name: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else { return false };
+    let find = |class: *const ff::ffi::AVClass| {
+        // SAFETY: AV_OPT_SEARCH_FAKE_OBJ takes a pointer to a class pointer.
+        !class.is_null()
+            && unsafe {
+                !ff::ffi::av_opt_find(
+                    &class as *const _ as *mut std::ffi::c_void,
+                    name.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    ff::ffi::AV_OPT_SEARCH_FAKE_OBJ,
+                )
+                .is_null()
+            }
+    };
+    // SAFETY: plain getters of static class descriptions.
+    unsafe { find((*codec.as_ptr()).priv_class) || find(ff::ffi::avcodec_get_class()) }
 }
 
 /// Sets constraint_set3_flag in every SPS. For High profile without VUI

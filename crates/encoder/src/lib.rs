@@ -75,6 +75,8 @@ pub struct FfmpegEncoders {
     available: Vec<Backend>,
     /// Compiled-in backends that failed the startup probe, with the reason.
     unavailable: Vec<(String, String)>,
+    /// Option overrides applied over a backend's defaults.
+    overrides: Vec<(Backend, Vec<(String, String)>)>,
 }
 
 impl FfmpegEncoders {
@@ -89,12 +91,28 @@ impl FfmpegEncoders {
             if ff::encoder::find_by_name(b.ffmpeg_name()).is_none() {
                 continue;
             }
-            match FfmpegEncoder::open(b, InputKind::Host, 256, 256, None) {
+            match FfmpegEncoder::open(b, InputKind::Host, 256, 256, None, &[]) {
                 Ok(_) => available.push(b),
                 Err(e) => unavailable.push((b.name().to_string(), format!("{e:#}"))),
             }
         }
-        Ok(Self { available, unavailable })
+        Ok(Self { available, unavailable, overrides: Vec::new() })
+    }
+
+    /// Replaces the option overrides of `backend` ("nvenc", "amf", "qsv",
+    /// "x264") for encoders created afterwards: FFmpeg encoder options set
+    /// over the low-latency defaults (tuning experiments, benchmarks).
+    pub fn set_options(&mut self, backend: &str, opts: &[(String, String)]) -> Result<()> {
+        let b = ALL.into_iter().find(|b| b.name() == backend).ok_or_else(|| anyhow!("unknown backend {backend}"))?;
+        if let Some(codec) = ff::encoder::find_by_name(b.ffmpeg_name()) {
+            // FFmpeg silently ignores unknown options.
+            if let Some((k, _)) = opts.iter().find(|(k, _)| !ffmpeg::has_option(codec, k)) {
+                return Err(anyhow!("{} has no option {k:?}", b.ffmpeg_name()));
+            }
+        }
+        self.overrides.retain(|(o, _)| *o != b);
+        self.overrides.push((b, opts.to_vec()));
+        Ok(())
     }
 }
 
@@ -117,8 +135,9 @@ impl EncoderProvider for FfmpegEncoders {
         }
         let mut skipped = Vec::new();
         for backend in order {
+            let opts = self.overrides.iter().find(|(b, _)| *b == backend).map_or(&[][..], |(_, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {
-                match FfmpegEncoder::open(backend, kind, req.width, req.height, req.surface.as_ref()) {
+                match FfmpegEncoder::open(backend, kind, req.width, req.height, req.surface.as_ref(), opts) {
                     Ok(mut e) => {
                         if !skipped.is_empty() {
                             e.fallback = Some(skipped.join("; "));

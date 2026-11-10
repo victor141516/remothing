@@ -59,6 +59,10 @@ struct ClientState {
     dirty: Vec<bool>,
     /// Client currently shows this tile from the video layer.
     video: Vec<bool>,
+    /// Must switch to video: moved content that the client showed from video.
+    force_video: Vec<bool>,
+    /// Last time a move carried video content into the tile (keeps it video meanwhile).
+    video_since: Vec<u64>,
     /// Changed since last copied into the video encoder's input surface.
     stale: Vec<bool>,
     /// Scratch: tiles to send losslessly in the frame being built.
@@ -77,6 +81,8 @@ impl ClientState {
     fn reset(&mut self, n: usize, now: u64) {
         self.dirty = vec![true; n];
         self.video = vec![false; n];
+        self.force_video = vec![false; n];
+        self.video_since = vec![0; n];
         self.stale = vec![true; n];
         self.send = vec![false; n];
         self.copies.clear();
@@ -180,6 +186,8 @@ impl Shared {
             gpu_input: false,
             dirty: Vec::new(),
             video: Vec::new(),
+            force_video: Vec::new(),
+            video_since: Vec::new(),
             stale: Vec::new(),
             send: Vec::new(),
             copies: Vec::new(),
@@ -272,9 +280,11 @@ impl Shared {
                     geometry.for_each_tile(m.dst, |i| c.dirty[i] = true);
                     continue;
                 }
-                // The client replays the move on its lossless layer; source tiles it
-                // does not hold exactly (unsent changes, video) land shifted in the
-                // destination, so exactly those destination areas are resent.
+                // The client replays the move on its lossless layer. Source tiles it
+                // does not hold exactly land shifted in the destination: unsent
+                // changes are resent; content it shows from video stays video there
+                // (scrolling video content would otherwise turn into a cascade of
+                // lossless resends) and is refined once the moves stop.
                 let mut unsynced = Vec::new();
                 geometry.for_each_tile(src, |i| {
                     if c.dirty[i] || c.video[i] {
@@ -284,12 +294,21 @@ impl Shared {
                         let x1 = ((tx + t) as i64).min((src.x + src.w) as i64) + dx;
                         let y1 = ((ty + t) as i64).min((src.y + src.h) as i64) + dy;
                         if x0 < x1 && y0 < y1 && x0 >= 0 && y0 >= 0 {
-                            unsynced.push(Rect::new(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32));
+                            let r = Rect::new(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+                            unsynced.push((r, c.video[i]));
                         }
                     }
                 });
-                for r in unsynced.into_iter().filter_map(|r| r.clip(geometry.width, geometry.height)) {
-                    geometry.for_each_tile(r, |i| c.dirty[i] = true);
+                for (r, from_video) in unsynced {
+                    let Some(r) = r.clip(geometry.width, geometry.height) else { continue };
+                    geometry.for_each_tile(r, |i| {
+                        if from_video {
+                            c.force_video[i] = true;
+                            c.video_since[i] = capture_us;
+                        } else {
+                            c.dirty[i] = true;
+                        }
+                    });
                 }
                 c.copies.push(*m);
             }
@@ -356,24 +375,24 @@ impl Shared {
         let mut switches: Vec<u16> = Vec::new();
         let mut video_dirty = false;
         let mut wake_at_us: Option<u64> = None;
-        for i in 0..changes.len() {
+        for (i, ch) in changes.iter().enumerate() {
             let dirty = std::mem::take(&mut c.dirty[i]);
+            let forced = std::mem::take(&mut c.force_video[i]) && codec.encoder.is_some();
             c.send[i] = false;
+            let cools_at = ch[0].max(c.video_since[i]) + COOL_US;
             if c.video[i] {
-                let cools_at = changes[i][0] + COOL_US;
-                if now >= cools_at || codec.encoder.is_none() {
+                if !forced && (now >= cools_at || codec.encoder.is_none()) {
                     c.video[i] = false;
                     c.send[i] = true;
                     switches.push(i as u16);
                 } else {
-                    video_dirty |= dirty;
+                    video_dirty |= dirty || forced;
                     wake_at_us = Some(wake_at_us.map_or(cools_at, |w| w.min(cools_at)));
                 }
-            } else if allow_video && hot(i) {
+            } else if forced || (allow_video && hot(i)) {
                 c.video[i] = true;
                 video_dirty = true;
                 switches.push(i as u16 | 0x8000);
-                let cools_at = changes[i][0] + COOL_US;
                 wake_at_us = Some(wake_at_us.map_or(cools_at, |w| w.min(cools_at)));
             } else {
                 c.send[i] = dirty;
@@ -419,9 +438,7 @@ impl Shared {
                     let stride = geometry.stride();
                     for r in &codec.encoder_rects {
                         // Rects come per tile row: hand the encoder that band.
-                        pixels.with_band(r.y / geometry.tile, |band, y0| {
-                            e.load_cpu(band, stride, &[Rect::new(r.x, r.y - y0, r.w, r.h)])
-                        })?;
+                        pixels.with_band(r.y / geometry.tile, |band, y0| e.load_cpu(band, stride, y0, &[*r]))?;
                     }
                 }
             }

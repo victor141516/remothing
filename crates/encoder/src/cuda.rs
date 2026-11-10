@@ -7,6 +7,7 @@ use std::ptr;
 use anyhow::{bail, Result};
 use ffmpeg_next as ff;
 use ff::ffi;
+use remothing_core::geom::Rect;
 
 type CuResult = c_int;
 
@@ -127,8 +128,10 @@ impl CudaSurface {
         unsafe { ffi::av_buffer_ref(self.frames) }
     }
 
-    /// Copies a pixel rectangle of a host BGRX image into the surface.
-    pub fn upload(&mut self, src: &[u8], src_stride: usize, x: u32, y: u32, w: u32, h: u32) -> Result<()> {
+    /// Copies pixel rect `r` (display coordinates) of a host BGRX image whose
+    /// first row is display row `src_y0` into the same place of the surface.
+    pub fn upload(&mut self, src: &[u8], src_stride: usize, src_y0: u32, r: Rect) -> Result<()> {
+        let Rect { x, y, w, h } = r;
         let (dptr, pitch) = unsafe {
             let f = &*self.frame.as_ptr();
             (f.data[0] as u64, f.linesize[0] as usize)
@@ -136,7 +139,7 @@ impl CudaSurface {
         let xb = x as usize * 4;
         let copy = CudaMemcpy2D {
             src_x_in_bytes: xb,
-            src_y: y as usize,
+            src_y: (y - src_y0) as usize,
             src_memory_type: CU_MEMORYTYPE_HOST,
             src_host: src.as_ptr() as *const c_void,
             src_device: 0,
@@ -152,7 +155,7 @@ impl CudaSurface {
             width_in_bytes: w as usize * 4,
             height: h as usize,
         };
-        assert!((y + h) as usize * src_stride <= src.len());
+        assert!((y - src_y0 + h) as usize * src_stride <= src.len());
         unsafe {
             let r = (self.api.push)(self.ctx);
             if r != 0 {
