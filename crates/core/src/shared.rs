@@ -18,7 +18,7 @@ use std::thread::Thread;
 use anyhow::Result;
 
 use crate::encode::VideoEncoder;
-use crate::geom::Rect;
+use crate::geom::{MovedRect, Rect};
 use crate::platform::GpuSurface;
 use crate::proto::{self, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
 
@@ -26,6 +26,8 @@ use crate::proto::{self, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LE
 const HOT_WINDOW_US: u64 = 150_000;
 /// A video tile unchanged for this long is refined back to lossless.
 const COOL_US: u64 = 250_000;
+/// Moves queued for one client before falling back to resending destinations.
+const MAX_PENDING_COPIES: usize = 64;
 
 pub struct Shared {
     inner: Mutex<Inner>,
@@ -61,6 +63,8 @@ struct ClientState {
     stale: Vec<bool>,
     /// Scratch: tiles to send losslessly in the frame being built.
     send: Vec<bool>,
+    /// Screen moves (scroll/copy) to replay on the client's lossless layer, in order.
+    copies: Vec<MovedRect>,
     pending: bool,
     oldest_us: u64,
     newest_us: u64,
@@ -75,6 +79,7 @@ impl ClientState {
         self.video = vec![false; n];
         self.stale = vec![true; n];
         self.send = vec![false; n];
+        self.copies.clear();
         self.pending = true;
         self.oldest_us = now;
         self.newest_us = now;
@@ -94,6 +99,40 @@ pub enum Pull {
     Reset(Geometry),
     /// Nothing to send; pull again at `wake_at_us` (a video tile cools down) or when woken.
     Idle { wake_at_us: Option<u64> },
+}
+
+/// Calls `f(tile_index)` for every tile overlapping `r` (already clipped).
+fn for_each_tile(r: Rect, g: &Geometry, mut f: impl FnMut(usize)) {
+    let (t, tiles_x) = (g.tile, g.width.div_ceil(g.tile));
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    for ty in r.y / t..=(r.y + r.h - 1) / t {
+        for tx in r.x / t..=(r.x + r.w - 1) / t {
+            f((ty * tiles_x + tx) as usize);
+        }
+    }
+}
+
+/// Applies a screen move to a BGRX buffer, correct for overlapping source and destination.
+pub(crate) fn apply_move(buf: &mut [u8], stride: usize, m: &MovedRect) {
+    let (w, h) = (m.dst.w as usize * 4, m.dst.h as usize);
+    let (sx, dx) = (m.src_x as usize * 4, m.dst.x as usize * 4);
+    let row = |i: usize| -> (usize, usize) {
+        ((m.src_y as usize + i) * stride + sx, (m.dst.y as usize + i) * stride + dx)
+    };
+    // Moving down: walk rows bottom-up so unread source rows are not overwritten.
+    if m.dst.y > m.src_y {
+        for i in (0..h).rev() {
+            let (s, d) = row(i);
+            buf.copy_within(s..s + w, d);
+        }
+    } else {
+        for i in 0..h {
+            let (s, d) = row(i);
+            buf.copy_within(s..s + w, d);
+        }
+    }
 }
 
 /// Calls `f(first_tile, tile_count, rect)` for each horizontal run of set flags,
@@ -191,6 +230,7 @@ impl Shared {
             video: Vec::new(),
             stale: Vec::new(),
             send: Vec::new(),
+            copies: Vec::new(),
             pending: false,
             oldest_us: 0,
             newest_us: 0,
@@ -237,18 +277,38 @@ impl Shared {
         }
     }
 
-    /// Publishes tiles found changed by `diff` (whose copy holds the new pixels).
-    /// Only the changed tiles are copied under the lock.
+    /// Publishes the moves and the tiles found changed by `diff` (whose copy
+    /// holds the new pixels). Only changed tiles are copied under the lock.
     pub fn commit(&self, diff: &TileDiff, capture_us: u64) {
-        if diff.changed.is_empty() {
+        if diff.changed.is_empty() && diff.moves.is_empty() {
             return;
         }
         let mut guard = self.inner.lock().unwrap();
         let g = &mut *guard;
-        if g.geometry() != diff.geometry {
+        let geometry = g.geometry();
+        if geometry != diff.geometry {
             return;
         }
         let stride = g.width as usize * 4;
+        for m in &diff.moves {
+            apply_move(&mut g.fb, stride, m);
+            for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
+                // The client can replay the move only if its lossless copy of the
+                // source is current; otherwise the destination is simply resent.
+                let src = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
+                let mut src_synced = true;
+                for_each_tile(src, &geometry, |t| src_synced &= !c.dirty[t] && !c.video[t]);
+                for_each_tile(m.dst, &geometry, |t| {
+                    c.stale[t] = true;
+                    if !src_synced || c.copies.len() >= MAX_PENDING_COPIES {
+                        c.dirty[t] = true;
+                    }
+                });
+                if src_synced && c.copies.len() < MAX_PENDING_COPIES {
+                    c.copies.push(*m);
+                }
+            }
+        }
         for &idx in &diff.changed {
             let (x0, len, y0, y1) = diff.tile_span(idx);
             for o in (y0..y1).map(|y| y * stride + x0) {
@@ -333,7 +393,7 @@ impl Shared {
             }
         }
         let has_lossless = c.send.iter().any(|&s| s);
-        if !has_lossless && !video_dirty && switches.is_empty() {
+        if !has_lossless && !video_dirty && switches.is_empty() && c.copies.is_empty() {
             c.pending = false;
             return Ok(Pull::Idle { wake_at_us });
         }
@@ -358,6 +418,8 @@ impl Shared {
         c.pending = false;
         c.seq = c.seq.wrapping_add(1);
         let (seq, oldest_us, newest_us) = (c.seq, c.oldest_us, c.newest_us);
+        codec.copies.clear();
+        codec.copies.append(&mut c.copies);
 
         let load_start = proto::now_us();
         let encoder = if video_dirty { codec.encoder.as_mut() } else { None };
@@ -379,6 +441,12 @@ impl Shared {
 
         let mut msg = Vec::with_capacity(FRAME_HEADER_LEN + codec.raw.len() / 2 + 64 * 1024);
         msg.resize(FRAME_HEADER_LEN, 0);
+        // Moves replay first, before any rect of this frame.
+        for m in &codec.copies {
+            for v in [m.src_x, m.src_y, m.dst.x, m.dst.y, m.dst.w, m.dst.h] {
+                msg.extend_from_slice(&(v as u16).to_le_bytes());
+            }
+        }
         let mut raw_at = 0;
         for &(r, first_tile, n_tiles) in &codec.rects {
             let raw = &codec.raw[raw_at..raw_at + (r.w * r.h * 4) as usize];
@@ -426,6 +494,7 @@ impl Shared {
         msg[16..24].copy_from_slice(&newest_us.to_le_bytes());
         msg[32..40].copy_from_slice(&now.to_le_bytes());
         msg[40..44].copy_from_slice(&encode_us.to_le_bytes());
+        msg[44..46].copy_from_slice(&(codec.copies.len() as u16).to_le_bytes());
         Ok(Pull::Frame { msg, key })
     }
 
@@ -453,6 +522,8 @@ pub struct TileDiff {
     copy: Vec<u8>,
     touched: Vec<bool>,
     changed: Vec<usize>,
+    /// Moves applied by the last `diff`, replayed by `commit`.
+    moves: Vec<MovedRect>,
 }
 
 impl TileDiff {
@@ -465,6 +536,7 @@ impl TileDiff {
             copy: vec![0; (geometry.width * geometry.height * 4) as usize],
             touched: vec![false; n],
             changed: Vec::new(),
+            moves: Vec::new(),
         }
     }
 
@@ -478,11 +550,21 @@ impl TileDiff {
         (x0, len, (ty * t) as usize, ((ty + 1) * t).min(g.height) as usize)
     }
 
-    /// Compares the `rects` areas of `src` (full-display BGRX, `stride` bytes per
-    /// row) tile by tile; changed tiles are copied in and listed for `commit`.
-    pub fn diff(&mut self, src: &[u8], stride: usize, rects: &[Rect]) -> usize {
+    /// Applies `moved` to the copy (so moved content is not seen as changed),
+    /// then compares the `rects` areas of `src` (full-display BGRX, `stride`
+    /// bytes per row) tile by tile; changed tiles are copied in and listed for `commit`.
+    pub fn diff(&mut self, src: &[u8], stride: usize, rects: &[Rect], moved: &[MovedRect]) -> usize {
         let g = self.geometry;
         let t = g.tile;
+        let own_stride = g.width as usize * 4;
+        self.moves.clear();
+        for m in moved {
+            let src_rect = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
+            if src_rect.clip(g.width, g.height) == Some(src_rect) && m.dst.clip(g.width, g.height) == Some(m.dst) {
+                apply_move(&mut self.copy, own_stride, m);
+                self.moves.push(*m);
+            }
+        }
         for r in rects.iter().filter_map(|r| r.clip(g.width, g.height)) {
             for ty in r.y / t..=(r.y + r.h - 1) / t {
                 for tx in r.x / t..=(r.x + r.w - 1) / t {
@@ -491,7 +573,6 @@ impl TileDiff {
             }
         }
         self.changed.clear();
-        let own_stride = g.width as usize * 4;
         for idx in 0..self.touched.len() {
             if !std::mem::take(&mut self.touched[idx]) {
                 continue;
@@ -524,10 +605,11 @@ pub struct ClientCodec {
     /// Scratch: raw pixels and (rect, first tile, tile count) of lossless rects.
     raw: Vec<u8>,
     rects: Vec<(Rect, usize, usize)>,
+    copies: Vec<MovedRect>,
 }
 
 impl ClientCodec {
     pub fn new(tuning: Tuning) -> Self {
-        Self { encoder: None, tuning, cost: Vec::new(), raw: Vec::new(), rects: Vec::new() }
+        Self { encoder: None, tuning, cost: Vec::new(), raw: Vec::new(), rects: Vec::new(), copies: Vec::new() }
     }
 }

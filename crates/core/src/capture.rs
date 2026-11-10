@@ -122,11 +122,11 @@ impl CaptureLoop {
                 continue;
             }
             match capture.mapped() {
-                Some((pixels, src_stride)) => diff.diff(pixels, src_stride, &rects),
+                Some((pixels, src_stride)) => diff.diff(pixels, src_stride, &rects, &frame.moved),
                 None => {
                     staging.resize(stride * height as usize, 0);
                     capture.read(&rects, &mut staging, stride)?;
-                    diff.diff(&staging, stride, &rects)
+                    diff.diff(&staging, stride, &rects, &frame.moved)
                 }
             };
             self.shared.commit(&diff, frame.capture_us);

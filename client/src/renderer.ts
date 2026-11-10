@@ -42,6 +42,9 @@ export class Renderer {
   readonly gl: WebGL2RenderingContext;
   private readonly prog: WebGLProgram;
   private textures: WebGLTexture[] = [];
+  /** Framebuffers over the lossless texture and a scratch texture, for screen moves. */
+  private fbScreen: WebGLFramebuffer | null = null;
+  private fbScratch: WebGLFramebuffer | null = null;
   private mask = new Uint8Array(0);
   private tilesX = 0;
   private tilesY = 0;
@@ -85,11 +88,22 @@ export class Renderer {
     this.canvas.width = width;
     this.canvas.height = height;
     for (const t of this.textures) gl.deleteTexture(t);
+    gl.deleteFramebuffer(this.fbScreen);
+    gl.deleteFramebuffer(this.fbScratch);
     this.tilesX = Math.ceil(width / tile);
     this.tilesY = Math.ceil(height / tile);
     this.mask = new Uint8Array(this.tilesX * this.tilesY);
-    const [screen, video, mask] = [texture(gl, 0), texture(gl, 1), texture(gl, 2)];
-    this.textures = [screen, video, mask];
+    const [screen, video, mask, scratch] = [texture(gl, 0), texture(gl, 1), texture(gl, 2), texture(gl, 3)];
+    this.textures = [screen, video, mask, scratch];
+    gl.activeTexture(gl.TEXTURE3);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    this.fbScreen = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbScreen);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, screen, 0);
+    this.fbScratch = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbScratch);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, scratch, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
     gl.activeTexture(gl.TEXTURE1);
@@ -106,6 +120,18 @@ export class Renderer {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE0);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bgrx);
+  }
+
+  /** Screen move on the lossless layer (through scratch: overlapping blits are undefined). */
+  copy(sx: number, sy: number, dx: number, dy: number, w: number, h: number): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbScreen);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.fbScratch);
+    gl.blitFramebuffer(sx, sy, sx + w, sy + h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbScratch);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.fbScreen);
+    gl.blitFramebuffer(0, 0, w, h, dx, dy, dx + w, dy + h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   uploadVideo(frame: VideoFrame): void {

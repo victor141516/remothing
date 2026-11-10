@@ -8,7 +8,8 @@
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_KEYFRAME, C_PING, C_STATS, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
+  C_ACK, C_KEYFRAME, C_PING, C_STATS, COPY_LEN, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
+  RECT_HEADER_LEN,
   S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
 } from './proto';
 import { Renderer } from './renderer';
@@ -100,7 +101,7 @@ function onFrame(buf: ArrayBuffer, received: number): void {
   const v = new DataView(buf);
   const flags = v.getUint8(1);
   const n = v.getUint16(2, true);
-  let off = FRAME_HEADER_LEN;
+  let off = FRAME_HEADER_LEN + v.getUint16(44, true) * COPY_LEN;
   for (let i = 0; i < n; i++) off += RECT_HEADER_LEN + v.getUint32(off + 12, true);
   const f: Frame = {
     buf,
@@ -141,7 +142,18 @@ function pump(): void {
 function apply(f: Frame): void {
   const v = new DataView(f.buf);
   const n = v.getUint16(2, true);
+  const copies = v.getUint16(44, true);
   let off = FRAME_HEADER_LEN;
+  for (let i = 0; i < copies; i++, off += COPY_LEN) {
+    renderer.copy(
+      v.getUint16(off, true),
+      v.getUint16(off + 2, true),
+      v.getUint16(off + 4, true),
+      v.getUint16(off + 6, true),
+      v.getUint16(off + 8, true),
+      v.getUint16(off + 10, true),
+    );
+  }
   for (let i = 0; i < n; i++) {
     const x = v.getUint16(off, true);
     const y = v.getUint16(off + 2, true);

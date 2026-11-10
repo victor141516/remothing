@@ -15,6 +15,8 @@ use crate::config::{constant_time_eq, hash_password, random_token, verify_passwo
 use crate::shared::Tuning;
 
 const COOKIE: &str = "rt_admin";
+/// Video codecs the encoders and the browser client implement.
+const CODECS: [&str; 1] = ["h264"];
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()
@@ -83,7 +85,8 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
     if let Some(s) = session_cookie(&headers) {
         app.admin_sessions.lock().unwrap().remove(&s);
     }
-    Ok(Json(json!({"ok": true})).into_response())
+    let clear = format!("{COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/");
+    Ok(([(header::SET_COOKIE, clear)], Json(json!({"ok": true}))).into_response())
 }
 
 async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
@@ -165,7 +168,7 @@ async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
     Ok(Json(json!({
         "tuning": s.tuning,
         "codec": s.encoder.codec,
-        "codecs": ["h264"],
+        "codecs": CODECS,
         "encoder_preferred": s.encoder.preferred,
         "encoders": app.platform.encoders().backends(),
         "keyboard_layout": s.input.keyboard_layout,
@@ -181,6 +184,7 @@ async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
 #[derive(Deserialize)]
 struct SettingsPatch {
     tuning: Option<Tuning>,
+    codec: Option<String>,
     encoder_preferred: Option<String>,
     keyboard_layout: Option<String>,
     stream_token: Option<String>,
@@ -192,6 +196,11 @@ async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): 
     if let Some(t) = &p.tuning {
         if t.bandwidth_mbps <= 0.0 || t.max_lossless_frame_kb == 0 {
             return Err(bad("tuning values must be positive"));
+        }
+    }
+    if let Some(c) = &p.codec {
+        if !CODECS.contains(&c.as_str()) {
+            return Err(bad(format!("unsupported codec {c}")));
         }
     }
     if let Some(e) = &p.encoder_preferred {
@@ -212,6 +221,9 @@ async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): 
     app.update_settings(|s| {
         if let Some(t) = p.tuning {
             s.tuning = t;
+        }
+        if let Some(c) = p.codec {
+            s.encoder.codec = c;
         }
         if let Some(e) = p.encoder_preferred {
             s.encoder.preferred = e;
