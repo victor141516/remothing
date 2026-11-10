@@ -59,6 +59,8 @@ export const ENC_ZSTD = 2;
 
 export const FLAG_VIDEO = 1;
 export const FLAG_KEY = 2;
+/** The screen is in motion mode (what changes is shown from video). */
+export const FLAG_MOTION = 4;
 
 export const FRAME_HEADER_LEN = 48;
 /** Screen move entry after the FRAME header: src_x, src_y, dst_x, dst_y, w, h (u16 each). */

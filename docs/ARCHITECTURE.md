@@ -87,6 +87,35 @@ flowchart LR
    carrying the time the frame was held (receive → draw). zstd is decoded in
    WASM (`zstddec`, ~1.5 GB/s; pure-JS decoders stall the worker).
 
+## Motion mode
+
+For a screen that moves as a whole: a game, a full-screen video. Weighing
+tile by tile what goes to video and refining every tile that rests for a
+quarter of a second suits a desktop; here it only costs: parts of the
+picture hop between the layers, and every pause sends a burst of exact
+pixels that is thrown away a moment later.
+
+- **The switch** is automatic and per display (`MotionDetector` in
+  `shared.rs`, sampled by the capture thread on every pass). A second is
+  "moving" when at least half of the tiles were changing at 20 Hz or more
+  for most of it. Ten moving seconds in a row enter the mode; forty quiet
+  ones in a row leave it. Quick in and slow out on purpose: opening a
+  short video, going back to folders and opening another must not flip
+  the mode each time, and the mode is the safe one to be in by mistake
+  (a desktop shown as video is softer, not slower).
+- **In the mode** every tile that changes is shown from video at once,
+  whatever it would cost losslessly, and no tile goes back to lossless
+  while anything on the screen still changes. Video frames, their pacing
+  and the bitrate cap are those of the frame path above. With GPU capture
+  and GPU encoders no pixel is read back meanwhile.
+- **The exact picture** follows once the whole screen has been still for
+  5 s: the video tiles are re-sent losslessly, paced by the link as any
+  refinement. A change before it is complete stops it (the tiles not yet
+  sent stay video); tiles that are exact and do not change stay exact.
+- Clients without a video encoder are not affected: lossless is all they
+  have. FRAME carries the mode as a flag, for the overlay and the event
+  log.
+
 ## Link model
 
 `pacer.rs`, per client, from frame ACKs (client hold time subtracted, so

@@ -75,6 +75,11 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   fingers dragged scroll, and a tap followed at once by another touch holds
   the button for as long as that touch lasts (double click, or drag).
   `Type` in the controls opens the device's own keyboard.
+- Games and full-screen video: when the whole screen has been moving for
+  ten seconds the stream turns into plain video of everything that changes
+  (motion mode; `&stats` and the admin UI show it). It sharpens to the
+  exact picture after five still seconds and goes back to the usual mix
+  of exact and video areas after forty quiet ones.
 - Sound: what the remote session plays is sent along (Opus) and starts with
   the first click or key in the page; `Sound` in the controls switches it
   and its tooltip tells whether it plays or why not (so does the last line

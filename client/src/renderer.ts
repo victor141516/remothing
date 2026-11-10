@@ -46,6 +46,9 @@ export class Renderer {
   private fbScreen: WebGLFramebuffer | null = null;
   private fbScratch: WebGLFramebuffer | null = null;
   private mask = new Uint8Array(0);
+  /** Tiles shown from the video layer, of `tiles` (for the stats overlay). */
+  videoTiles = 0;
+  tiles = 0;
   private tilesX = 0;
   private tilesY = 0;
   width = 0;
@@ -93,6 +96,8 @@ export class Renderer {
     this.tilesX = Math.ceil(width / tile);
     this.tilesY = Math.ceil(height / tile);
     this.mask = new Uint8Array(this.tilesX * this.tilesY);
+    this.tiles = this.mask.length;
+    this.videoTiles = 0;
     const [screen, video, mask, scratch] = [texture(gl, 0), texture(gl, 1), texture(gl, 2), texture(gl, 3)];
     this.textures = [screen, video, mask, scratch];
     gl.activeTexture(gl.TEXTURE3);
@@ -142,7 +147,10 @@ export class Renderer {
 
   /** Tile index with bit 15 set = show from video. */
   switchTile(entry: number): void {
-    this.mask[entry & 0x7fff] = entry & 0x8000 ? 255 : 0;
+    const tile = entry & 0x7fff;
+    const video = entry & 0x8000 ? 255 : 0;
+    if (video !== this.mask[tile]) this.videoTiles += video ? 1 : -1;
+    this.mask[tile] = video;
   }
 
   uploadMask(): void {

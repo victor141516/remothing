@@ -187,6 +187,7 @@ impl CaptureLoop {
             Ok(())
         };
         while !self.control.has_request() {
+            self.shared.tick(proto::now_us());
             if let Some(state) = capture.cursor_change()? {
                 self.shared.set_cursor(proto::cursor(&state));
             }

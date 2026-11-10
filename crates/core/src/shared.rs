@@ -23,7 +23,7 @@ use crate::geom::{MovedRect, Rect};
 pub use crate::pixels::Geometry;
 use crate::pixels::{Differ, Pixels};
 use crate::platform::GpuSurface;
-use crate::proto::{self, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
+use crate::proto::{self, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN};
 
 /// A tile is "moving" when its 3rd most recent change is this recent (>= ~20 Hz).
 const HOT_WINDOW_US: u64 = 150_000;
@@ -47,6 +47,55 @@ const ZSTD_LEVEL: i32 = 1;
 /// Share of the link the video layer may use (lossless refinement and
 /// protocol overhead need the rest). Its bitrate cap and frame pacing follow it.
 pub const VIDEO_SHARE: f64 = 0.7;
+/// Motion mode is for a screen that moves as a whole (a game, a full-screen
+/// video): entered after this many seconds in a row with at least
+/// MOTION_SHARE of the screen moving, left after this many in a row with
+/// less. Quick to enter and slow to leave, so that opening and closing
+/// videos or games between spells of desktop work does not flip it back
+/// and forth.
+const MOTION_ENTER_S: u32 = 10;
+const MOTION_LEAVE_S: u32 = 40;
+const MOTION_SHARE: f64 = 0.5;
+/// In motion mode the exact picture follows once the whole screen has been
+/// still this long.
+const STILL_US: u64 = 5_000_000;
+
+/// Decides between tile mode and motion mode from samples of "at least
+/// MOTION_SHARE of the screen is moving", judged a second at a time.
+#[derive(Default)]
+struct MotionDetector {
+    on: bool,
+    /// Start of the second being judged, and its samples.
+    second_from: u64,
+    samples: u32,
+    moving: u32,
+    /// Seconds in a row that spoke for the other mode.
+    run: u32,
+}
+
+impl MotionDetector {
+    /// Returns the new mode when the second that ends with this sample changes it.
+    fn sample(&mut self, now: u64, moving: bool) -> Option<bool> {
+        let mut switched = None;
+        if self.samples > 0 && now.saturating_sub(self.second_from) >= 1_000_000 {
+            // A second is what most of its samples were.
+            let moving_second = self.moving * 2 >= self.samples;
+            (self.samples, self.moving) = (0, 0);
+            self.run = if moving_second == self.on { 0 } else { self.run + 1 };
+            if self.run >= if self.on { MOTION_LEAVE_S } else { MOTION_ENTER_S } {
+                self.run = 0;
+                self.on = !self.on;
+                switched = Some(self.on);
+            }
+        }
+        if self.samples == 0 {
+            self.second_from = now;
+        }
+        self.samples += 1;
+        self.moving += moving as u32;
+        switched
+    }
+}
 
 pub struct Shared {
     inner: Mutex<Inner>,
@@ -62,6 +111,9 @@ struct Inner {
     surface: Option<GpuSurface>,
     /// Last three change times per tile, most recent first (0 = never).
     changes: Vec<[u64; 3]>,
+    /// Last time anything on the screen changed.
+    changed_us: u64,
+    motion: MotionDetector,
     cursor: Option<Arc<Vec<u8>>>,
     clients: Vec<ClientState>,
 }
@@ -181,6 +233,8 @@ impl Shared {
                 pixels: Arc::new(Pixels::new(Geometry { width: 0, height: 0, tile })),
                 surface: None,
                 changes: Vec::new(),
+                changed_us: 0,
+                motion: MotionDetector::default(),
                 cursor: None,
                 clients: Vec::new(),
             }),
@@ -195,6 +249,8 @@ impl Shared {
         let geometry = Geometry { width, height, tile: g.tile };
         g.pixels = Arc::new(Pixels::new(geometry));
         g.changes = vec![[0; 3]; geometry.tiles()];
+        g.changed_us = 0;
+        g.motion = MotionDetector::default();
         g.surface = surface;
         g.epoch += 1;
         for c in &g.clients {
@@ -316,8 +372,33 @@ impl Shared {
         let skip = (0..n)
             .map(|t| !live.is_empty() && live.iter().all(|c| c.gpu_input && c.video[t]))
             .collect();
-        let settled = g.changes.iter().map(|ch| now.saturating_sub(ch[0]) >= COOL_US / 2).collect();
+        // A little before the tile may leave video (see `pull`).
+        let settled = if g.motion.on {
+            vec![now.saturating_sub(g.changed_us) + COOL_US / 2 >= STILL_US; n]
+        } else {
+            g.changes.iter().map(|ch| now.saturating_sub(ch[0]) >= COOL_US / 2).collect()
+        };
         CaptureHints { skip, settled }
+    }
+
+    /// Judges how much of the screen is moving and switches between tile
+    /// mode and motion mode. Called by the capture thread on every pass,
+    /// changes or not.
+    pub fn tick(&self, now: u64) {
+        let mut g = self.inner.lock().unwrap();
+        let hot = g.changes.iter().filter(|ch| ch[2] != 0 && now.saturating_sub(ch[2]) < HOT_WINDOW_US).count();
+        let moving = hot > 0 && hot as f64 >= g.changes.len() as f64 * MOTION_SHARE;
+        if g.motion.sample(now, moving).is_some() {
+            // What may go to video or leave it just changed for everyone.
+            for c in &g.clients {
+                c.waker.unpark();
+            }
+        }
+    }
+
+    /// The screen is in motion mode (see `pull`).
+    pub fn motion(&self) -> bool {
+        self.inner.lock().unwrap().motion.on
     }
 
     /// Publishes what `diff` found: replays its moves for every client and
@@ -380,6 +461,7 @@ impl Shared {
             if !refresh {
                 let ch = &mut g.changes[idx];
                 *ch = [capture_us, ch[0], ch[1]];
+                g.changed_us = g.changed_us.max(capture_us);
             }
             for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
                 // A refreshed tile only matters to clients showing it losslessly.
@@ -388,6 +470,9 @@ impl Shared {
                 }
                 c.stale[idx] = true;
             }
+        }
+        if !refresh && !diff.moves.is_empty() {
+            g.changed_us = g.changed_us.max(capture_us);
         }
         for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
             if !c.pending {
@@ -407,7 +492,8 @@ impl Shared {
         let now = proto::now_us();
         codec.paced = false;
         let mut guard = self.inner.lock().unwrap();
-        let Inner { epoch, pixels, changes, clients, surface, .. } = &mut *guard;
+        let Inner { epoch, pixels, changes, clients, surface, changed_us, motion: detector, .. } = &mut *guard;
+        let changed_us = *changed_us;
         let geometry = pixels.geometry;
         let Some(c) = clients.iter_mut().find(|c| c.id == id) else {
             return Ok(Pull::Idle { wake_at_us: None });
@@ -464,6 +550,11 @@ impl Shared {
 
         let mut switches: Vec<u16> = Vec::new();
         let mut video_dirty = false;
+        // Motion mode: whatever changes is shown from video (no weighing of
+        // what it would cost losslessly) and nothing goes back to lossless
+        // until the whole screen has been still for a while. Tiles that are
+        // exact and do not change stay as they are.
+        let motion = detector.on && has_encoder;
         let mut wake_at_us: Option<u64> = None;
         let mut wake = |t: u64| wake_at_us = Some(wake_at_us.map_or(t, |w: u64| w.min(t)));
         for (i, ch) in changes.iter().enumerate() {
@@ -477,12 +568,12 @@ impl Shared {
                 switches.push(i as u16);
                 continue;
             }
-            let cools_at = ch[0].max(c.video_since[i]) + COOL_US;
+            let cools_at = if motion { changed_us + STILL_US } else { ch[0].max(c.video_since[i]) + COOL_US };
             if c.video[i] {
                 // Back to lossless once still, or while moving if that is
                 // affordable (e.g. it went to video with a one-off burst).
                 // Content moved in from video keeps video until it settles.
-                let affordable = hot(i) && !allow_video && now >= c.video_since[i] + COOL_US;
+                let affordable = !motion && hot(i) && !allow_video && now >= c.video_since[i] + COOL_US;
                 let cooled = !forced && (now >= cools_at || !has_encoder || affordable);
                 // Without an encoder lossless is the only layer: no pacing.
                 if cooled && (!has_encoder || codec.refine_tokens > 0.0) {
@@ -508,7 +599,7 @@ impl Shared {
                         wake(cools_at);
                     }
                 }
-            } else if forced || (allow_video && hot(i)) || (burst && dirty) {
+            } else if forced || (allow_video && hot(i)) || (burst && dirty) || (motion && dirty) {
                 if !video_ready {
                     // Switching needs a video picture: wait for the next paced one.
                     c.dirty[i] = dirty;
@@ -645,6 +736,9 @@ impl Shared {
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
             msg.extend_from_slice(&v.data);
         }
+        if motion {
+            msg[1] |= FLAG_MOTION;
+        }
         msg[0] = proto::S_FRAME;
         msg[2..4].copy_from_slice(&(codec.rects.len() as u16).to_le_bytes());
         msg[4..8].copy_from_slice(&seq.to_le_bytes());
@@ -736,5 +830,37 @@ impl ClientCodec {
     /// The last pull held content back to stay within the link estimate.
     pub fn paced(&self) -> bool {
         self.paced
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Feeds ten samples per second for `seconds` and returns the modes the
+    /// detector switched to, with the second of each switch.
+    fn run(seconds: u64, moving: impl Fn(u64) -> bool) -> Vec<(u64, bool)> {
+        let mut d = MotionDetector::default();
+        (0..seconds * 10).filter_map(|i| d.sample(1 + i * 100_000, moving(i / 10)).map(|on| (i / 10, on))).collect()
+    }
+
+    #[test]
+    fn motion_needs_ten_seconds_in_a_row() {
+        assert_eq!(run(60, |_| true), [(10, true)]);
+        // Nine moving seconds, one quiet, again and again: never.
+        assert_eq!(run(300, |s| s % 10 != 9), []);
+    }
+
+    #[test]
+    fn motion_leaves_only_after_forty_quiet_seconds_in_a_row() {
+        assert_eq!(run(100, |s| s < 20), [(10, true), (60, false)]);
+        // One moving second every 39 keeps it on.
+        assert_eq!(run(400, |s| s < 20 || s % 39 == 0), [(10, true)]);
+    }
+
+    /// Short videos between spells of desktop work: one switch, not one per video.
+    #[test]
+    fn motion_does_not_flip_between_short_videos() {
+        assert_eq!(run(600, |s| s % 25 < 12), [(10, true)]);
     }
 }

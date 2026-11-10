@@ -1,7 +1,17 @@
 # Games: stalls of 200-450 ms, and a motion mode (whole screen as video)
 
-- Status: agreed
+- Status: in progress
 - Created: 2026-11-10
+
+## Progress
+
+- Done: step 1, motion mode (`docs/ARCHITECTURE.md`, "Motion mode"). As
+  built, entering the mode switches nothing by itself: a tile goes to video
+  when it changes and stays there until the whole screen has been still
+  for 5 s; tiles that are exact and do not change stay exact. The whole
+  frame is not re-encoded from scratch either: the encoder input is updated
+  where the screen changed, as before.
+- Left: steps 2 to 6.
 
 ## Goal
 

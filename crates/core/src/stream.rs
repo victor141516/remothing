@@ -588,6 +588,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let mut need_key = true;
     let mut video_cap = VideoCap::default();
     let mut path = PATH_WS;
+    let mut motion = false;
     // Estimate on the WebSocket path when frames moved to the data channel
     // (0: not there, or already found slower).
     let mut ws_rate = 0.0;
@@ -671,6 +672,15 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
             match pulled {
                 Ok(Pull::Frame { msg, key, contents }) => {
                     need_key &= !key;
+                    if (msg[1] & proto::FLAG_MOTION != 0) != motion {
+                        motion = !motion;
+                        let text = if motion {
+                            "motion mode on: the screen moves as a whole, what changes goes as video"
+                        } else {
+                            "motion mode off: back to tiles"
+                        };
+                        app.telemetry.event(link.id, text);
+                    }
                     let seq = u32::from_le_bytes(msg[4..8].try_into().unwrap());
                     if key {
                         // Requests made before this one are answered by it.

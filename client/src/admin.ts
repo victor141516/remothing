@@ -37,6 +37,8 @@ interface Status {
   platform: string;
   provider: string;
   display: DisplayInfo | null;
+  /** The screen moves as a whole and is streamed as video (motion mode). */
+  motion: boolean;
   encoders: string[];
   /** Compiled-in backends that failed the startup probe: [name, reason]. */
   encoders_unavailable: [string, string][];
@@ -293,6 +295,8 @@ function renderStatus(s: Status) {
       h('dd', {}, s.provider),
       h('dt', {}, 'Current display'),
       h('dd', {}, d ? `${d.name} (${d.id}) ${fmtRes(d)} @ ${fmtHz(d.refresh_hz)}` : h('span', { class: 'dim' }, 'none')),
+      h('dt', {}, 'Mode'),
+      h('dd', {}, s.motion ? 'motion (the screen moves as a whole: what changes goes as video)' : 'tiles'),
       h('dt', {}, 'Encoders'),
       h('dd', {}, s.encoders.length ? s.encoders.join(', ') : h('span', { class: 'dim' }, 'none (lossless tiles only)')),
       h('dt', {}, 'Unavailable encoders'),

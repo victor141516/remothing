@@ -18,7 +18,8 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  C_STATS, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
+  C_STATS, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO,
+  FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_SIGNAL, now,
 } from './proto';
@@ -163,6 +164,8 @@ let useDc = false;
 let dcGraceUntil = 0;
 /** The data channel was given up as dead (see `setPath`). */
 let dcDead = false;
+/** The last frame drawn said the screen is in motion mode. */
+let motion = false;
 /** Send time of the oldest unanswered data-channel ping (0: none). */
 let dcPingSince = 0;
 /** Round trips of the WebSocket path (input socket) and the data channel. */
@@ -541,6 +544,7 @@ function apply(f: Frame): void {
       post({ type: 'marker', marker: code.marker, at: drawn });
     }
   }
+  motion = (v.getUint8(1) & FLAG_MOTION) !== 0;
   rec.frame(f.buf.byteLength, !!f.picture);
   rec.push('server', f.sent - f.oldest);
   rec.push('serverWait', Number(v.getBigUint64(32, true)) / 1000 - f.oldest);
@@ -659,7 +663,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       setInterval(() => {
         const rtts = dcOpen ? `  rtt ws ${Math.min(...wsRtts).toFixed(0)} dc ${Math.min(...dcRtts).toFixed(0)} ms` : '';
         const path = useDc ? 'webrtc' : dcOpen ? 'websocket (webrtc standby)' : 'websocket';
-        const pipeline = `${path}${rtts}  lost ${lostTotal}  queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
+        const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles`;
+        const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
         const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
       }, 250);

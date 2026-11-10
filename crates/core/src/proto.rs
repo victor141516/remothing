@@ -110,6 +110,9 @@ pub const ENC_ZSTD: u8 = 2;
 /// FRAME flags.
 pub const FLAG_VIDEO: u8 = 1;
 pub const FLAG_KEY: u8 = 2;
+/// The screen is in motion mode: what changes is shown from video until
+/// the whole screen has been still for a while.
+pub const FLAG_MOTION: u8 = 4;
 
 /// FRAME header: type u8, flags u8, n_rects u16, seq u32,
 /// capture_oldest_us u64, capture_newest_us u64, send_us u64,

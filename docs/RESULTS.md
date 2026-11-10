@@ -243,6 +243,18 @@ container and profiles as above, 10 s runs, capture→draw p50 / p99:
 Doubling the estimate every window without the bound to what was delivered
 reached 270 Mbit/s on the 18 Mbit/s link before the first late ACK.
 
+## Motion mode
+
+Linux bench container, `rt-testapp --mode full` at 165 fps, one client
+over the WebSocket (140 fps, 12 Mbit/s before and after the switch):
+
+| event | observed |
+|---|---|
+| screen moving as a whole | mode on 10 s after the movement began |
+| movement stops (`SIGSTOP`) | all 510 tiles still video at 4.5 s, all exact at 6.0 s |
+| movement resumes for 1.5 s | every tile video again, mode still on |
+| movement stops for good | mode still on at 39 s, off at 42 s |
+
 ## Sound
 
 A 3 s sine played by a program of the session, received in headless

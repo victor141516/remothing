@@ -102,6 +102,7 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
         "platform": p.name(),
         "provider": p.displays().provider_name(),
         "display": app.control.current(),
+        "motion": app.shared.motion(),
         "encoders": p.encoders().backends(),
         "encoders_unavailable": p.encoders().unavailable(),
         "encoder_preferred": app.settings.read().unwrap().encoder.preferred,
