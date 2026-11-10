@@ -38,9 +38,12 @@ None. All were answered on 2026-11-10 and are under "Decided".
   page being trusted, however that came about: a valid certificate (Let's
   Encrypt through Caddy) or the browser's warning accepted once for our
   self-signed HTTPS. No second ACME challenge, no certificate files to
-  configure. If it turns out that a browser the user cares about refuses
-  pinned certificates, that is to be discussed with the user before
-  anything requires a CA certificate.
+  configure.
+- **Safari is assumed to follow the standard**, pinned certificates
+  included: the design does not plan around a browser that refuses them,
+  and nothing special is built for Safari. If testing shows a browser the
+  user cares about refusing them, that is to be discussed with the user
+  before anything requires a CA certificate.
 - **Behind a reverse proxy with a valid certificate** (Caddy, for example)
   WebTransport must work too, as far as that is possible. What is
   possible is under "With a reverse proxy" below.
@@ -293,10 +296,12 @@ certificate to accept (`serverCertificateHashes`).
   accepted, or through the proxy).
 - With `tls.cert` / `tls.key` set to a CA certificate that matches the
   name the client connects to, that one is used and no hash is sent.
-- Support of the pinned kind per browser has to be checked on real
-  browsers (MDN documents it; Safari is the unknown). A browser that
-  refuses it stays on today's transports, and the client says why. What
-  to do about such a browser is the user's call (see "Decided").
+- Pinned certificates are part of the WebTransport standard (MDN documents
+  them) and every browser is assumed to honour them, Safari too (the
+  user's decision). It is still checked on real browsers when this
+  exists, because nobody tried it here. A browser that refuses stays on
+  today's transports and the client says why; what to do then is the
+  user's call (see "Decided").
 
 ### With a reverse proxy
 
@@ -418,10 +423,11 @@ sending rate is decided by our server, so the same idea is sound there.
 - Which of the two readings of "server" time is the real one (step 4).
 - How much delay our own path over datagrams has: measure it when it
   exists.
-- Which browsers accept a certificate pinned by hash for WebTransport
-  (Safari in particular), and that an HTTPS exception the user accepted
-  does not apply to WebTransport. From MDN and general knowledge, not
-  tried here.
+- That every browser accepts a certificate pinned by hash for
+  WebTransport. Assumed, by the user's decision, for Safari as well; MDN
+  lists WebTransport as available in Safari since March 2026 but nothing
+  was run here. Also that an HTTPS exception the user accepted does not
+  apply to WebTransport (general knowledge, not tried).
 - WebTransport through a proxy that ends it (arrangement 3). The Caddy
   pull request was only found by search, not read or run.
 - That the stalls in the log happened during a match and not in the
