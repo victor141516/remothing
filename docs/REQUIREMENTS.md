@@ -20,8 +20,8 @@
 | R4.2 GPU encode from D3D11 texture | `crates/encoder/src/d3d11.rs` (D3D11VA frames, CopySubresourceRegion of changed rects), CPU fallback | done |
 | R4.3 SendInput | `input.rs` (+ Ctrl+Alt+Del → SendSAS) | done |
 | R4.4 cursor from duplication | `cursor.rs` | done |
-| R4.5 Windows service (SYSTEM) | `service.rs`: install/uninstall/start/stop/run, supervisor | implemented; elevated test pending |
-| R4.6 console session, secure desktops, session switch | service relaunches the server in the active console session; `desktop.rs` follows the input desktop for capture and input | implemented; elevated test pending |
+| R4.5 Windows service (SYSTEM) | `service.rs`: install/uninstall/start/stop/run, supervisor relaunching the server in the console session | verified: supervisor in session 0, server in the console session, stop/uninstall clean |
+| R4.6 console session, secure desktops, session switch | service relaunches the server on console-session changes; `desktop.rs` follows the input desktop for capture and input | verified: lock screen captured and input injected on Winlogon (sign-in screen raised from the stream), UAC prompt captured and cancelled from the stream, Ctrl+Alt+Del via SendSAS switches to the secure desktop; user switching not tested (no second account) |
 | R4.7 only real outputs | DXGI outputs only, `virtual_displays()` = None | done |
 | R5.1 admin UI in-process, separate port | `server.admin_listen` (default 127.0.0.1:8081), `client/admin.html` | done |
 | R5.2 status | `/api/status`: platform, provider, encoders (+ unusable with reason, per-client active encoder and fallback), GPUs + utilization, CPU, clients with fps/Mbit/s/p50/p99, recent errors | done |
