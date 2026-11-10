@@ -13,8 +13,6 @@ before changing a subsystem:
 - `docs/RESULTS.md`: measurements, profiles, and how they were taken.
 - `docs/REQUIREMENTS.md`: requirement → implementation → status.
 - `README.md`: build, run, configuration, client usage.
-- `docs/SUNSHINE.md` (Spanish): what Sunshine does for performance and what
-  could be adopted. An analysis; none of it is implemented.
 
 ## Working with the user
 
