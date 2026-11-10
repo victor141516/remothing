@@ -36,6 +36,9 @@ None. All were answered on 2026-11-10 and are under "Decided".
   the user having to obtain a certificate. The user proposed a link to a
   page where the browser's warning is accepted once; the pinned
   certificate below does it with no click at all.
+- **Behind a reverse proxy with a valid certificate** (Caddy, for example)
+  WebTransport must work too, as far as that is possible. What is
+  possible is under "With a reverse proxy" below.
 - **Measuring which stage stalls** is still wanted as analysis, but it
   does not come before UDP any more.
 - **"The whole screen is moving a lot"**: at least half of the screen in
@@ -290,6 +293,46 @@ certificate to accept (`serverCertificateHashes`).
   refuses it stays on today's transports unless a CA certificate is
   configured, and the client says why.
 
+### With a reverse proxy
+
+The user's case: the page is served through a proxy such as Caddy, which
+holds a valid certificate and talks plain HTTP to our server.
+
+How it differs from HTTPS: WebTransport runs over QUIC, and QUIC is TLS
+built into UDP. The certificate works as with HTTPS (it belongs to a
+name, not to TCP), but QUIC has no unencrypted form. So "the proxy holds
+the certificate and the server behind it speaks plain" does not exist
+for WebTransport: whoever ends the QUIC connection needs a certificate,
+and a proxy that ends it has to open a second QUIC connection to us.
+
+Three arrangements, in the order we would recommend them:
+
+1. **The page through the proxy, the video straight to the server.** The
+   client loads the page and the WebSocket through the proxy, gets the
+   hash there, and opens WebTransport to the server's own UDP port with
+   the pinned certificate. The proxy's certificate is not involved and
+   the proxy needs no UDP support. Needs the server's UDP port reachable
+   by the client, as today's UDP does (`webrtc.advertise` has the same
+   role).
+2. **The proxy host forwards the UDP port as it is** (a plain UDP forward:
+   the system's own, or Caddy's layer-4 plugin), for a server the client
+   cannot reach directly. QUIC passes untouched, still encrypted end to
+   end with the pinned certificate.
+3. **The proxy ends WebTransport with its certificate and opens another
+   session to us.** Caddy has this only as an experimental pull request
+   (caddyserver/caddy #7669, passthrough of WebTransport in
+   `reverse_proxy`); the connection to us is still QUIC, with our
+   certificate left unchecked by the proxy. It puts the proxy's queues
+   between our pacing and the client, which is the control WebTransport
+   was chosen for.
+
+What we build for it: a setting for where clients open WebTransport
+(default: the page's host on our UDP port; else an address and port as in
+1 and 2, or a full `https://` URL as in 3, in which case no hash is sent
+and the browser checks the proxy's certificate as usual). 1 and 2 are
+tested in the container; 3 is allowed by the setting and not tested until
+a proxy that does it is at hand.
+
 ### Alternative left out: WebRTC video track
 
 The browser's own real-time video path, over the UDP port the data channel
@@ -374,6 +417,8 @@ sending rate is decided by our server, so the same idea is sound there.
   (Safari in particular), and that an HTTPS exception the user accepted
   does not apply to WebTransport. From MDN and general knowledge, not
   tried here.
+- WebTransport through a proxy that ends it (arrangement 3). The Caddy
+  pull request was only found by search, not read or run.
 - That the stalls in the log happened during a match and not in the
   launcher or on the desktop.
 - Decoder limits on the clients, and how Moonlight was configured
