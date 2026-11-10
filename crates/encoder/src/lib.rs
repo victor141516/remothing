@@ -59,8 +59,10 @@ impl Backend {
         if self == Backend::Nvenc {
             v.push(InputKind::Cuda);
         }
+        // h264_qsv only takes NV12/QSV surfaces (FFmpeg rejects D3D11 frames),
+        // so QuickSync uses system-memory NV12; x264 is CPU-only.
         #[cfg(windows)]
-        if has_surface && self != Backend::X264 {
+        if has_surface && matches!(self, Backend::Nvenc | Backend::Amf) {
             v.push(InputKind::D3D11);
         }
         let _ = has_surface;

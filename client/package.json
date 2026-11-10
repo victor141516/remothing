@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && esbuild src/main.ts src/worker.ts --bundle --format=esm --target=chrome120 --sourcemap --outdir=dist && node -e \"require('fs').copyFileSync('index.html','dist/index.html')\""
+    "build": "tsc --noEmit && esbuild src/main.ts src/worker.ts src/admin.ts --bundle --format=esm --target=chrome120 --sourcemap --outdir=dist && node -e \"for (const f of ['index.html','admin.html']) require('fs').copyFileSync(f,'dist/'+f)\""
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

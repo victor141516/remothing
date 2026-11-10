@@ -911,6 +911,7 @@ dependencies = [
  "ffmpeg-next",
  "gpu-interop",
  "libc",
+ "parking_lot",
  "remothing-core",
  "windows",
 ]

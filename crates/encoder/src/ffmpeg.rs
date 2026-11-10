@@ -90,10 +90,7 @@ impl FfmpegEncoder {
             }
             #[cfg(windows)]
             InputKind::D3D11 => {
-                let frame = surface
-                    .and_then(|s| s.downcast_ref::<gpu_interop::d3d11::D3D11Frame>())
-                    .context("no D3D11 capture surface")?;
-                let i = crate::d3d11::D3D11Input::new(frame, width, height)?;
+                let i = crate::d3d11::D3D11Input::new(surface.context("no capture surface")?, width, height)?;
                 enc.set_format(Pixel::D3D11);
                 unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = i.frames_ref() };
                 Input::D3D11(i)

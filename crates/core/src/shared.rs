@@ -292,21 +292,36 @@ impl Shared {
         let stride = g.width as usize * 4;
         for m in &diff.moves {
             apply_move(&mut g.fb, stride, m);
+            let src = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
+            let (dx, dy) = (m.dst.x as i64 - m.src_x as i64, m.dst.y as i64 - m.src_y as i64);
+            let t = geometry.tile;
+            let tiles_x = geometry.width.div_ceil(t);
             for c in g.clients.iter_mut().filter(|c| c.epoch == g.epoch) {
-                // The client can replay the move only if its lossless copy of the
-                // source is current; otherwise the destination is simply resent.
-                let src = Rect::new(m.src_x, m.src_y, m.dst.w, m.dst.h);
-                let mut src_synced = true;
-                for_each_tile(src, &geometry, |t| src_synced &= !c.dirty[t] && !c.video[t]);
-                for_each_tile(m.dst, &geometry, |t| {
-                    c.stale[t] = true;
-                    if !src_synced || c.copies.len() >= MAX_PENDING_COPIES {
-                        c.dirty[t] = true;
+                for_each_tile(m.dst, &geometry, |i| c.stale[i] = true);
+                if c.copies.len() >= MAX_PENDING_COPIES {
+                    for_each_tile(m.dst, &geometry, |i| c.dirty[i] = true);
+                    continue;
+                }
+                // The client replays the move on its lossless layer; source tiles it
+                // does not hold exactly (unsent changes, video) land shifted in the
+                // destination, so exactly those destination areas are resent.
+                let mut unsynced = Vec::new();
+                for_each_tile(src, &geometry, |i| {
+                    if c.dirty[i] || c.video[i] {
+                        let (tx, ty) = (i as u32 % tiles_x * t, i as u32 / tiles_x * t);
+                        let x0 = (tx as i64).max(src.x as i64) + dx;
+                        let y0 = (ty as i64).max(src.y as i64) + dy;
+                        let x1 = ((tx + t) as i64).min((src.x + src.w) as i64) + dx;
+                        let y1 = ((ty + t) as i64).min((src.y + src.h) as i64) + dy;
+                        if x0 < x1 && y0 < y1 && x0 >= 0 && y0 >= 0 {
+                            unsynced.push(Rect::new(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32));
+                        }
                     }
                 });
-                if src_synced && c.copies.len() < MAX_PENDING_COPIES {
-                    c.copies.push(*m);
+                for r in unsynced.into_iter().filter_map(|r| r.clip(geometry.width, geometry.height)) {
+                    for_each_tile(r, &geometry, |i| c.dirty[i] = true);
                 }
+                c.copies.push(*m);
             }
         }
         for &idx in &diff.changed {
@@ -524,6 +539,11 @@ pub struct TileDiff {
     changed: Vec<usize>,
     /// Moves applied by the last `diff`, replayed by `commit`.
     moves: Vec<MovedRect>,
+    /// Large changes to skip before trying scroll detection again after a miss
+    /// (keeps the cost off full-screen video content).
+    scroll_backoff: u32,
+    /// Scratch for scroll detection: old row hash -> row.
+    row_index: std::collections::HashMap<u64, u32>,
 }
 
 impl TileDiff {
@@ -537,6 +557,8 @@ impl TileDiff {
             touched: vec![false; n],
             changed: Vec::new(),
             moves: Vec::new(),
+            scroll_backoff: 0,
+            row_index: std::collections::HashMap::new(),
         }
     }
 
@@ -563,6 +585,12 @@ impl TileDiff {
             if src_rect.clip(g.width, g.height) == Some(src_rect) && m.dst.clip(g.width, g.height) == Some(m.dst) {
                 apply_move(&mut self.copy, own_stride, m);
                 self.moves.push(*m);
+            }
+        }
+        if moved.is_empty() {
+            if let Some(m) = self.detect_scroll(src, stride, rects) {
+                apply_move(&mut self.copy, own_stride, &m);
+                self.moves.push(m);
             }
         }
         for r in rects.iter().filter_map(|r| r.clip(g.width, g.height)) {
@@ -594,6 +622,94 @@ impl TileDiff {
         }
         self.changed.len()
     }
+
+    /// Finds a vertical scroll inside the bounding box of `rects` (providers
+    /// like XDamage report no moves): sample rows of the new frame are looked
+    /// up by hash among the old rows, the shift with most votes is verified on
+    /// spread rows. Wrong guesses only cost bandwidth: the tile diff that
+    /// follows still compares every touched tile against the moved copy.
+    fn detect_scroll(&mut self, src: &[u8], stride: usize, rects: &[Rect]) -> Option<MovedRect> {
+        const MIN_HEIGHT: u32 = 128;
+        const MIN_WIDTH: u32 = 256;
+        const SAMPLES: u32 = 48;
+        const BACKOFF: u32 = 10;
+        let g = self.geometry;
+        let mut it = rects.iter().filter_map(|r| r.clip(g.width, g.height));
+        let first = it.next()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x + first.w, first.y + first.h);
+        for r in it {
+            (x0, y0, x1, y1) = (x0.min(r.x), y0.min(r.y), x1.max(r.x + r.w), y1.max(r.y + r.h));
+        }
+        if y1 - y0 < MIN_HEIGHT || x1 - x0 < MIN_WIDTH {
+            return None;
+        }
+        if self.scroll_backoff > 0 {
+            self.scroll_backoff -= 1;
+            return None;
+        }
+        let own_stride = g.width as usize * 4;
+        let (bx, bw) = (x0 as usize * 4, (x1 - x0) as usize * 4);
+        let old_row = |y: u32| &self.copy[y as usize * own_stride + bx..y as usize * own_stride + bx + bw];
+        let new_row = |y: u32| &src[y as usize * stride + bx..y as usize * stride + bx + bw];
+
+        // Rows that repeat (blank lines, patterns) cannot tell the shift apart:
+        // they are marked ambiguous and never vote.
+        const AMBIGUOUS: u32 = u32::MAX;
+        self.row_index.clear();
+        for y in y0..y1 {
+            self.row_index.entry(row_hash(old_row(y))).and_modify(|v| *v = AMBIGUOUS).or_insert(y);
+        }
+        let mut votes: Vec<(i64, u32)> = Vec::new();
+        let mut samples = 0;
+        let step = ((y1 - y0) / (SAMPLES * 4)).max(1);
+        for y in (y0..y1).step_by(step as usize) {
+            let Some(&oy) = self.row_index.get(&row_hash(new_row(y))) else { continue };
+            if oy == AMBIGUOUS {
+                continue;
+            }
+            let dy = y as i64 - oy as i64;
+            match votes.iter_mut().find(|v| v.0 == dy) {
+                Some(v) => v.1 += 1,
+                None => votes.push((dy, 1)),
+            }
+            samples += 1;
+            if samples == SAMPLES {
+                break;
+            }
+        }
+        let found = votes.iter().filter(|v| v.0 != 0).max_by_key(|v| v.1).map(|v| v.0).filter(|&dy| {
+            let (top, bottom) = (y0 as i64 + dy.max(0), y1 as i64 + dy.min(0));
+            if bottom - top < (MIN_HEIGHT / 2) as i64 {
+                return false;
+            }
+            let check = ((bottom - top) / 32).max(1) as usize;
+            let (mut ok, mut total) = (0, 0);
+            for y in (top..bottom).step_by(check) {
+                total += 1;
+                ok += (new_row(y as u32) == old_row((y - dy) as u32)) as u32;
+            }
+            ok * 10 >= total * 7
+        });
+        let Some(dy) = found else {
+            self.scroll_backoff = BACKOFF;
+            return None;
+        };
+        let top = (y0 as i64 + dy.max(0)) as u32;
+        let h = ((y1 as i64 + dy.min(0)) - top as i64) as u32;
+        Some(MovedRect { src_x: x0, src_y: (top as i64 - dy) as u32, dst: Rect::new(x0, top, x1 - x0, h) })
+    }
+}
+
+fn row_hash(row: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut chunks = row.chunks_exact(8);
+    for c in &mut chunks {
+        h = (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    }
+    for &b in chunks.remainder() {
+        h = (h ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    h
 }
 
 /// Per-client state owned by its producer thread (outside the shared lock).
