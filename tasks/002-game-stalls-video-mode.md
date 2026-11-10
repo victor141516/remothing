@@ -32,10 +32,15 @@ None. All were answered on 2026-11-10 and are under "Decided".
   video track: it needs the same of the network as WebTransport (a UDP
   port of the server the client can reach), so it would fail in the same
   places.
-- **Self-signed certificates must keep working** for WebTransport, without
-  the user having to obtain a certificate. The user proposed a link to a
-  page where the browser's warning is accepted once; the pinned
-  certificate below does it with no click at all.
+- **WebTransport never asks the user for a certificate of its own.** Its
+  certificate is self-signed, made by the server, and trusted only
+  because the page hands its hash to the browser. So it depends on the
+  page being trusted, however that came about: a valid certificate (Let's
+  Encrypt through Caddy) or the browser's warning accepted once for our
+  self-signed HTTPS. No second ACME challenge, no certificate files to
+  configure. If it turns out that a browser the user cares about refuses
+  pinned certificates, that is to be discussed with the user before
+  anything requires a CA certificate.
 - **Behind a reverse proxy with a valid certificate** (Caddy, for example)
   WebTransport must work too, as far as that is possible. What is
   possible is under "With a reverse proxy" below.
@@ -290,8 +295,8 @@ certificate to accept (`serverCertificateHashes`).
   name the client connects to, that one is used and no hash is sent.
 - Support of the pinned kind per browser has to be checked on real
   browsers (MDN documents it; Safari is the unknown). A browser that
-  refuses it stays on today's transports unless a CA certificate is
-  configured, and the client says why.
+  refuses it stays on today's transports, and the client says why. What
+  to do about such a browser is the user's call (see "Decided").
 
 ### With a reverse proxy
 
