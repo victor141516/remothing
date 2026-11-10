@@ -28,6 +28,8 @@ pub struct App {
     pub keyboard_layout: Arc<RwLock<String>>,
     pub admin_sessions: Mutex<HashSet<String>>,
     pub tls_enabled: bool,
+    /// WebRTC transport, when enabled and a UDP socket could be bound.
+    pub rtc: Option<crate::rtc::Hub>,
 }
 
 impl App {
@@ -44,6 +46,15 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
     let tls = (!settings.tls.cert.is_empty() && !settings.tls.key.is_empty())
         .then(|| (settings.tls.cert.clone(), settings.tls.key.clone()));
     let telemetry = Arc::new(Telemetry::default());
+    let stream_addr: SocketAddr = settings.server.listen.parse().context("server.listen")?;
+    let admin_addr: SocketAddr = settings.server.admin_listen.parse().context("server.admin_listen")?;
+    let rtc = match settings.webrtc.enabled {
+        // Without it everything still works over the WebSocket.
+        true => crate::rtc::Hub::start(&settings.webrtc, stream_addr.port())
+            .inspect_err(|e| telemetry.error("webrtc disabled", e))
+            .ok(),
+        false => None,
+    };
     let app = Arc::new(App {
         platform: platform.clone(),
         shared: Arc::new(Shared::new(settings.server.tile)),
@@ -54,6 +65,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         config,
         admin_sessions: Mutex::new(HashSet::new()),
         tls_enabled: tls.is_some(),
+        rtc,
     });
 
     let capture = CaptureLoop {
@@ -82,8 +94,6 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         .with_state(app.clone());
     let admin_router = crate::admin::router().fallback(assets::admin_asset).with_state(app.clone());
 
-    let stream_addr: SocketAddr = settings.server.listen.parse().context("server.listen")?;
-    let admin_addr: SocketAddr = settings.server.admin_listen.parse().context("server.admin_listen")?;
     tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async move {
         let rustls = match &tls {
             Some((cert, key)) => {

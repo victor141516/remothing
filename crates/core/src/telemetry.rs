@@ -35,6 +35,10 @@ pub struct ClientStatus {
     pub link_proven: bool,
     pub rtt_ms: f64,
     pub video_cap_mbps: Option<f64>,
+    /// "websocket" or "webrtc" (frames over the UDP data channel).
+    pub transport: String,
+    /// Data-channel frames lost and repaired.
+    pub lost_frames: u64,
     /// Latest stats reported by the client itself (C_STATS JSON).
     pub client_report: Option<serde_json::Value>,
     #[serde(skip)]
@@ -81,7 +85,14 @@ impl Telemetry {
         let now = now_us();
         self.clients.lock().unwrap().insert(
             id,
-            ClientStatus { id, addr: addr.to_string(), connected_ms: now / 1000, window_start_us: now, ..Default::default() },
+            ClientStatus {
+                id,
+                addr: addr.to_string(),
+                connected_ms: now / 1000,
+                transport: "websocket".into(),
+                window_start_us: now,
+                ..Default::default()
+            },
         );
     }
 
@@ -118,6 +129,18 @@ impl Telemetry {
             c.link_proven = link.proven;
             c.rtt_ms = rtt_us as f64 / 1e3;
             c.video_cap_mbps = video_cap_bps.map(|b| b as f64 / 1e6);
+        }
+    }
+
+    pub fn client_transport(&self, id: u64, transport: &str) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.transport = transport.to_string();
+        }
+    }
+
+    pub fn client_lost(&self, id: u64) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.lost_frames += 1;
         }
     }
 

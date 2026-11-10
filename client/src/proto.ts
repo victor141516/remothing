@@ -4,12 +4,21 @@ export const S_HELLO = 1;
 export const S_FRAME = 2;
 export const S_CURSOR = 3;
 export const S_PONG = 4;
+/** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
+export const S_SIGNAL = 5;
+/** Data-channel piece of a FRAME: flags u8, part u16, parts u16, pad u16, seq u32. */
+export const S_CHUNK = 6;
+export const CHUNK_HEADER_LEN = 12;
 
 export const C_PING = 1;
-/** Frame drawn: pad x3, seq u32, hold_us u32 (receive-to-draw time). */
+/** Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, n_lost x lost seq u32. */
 export const C_ACK = 2;
 export const C_KEYFRAME = 3;
 export const C_STATS = 4;
+/** UTF-8 JSON: WebRTC signaling (`offer`, `candidate`). */
+export const C_SIGNAL = 5;
+/** The last HELLO was applied. */
+export const C_HELLO_ACK = 6;
 export const C_MOVE = 10;
 export const C_BUTTON = 11;
 export const C_WHEEL = 12;

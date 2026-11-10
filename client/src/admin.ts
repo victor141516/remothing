@@ -27,6 +27,8 @@ interface ClientStatus {
   link_proven: boolean;
   rtt_ms: number;
   video_cap_mbps: number | null;
+  transport: string;
+  lost_frames: number;
   client_report: Record<string, Pair> | null;
 }
 
@@ -321,10 +323,11 @@ function renderStatus(s: Status) {
     {},
     h('h2', {}, 'Clients'),
     table(
-      ['Address', 'Connected', 'Encoder', 'FPS', 'Mbit/s', 'Link Mbit/s', 'RTT ms', 'Video cap Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
+      ['Address', 'Connected', 'Transport', 'Encoder', 'FPS', 'Mbit/s', 'Link Mbit/s', 'RTT ms', 'Video cap Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
       s.clients.map((c) => [
         td(h('span', { class: 'mono' }, c.addr)),
         td(fmtAge(c.connected_ms)),
+        td(c.transport === 'webrtc' ? `WebRTC (UDP), ${c.lost_frames} lost` : 'WebSocket'),
         td(
           c.encoder ?? h('span', { class: 'dim' }, 'lossless only'),
           c.encoder_fallback && h('div', { class: 'dim' }, `fallback: ${c.encoder_fallback}`),

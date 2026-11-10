@@ -4,23 +4,47 @@
 use crate::platform::CursorState;
 
 // Server -> client
-/// width u32, height u32, tile u32 (at offsets 4/8/12). Sent on connect and
-/// whenever the streamed display changes; the client resets its layers and decoder.
+/// width u32, height u32, tile u32, first_seq u32 (at offsets 4/8/12/16). Sent
+/// on connect and whenever the streamed display changes; the client resets
+/// its layers and decoder, drops frames before `first_seq` and answers
+/// C_HELLO_ACK. No frame of the new display is sent before that answer, so
+/// frames on another path (data channel) can never overtake it.
 pub const S_HELLO: u8 = 1;
 pub const S_FRAME: u8 = 2;
 /// w u16, h u16, xhot u16, yhot u16, pad u16, RGBA. w = h = 0 hides the cursor.
 pub const S_CURSOR: u8 = 3;
 pub const S_PONG: u8 = 4;
+/// UTF-8 JSON, WebRTC signaling over the WebSocket: `{"type":"config",
+/// "iceServers":[...]}` on connect, `{"type":"answer","sdp":...}`.
+pub const S_SIGNAL: u8 = 5;
+/// One piece of a FRAME on the data channel: flags u8 (FLAG_VIDEO of the
+/// frame), part u16, parts u16, pad u16, seq u32 (offsets 1/2/4/6/8), data.
+pub const S_CHUNK: u8 = 6;
+pub const CHUNK_HEADER_LEN: usize = 12;
+/// Chunk payload: data channel messages must stay within 64 KiB, the size
+/// every browser accepts without negotiation.
+pub const CHUNK_PAYLOAD: usize = 60 * 1024;
 
 // Client -> server
+/// client_ts f64 at offset 8; answered with S_PONG on the same path (the
+/// WebSocket or the data channel: the client compares their round trips).
 pub const C_PING: u8 = 1;
-/// Frame drawn: pad u8 x3, seq u32, hold_us u32 (client time from receiving
-/// the frame to drawing it, excluded from the network round trip).
+/// Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, then n_lost x
+/// seq u32. `seq` is the last frame drawn; every earlier frame was drawn or
+/// is listed as lost (in this ACK or an earlier one). `hold_us` is the client
+/// time from receiving that frame to drawing it, excluded from the network
+/// round trip.
 pub const C_ACK: u8 = 2;
 /// Client decoder lost sync and needs an IDR frame.
 pub const C_KEYFRAME: u8 = 3;
 /// UTF-8 JSON with the client's measured stats (shown in the admin UI).
 pub const C_STATS: u8 = 4;
+/// UTF-8 JSON, WebRTC signaling: `{"type":"offer","sdp":...}`,
+/// `{"type":"candidate","candidate":"candidate:..."}`, and the path the
+/// client wants frames on: `{"type":"path","webrtc":bool}`.
+pub const C_SIGNAL: u8 = 5;
+/// The client applied the last HELLO.
+pub const C_HELLO_ACK: u8 = 6;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
 pub const C_WHEEL: u8 = 12;
@@ -55,13 +79,36 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn hello(width: u32, height: u32, tile: u32) -> Vec<u8> {
-    let mut m = Vec::with_capacity(16);
+pub fn hello(width: u32, height: u32, tile: u32, first_seq: u32) -> Vec<u8> {
+    let mut m = Vec::with_capacity(20);
     m.extend_from_slice(&[S_HELLO, 0, 0, 0]);
-    m.extend_from_slice(&width.to_le_bytes());
-    m.extend_from_slice(&height.to_le_bytes());
-    m.extend_from_slice(&tile.to_le_bytes());
+    for v in [width, height, tile, first_seq] {
+        m.extend_from_slice(&v.to_le_bytes());
+    }
     m
+}
+
+pub fn signal(json: &serde_json::Value) -> Vec<u8> {
+    let mut m = vec![S_SIGNAL];
+    m.extend_from_slice(json.to_string().as_bytes());
+    m
+}
+
+/// Splits a FRAME into data channel chunks.
+pub fn chunks(frame: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
+    let flags = frame[1] & FLAG_VIDEO;
+    let seq = &frame[4..8];
+    let parts = frame.len().div_ceil(CHUNK_PAYLOAD) as u16;
+    frame.chunks(CHUNK_PAYLOAD).enumerate().map(move |(part, data)| {
+        let mut m = Vec::with_capacity(CHUNK_HEADER_LEN + data.len());
+        m.extend_from_slice(&[S_CHUNK, flags]);
+        m.extend_from_slice(&(part as u16).to_le_bytes());
+        m.extend_from_slice(&parts.to_le_bytes());
+        m.extend_from_slice(&[0, 0]);
+        m.extend_from_slice(seq);
+        m.extend_from_slice(data);
+        m
+    })
 }
 
 pub fn pong(client_ts: f64) -> Vec<u8> {

@@ -16,14 +16,14 @@ flowchart LR
     CL[capture loop<br/>hot display switch] --> TD[TileDiff<br/>lock-free tile compare]
     TD --> S[Shared tiles<br/>motion history]
     S --> P[per-client producer thread<br/>lossless/video policy, LZ4/zstd, link pacer]
-    P --> W[WS writer]
-    R[WS reader: ACK, ping, keyframe, stats] --> P
+    P --> W[WS writer / WebRTC hub]
+    R[WS / data-channel reader: ACK, ping, keyframe, stats, signaling] --> P
     IN["/input WS"] --> I
     A[admin API + UI<br/>separate listener]
   end
   C --> CL
   E --> P
-  W -->|binary frames| B[Browser client<br/>worker: WS + WebCodecs + WebGL2]
+  W -->|"binary frames (WS or data channel)"| B[Browser client<br/>worker: WS + WebCodecs + WebGL2]
   B -->|input| IN
 ```
 
@@ -116,13 +116,57 @@ Input goes through its own WebSocket (`/input`) so it never queues behind
 frame data; the server injects it through the selected display's
 `InputProvider` (display-relative coordinates, evdev key codes on the wire).
 
+## Transport: WebSocket and WebRTC data channel
+
+The WebSocket is always there: signaling, HELLO, cursor, pongs, and frames
+unless a better path exists. `rtc.rs` (str0m, sans-IO, one hub thread, UDP
+sockets on every local IPv4 address on the listen port, STUN for the
+public address, `webrtc.advertise` for forwards/containers) answers the
+browser's offer, so ICE can find a direct UDP path (LAN, tailnet, punched
+NAT) even when the page and WebSocket go through a relay.
+
+```mermaid
+flowchart LR
+  B[browser] -- "WS /ws: signaling, HELLO, cursor, ACK copy (+ frames on WS path)" --> S[server]
+  B -- "WS /input: input, unloaded pings" --> S
+  B -. "DC frames: reliable, unordered chunks ≤60 KiB; ACKs, pings" .-> S
+  B -. "DC input: reliable, ordered" .-> S
+```
+
+- **Path choice (client)**: the minimum of recent ping round trips on the
+  input WebSocket (no frames queue ahead of its pongs) against the data
+  channel's. Frames and input move to the data channel only when it is
+  clearly shorter (8 ms or 25 %), i.e. the WebSocket is relayed; over the
+  same path TCP wins: SCTP's congestion control (Reno, 1 s minimum RTO
+  fixed in str0m) collapses on random loss — measured 2–5× fewer fps at
+  0.5–1 % loss. The client tells the server (`{"type":"path"}` signal);
+  the server resets the link model, since another path is another link.
+- **Health**: a data channel in use that delivers nothing for 500 ms while a
+  frame is missing, or leaves a ping unanswered for 500 ms / 4 RTTs, is
+  abandoned (back to the WebSocket in ~1.3 s after UDP is cut) and banned
+  for 30 s, doubling per stall up to 5 min.
+- **Ordering**: frames are numbered (HELLO carries the first sequence); the
+  worker reassembles chunks and applies frames strictly in order. Frames
+  left on an abandoned channel never arrive: the client skips them after
+  100 ms (when a later frame arrived) and reports them in the ACK; the
+  server also presumes abandoned-channel frames lost after 8 RTTs (≥ 1 s).
+  `recovery.rs` then repairs state, not history: it re-sends the current
+  pixels of every tile a lost frame touched — following later moves, which
+  the client replayed on content missing that frame — and requests a
+  keyframe if the frame carried video.
+- Unreliable delivery with NACK-based retransmission was tried and dropped:
+  abandoned SCTP packets still count as losses for its congestion control,
+  so it gained nothing over reliable unordered delivery and added repair
+  storms.
+
 ## Wire protocol
 
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
-PONG; client → server PING, ACK (with client hold time), KEYFRAME request, STATS (JSON for the admin
-UI), MOVE, BUTTON, WHEEL, KEY.
+PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME); client →
+server PING, ACK (with client hold time and lost frames), KEYFRAME request,
+STATS (JSON for the admin UI), SIGNAL, HELLO_ACK, MOVE, BUTTON, WHEEL, KEY.
 
 ## Admin
 

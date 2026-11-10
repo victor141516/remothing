@@ -38,7 +38,7 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 COPY --from=build-server /usr/local/bin/remothing /usr/local/bin/rt-testapp /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
-EXPOSE 8080 8081
+EXPOSE 8080 8080/udp 8081
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Full Ubuntu desktop for trying it out: `docker build --target desktop -t remothing-desktop .`

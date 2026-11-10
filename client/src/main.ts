@@ -1,8 +1,12 @@
-// Main thread: input capture on its own WebSocket (sent the moment the event
-// fires), cursor, stats overlay. Frames are handled in worker.ts.
+// Main thread: input capture (sent the moment the event fires, over the
+// WebRTC input channel when frames use the data channel, else its own
+// WebSocket), the peer connection, cursor, stats overlay. Frames are handled
+// in worker.ts.
 
 import { Input } from './input';
+import { Peer } from './peer';
 import { InputProber } from './probe';
+import { C_PING, S_PONG, now } from './proto';
 import { Stats } from './stats';
 import type { FromWorker, ToWorker } from './worker';
 
@@ -24,13 +28,33 @@ const canvas = document.getElementById('screen') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLDivElement;
 
 let inputWs: WebSocket;
+/** Pings the input socket: carrying no frames, it gives the WebSocket path's
+ * unloaded round trip, compared by the worker with the data channel's. */
+function pingInput(): void {
+  if (inputWs.readyState !== WebSocket.OPEN) return;
+  const m = new Uint8Array(16);
+  m[0] = C_PING;
+  new DataView(m.buffer).setFloat64(8, now(), true);
+  inputWs.send(m);
+}
 function connectInput(): void {
   inputWs = new WebSocket(`${wsBase}input${auth}`);
+  inputWs.binaryType = 'arraybuffer';
+  inputWs.onopen = () => {
+    for (let i = 0; i < 5; i++) setTimeout(pingInput, i * 50);
+  };
+  inputWs.onmessage = (e) => {
+    const v = new DataView(e.data as ArrayBuffer);
+    if (v.getUint8(0) === S_PONG) toWorker({ type: 'wsrtt', rtt: now() - v.getFloat64(8, true) });
+  };
   inputWs.onclose = () => setTimeout(connectInput, 1000);
 }
 connectInput();
+setInterval(pingInput, 1000);
+/** Frames go over the data channel (the worker's choice): input follows. */
+let dcPath = false;
 const input = new Input(canvas, (m) => {
-  if (inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
+  if (!(dcPath && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
 });
 
 const stats = new Stats();
@@ -40,6 +64,29 @@ const prober = new InputProber((x, y) => input.moveTo(x, y), (rtt) => stats.inpu
 
 const worker = new Worker('worker.js', { type: 'module' });
 const toWorker = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+
+// `?transport=ws` keeps everything on the WebSocket, `?transport=webrtc` uses
+// the data channel whenever it is up (comparisons, troubleshooting); by
+// default the worker picks the path with the shorter round trip.
+const transport = params.get('transport');
+const webrtc = transport !== 'ws' && 'RTCPeerConnection' in window;
+const peer = new Peer({
+  signal: (json) => toWorker({ type: 'signal', json: JSON.stringify(json) }),
+  message: (buf, received) => toWorker({ type: 'dcmsg', buf, received }, [buf]),
+  open: (open) => toWorker({ type: 'dc', open }),
+});
+
+function onSignal(json: string): void {
+  const m = JSON.parse(json) as { type: string; sdp?: string; iceServers?: RTCIceServer[] };
+  if (m.type === 'config' && webrtc) {
+    peer.start(m.iceServers ?? []).catch((e) => console.warn('webrtc offer failed', e));
+  } else if (m.type === 'answer' && m.sdp) {
+    peer.answer(m.sdp).catch((e) => console.warn('webrtc answer rejected', e));
+  } else if (m.type === 'closed') {
+    // The server dropped the peer: back to the WebSocket until the next offer.
+    peer.close();
+  }
+}
 
 function layout(width: number, height: number): void {
   const dpr = window.devicePixelRatio || 1;
@@ -82,13 +129,25 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       pingRtt = m.pingRtt;
       pipeline = m.pipeline;
       break;
+    case 'signal':
+      onSignal(m.json);
+      break;
+    case 'dcsend':
+      peer.sendFrames(m.buf);
+      break;
+    case 'path':
+      dcPath = m.webrtc;
+      break;
   }
 };
 
 const offscreen = canvas.transferControlToOffscreen();
 // `noread` keeps timing stats but skips the GPU readback the barcode probe needs.
 const readBarcode = probeEnabled && !params.has('noread');
-toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}ws${auth}`, probe: readBarcode }, [offscreen]);
+toWorker(
+  { type: 'init', canvas: offscreen, url: `${wsBase}ws${auth}`, probe: readBarcode, forceDc: transport === 'webrtc' },
+  [offscreen],
+);
 statsEl.hidden = !(params.has('stats') || probeEnabled);
 if (!statsEl.hidden) setInterval(() => (statsEl.textContent = `${stats.text()}\n${pipeline}`), 500);
 // Recent stats go to the server for the admin UI.

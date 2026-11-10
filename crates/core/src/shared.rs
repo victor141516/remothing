@@ -83,6 +83,9 @@ struct ClientState {
     stale: Vec<bool>,
     /// Scratch: tiles to send losslessly in the frame being built.
     send: Vec<bool>,
+    /// The client's copy may be wrong (a frame touching it was lost): resend
+    /// losslessly with an explicit layer switch.
+    resync: Vec<bool>,
     /// Screen moves (scroll/copy) to replay on the client's lossless layer, in order.
     copies: Vec<MovedRect>,
     pending: bool,
@@ -101,6 +104,7 @@ impl ClientState {
         self.video_since = vec![0; n];
         self.stale = vec![true; n];
         self.send = vec![false; n];
+        self.resync = vec![false; n];
         self.copies.clear();
         self.pending = true;
         self.oldest_us = now;
@@ -109,11 +113,24 @@ impl ClientState {
 }
 
 pub enum Pull {
-    Frame { msg: Vec<u8>, key: bool },
-    /// The display changed: send HELLO, recreate the encoder, then pull again.
-    Reset(Geometry),
+    Frame { msg: Vec<u8>, key: bool, contents: FrameContents },
+    /// The display changed: send HELLO (its frames start at `first_seq`),
+    /// recreate the encoder, then pull again.
+    Reset { geometry: Geometry, first_seq: u32 },
     /// Nothing to send; pull again at `wake_at_us` (a video tile cools down) or when woken.
     Idle { wake_at_us: Option<u64> },
+}
+
+/// What a frame changes on the client, kept until it is acknowledged so a
+/// lost frame can be repaired (see `recovery.rs`).
+#[derive(Clone, Debug, Default)]
+pub struct FrameContents {
+    /// Tiles whose client copy or layer the frame sets: lossless rects,
+    /// layer switches, tiles updated in the video picture.
+    pub tiles: Vec<u32>,
+    /// Moves replayed on the client's lossless layer, in order.
+    pub moves: Vec<MovedRect>,
+    pub video: bool,
 }
 
 /// Calls `f(first_tile, tile_count, rect)` for each horizontal run of set flags,
@@ -206,6 +223,7 @@ impl Shared {
             video_since: Vec::new(),
             stale: Vec::new(),
             send: Vec::new(),
+            resync: Vec::new(),
             copies: Vec::new(),
             pending: false,
             oldest_us: 0,
@@ -215,6 +233,24 @@ impl Shared {
             waker: waker.clone(),
         });
         waker.unpark();
+    }
+
+    /// The client's copy of `tiles` may be wrong (a frame was lost): they are
+    /// re-sent losslessly, with an explicit switch to the lossless layer.
+    pub fn resync(&self, id: u64, tiles: &[u32]) {
+        let mut g = self.inner.lock().unwrap();
+        let epoch = g.epoch;
+        let Some(c) = g.clients.iter_mut().find(|c| c.id == id && c.epoch == epoch) else { return };
+        for &t in tiles {
+            if let Some(r) = c.resync.get_mut(t as usize) {
+                *r = true;
+            }
+        }
+        if !c.pending {
+            c.pending = true;
+            c.oldest_us = proto::now_us();
+        }
+        c.waker.unpark();
     }
 
     pub fn remove_client(&self, id: u64) {
@@ -373,7 +409,7 @@ impl Shared {
             c.gpu_input = false;
             c.reset(changes.len(), now);
             codec.cost = vec![geometry.tile * geometry.tile; changes.len()];
-            return Ok(Pull::Reset(geometry));
+            return Ok(Pull::Reset { geometry, first_seq: c.seq.wrapping_add(1) });
         }
 
         let tuning = codec.tuning;
@@ -423,6 +459,13 @@ impl Shared {
             let dirty = std::mem::take(&mut c.dirty[i]);
             let forced = std::mem::take(&mut c.force_video[i]) && has_encoder;
             c.send[i] = false;
+            if std::mem::take(&mut c.resync[i]) {
+                // Repair after a loss: exact pixels and an explicit layer, now.
+                c.video[i] = false;
+                c.send[i] = true;
+                switches.push(i as u16);
+                continue;
+            }
             let cools_at = ch[0].max(c.video_since[i]) + COOL_US;
             if c.video[i] {
                 // Back to lossless once still, or while moving if that is
@@ -496,6 +539,14 @@ impl Shared {
         let (seq, oldest_us, newest_us) = (c.seq, c.oldest_us, c.newest_us);
         codec.copies.clear();
         codec.copies.append(&mut c.copies);
+        let mut contents = FrameContents { moves: codec.copies.clone(), ..Default::default() };
+        for &(_, first, n) in &codec.rects {
+            contents.tiles.extend((first..first + n).map(|t| t as u32));
+        }
+        contents.tiles.extend(switches.iter().map(|s| (s & 0x7fff) as u32));
+        for r in &codec.encoder_rects {
+            geometry.for_each_tile(*r, |t| contents.tiles.push(t as u32));
+        }
         let (pixels, surface) = (pixels.clone(), surface.clone());
         drop(guard);
 
@@ -595,7 +646,8 @@ impl Shared {
         msg[40..44].copy_from_slice(&encode_us.to_le_bytes());
         msg[44..46].copy_from_slice(&(codec.copies.len() as u16).to_le_bytes());
         msg[46..48].copy_from_slice(&((upload_us / 10).min(u16::MAX as u64) as u16).to_le_bytes());
-        Ok(Pull::Frame { msg, key })
+        contents.video = loaded;
+        Ok(Pull::Frame { msg, key, contents })
     }
 
     /// Capture surface for creating zero-copy encoders.

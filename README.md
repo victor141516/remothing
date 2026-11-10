@@ -30,8 +30,9 @@ Optional Docker deployment (simulated display + NVENC when started with `--gpus 
 ```sh
 docker build -t remothing .                                  # slim: openbox + xterm
 docker build --target desktop -t remothing-desktop .         # full XFCE desktop + Firefox
-docker run --gpus all --shm-size=1g -p 8080:8080 -p 8081:8081 \
-  -e WIDTH=2560 -e HEIGHT=1440 -e KB_LAYOUT=es -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret remothing-desktop
+docker run --gpus all --shm-size=1g -p 8080:8080 -p 8080:8080/udp -p 8081:8081 \
+  -e WIDTH=2560 -e HEIGHT=1440 -e KB_LAYOUT=es -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret \
+  -e WEBRTC_ADVERTISE=192.168.1.10 remothing-desktop   # host addresses browsers reach the UDP port at
 ```
 
 ### Windows
@@ -64,6 +65,15 @@ below it), `tuning.max_lossless_frame_kb`,
 `auth.*`, `tls.cert`/`tls.key`, and on Linux `[platform]`:
 `x11_displays = [":0"]`, `session_command = "openbox-session"`,
 `virtual_on_start = "1920x1080"`.
+
+`[webrtc]`: `enabled` (default true), `udp_port` (0 = the listen port),
+`stun_servers` (public address discovery), `advertise` (extra candidate
+addresses, `"ip"` or `"ip:port"`, for NAT/port forwards and containers).
+When the browser reaches the server over UDP on a shorter path than the
+WebSocket's (e.g. the page goes through Tailscale Funnel or a reverse proxy),
+frames and input move to a WebRTC data channel; otherwise, or when UDP is
+blocked or stalls, everything stays on the WebSocket. `?transport=ws` or
+`?transport=webrtc` in the client URL overrides the choice.
 
 ## Latency benchmark
 

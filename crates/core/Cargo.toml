@@ -19,4 +19,7 @@ sysinfo = { version = "0.35", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 toml = "0.8"
 tower-http = { version = "0.6", features = ["set-header"] }
+# WebRTC (data channels over UDP); pure-Rust crypto keeps the Windows build static.
+str0m = { version = "0.25", default-features = false, features = ["rust-crypto"] }
+if-addrs = "0.13"
 zstd = { version = "0.13", default-features = false }

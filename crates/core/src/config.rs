@@ -19,6 +19,7 @@ pub struct Settings {
     pub input: InputSettings,
     pub auth: AuthSettings,
     pub tls: TlsSettings,
+    pub webrtc: WebRtcSettings,
     /// Platform-specific options (e.g. `[platform] session_command = "..."` on Linux).
     pub platform: toml::Table,
 }
@@ -69,6 +70,30 @@ pub struct TlsSettings {
     pub key: String,
 }
 
+/// Direct UDP transport (WebRTC data channels). The WebSocket stays as
+/// signaling and fallback, so this only ever adds a faster path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebRtcSettings {
+    pub enabled: bool,
+    /// UDP port on every local IPv4 address; 0 = the port of `server.listen`.
+    pub udp_port: u16,
+    /// STUN servers ("host:port") used to learn the public address behind a
+    /// NAT (server) and handed to browsers for theirs. Empty = direct
+    /// addresses only (LAN, tailnet, open ports).
+    pub stun_servers: Vec<String>,
+    /// Extra addresses browsers can reach this server's UDP port at, beyond
+    /// its own interfaces, "ip" or "ip:port" (e.g. the host's address and
+    /// published port when running in Docker).
+    pub advertise: Vec<String>,
+}
+
+impl Default for WebRtcSettings {
+    fn default() -> Self {
+        Self { enabled: true, udp_port: 0, stun_servers: vec!["stun.l.google.com:19302".into()], advertise: Vec::new() }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -78,6 +103,7 @@ impl Default for Settings {
             input: InputSettings::default(),
             auth: AuthSettings::default(),
             tls: TlsSettings::default(),
+            webrtc: WebRtcSettings::default(),
             platform: toml::Table::new(),
         }
     }

@@ -212,6 +212,15 @@ impl Pacer {
         self.inflight = 0;
     }
 
+    /// Frame `seq` will never be acknowledged (lost with an abandoned data channel).
+    pub fn on_lost(&mut self, seq: u32) {
+        if let Some(n) = self.sent.iter().position(|f| f.seq == seq) {
+            if let Some(f) = self.sent.remove(n) {
+                self.inflight -= f.bytes;
+            }
+        }
+    }
+
     fn sample(&mut self, f: &Sent, now: u64) {
         let rtt = now.saturating_sub(f.sent_us).max(1);
         // Raw minimum: it includes the smallest frame's transmission, but never

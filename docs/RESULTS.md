@@ -137,7 +137,52 @@ Reading the numbers:
   queued for seconds (scroll). Now small frames go out at screen rate and
   content is sized to the measured link.
 - The mobile profile's p99 is TCP loss recovery (0.5 % random loss with
-  reordering): retransmissions stall everything behind them. Only a
-  datagram transport would avoid that; Funnel and WebSocket are TCP-only.
+  reordering): retransmissions stall everything behind them. The WebRTC
+  data channel does not avoid it (see below): its SCTP recovers worse.
 - LAN is unchanged at p50; box became lossless because 30 Mbit/s of moving
   pixels is affordable on an unproven (fast) link, which is also faster.
+
+## WebRTC data channel vs WebSocket
+
+Same Linux bench container and harness (`total` = capture→draw p50 / p99,
+input = input round trip). The data channel (str0m, reliable unordered,
+60 KiB chunks) forced with `?transport=webrtc`, on the same path as the
+WebSocket:
+
+| link | scenario | WS fps | WS total | DC fps | DC total |
+|---|---|---|---|---|---|
+| LAN (Docker) | box | 253 | 4 / 25 | 283 | 3 / 8 |
+| LAN (Docker) | full | 199 | 9 / 23 | 199 | 9 / 31 |
+| 18M/40ms | box | 186 | 27 / 85 | 188 | 27 / 85 |
+| 18M/40ms | full | 173 | 32 / 41 | 170 | 33 / 74 |
+| 50M/20ms 1 % loss | box | 101 | 28 / 185 | 139¹ | 17 / 986 |
+| 50M/20ms 1 % loss | full | 88 | 43 / 100 | 53¹ | 42 / 134 |
+| Mobile 6M/50ms±10 0.5 % loss | box | 89 | 97 / 344 | 49 | 103 / 832 |
+| Mobile 6M/50ms±10 0.5 % loss | full | 52 | 81 / 180 | 47 | 81 / 781 |
+
+¹ stalled and fell back to the WebSocket during the run.
+
+Where the WebSocket is relayed (TCP egress delayed 30 ms more than UDP,
+like Funnel or a reverse proxy in front of a direct UDP path), the default
+automatic choice moves to the data channel:
+
+| scenario | path | fps | total | input RTT |
+|---|---|---|---|---|
+| box | WebSocket (`?transport=ws`) | 188 | 32 / 35 | 58 / 64 |
+| box | auto → data channel | 200 | 16 / 28 | 27 / 39 |
+| full | auto → data channel | 177 | 22 / 42 | 32 / 54 |
+
+UDP cut mid-session (100 % loss on UDP while in use): back on the
+WebSocket after ~1.3 s, 6–7 frames repaired, no artifacts. UDP blocked from
+the start: ICE fails, WebSocket as before (191 fps box).
+
+Reading the numbers:
+- Over the same path the data channel is no better without loss and worse
+  with it: SCTP's Reno-like congestion control (1.1 KB packets, 1 s minimum
+  RTO fixed by str0m) caps throughput at ≈5 Mbit/s with 1 % loss at 20 ms,
+  and tail losses stall for a second. Hence the automatic choice uses it
+  only when it is clearly shorter, and abandons it on stalls.
+- Unreliable delivery (`maxRetransmits: 0`) with per-packet chunks and
+  client NACKs was worse still (0 fps at 1 % loss): abandoned packets still
+  shrink SCTP's congestion window, and every given-up frame triggered a
+  state repair plus keyframe that loaded the link further.

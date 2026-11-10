@@ -14,6 +14,8 @@ pub mod pixels;
 pub mod pacer;
 pub mod platform;
 pub mod proto;
+pub mod recovery;
+pub mod rtc;
 pub mod shared;
 pub mod stream;
 pub mod telemetry;
