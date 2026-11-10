@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
@@ -43,8 +44,11 @@ impl App {
 
 /// Runs the server until the process exits.
 pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) -> Result<()> {
-    let tls = (!settings.tls.cert.is_empty() && !settings.tls.key.is_empty())
-        .then(|| (settings.tls.cert.clone(), settings.tls.key.clone()));
+    let config_dir = config.path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let pems = crate::tls::load(&settings.tls, &config_dir)?;
+    // An extra HTTPS listener for the client leaves the others plain.
+    let https_addr: Option<SocketAddr> =
+        (!settings.tls.listen.is_empty()).then(|| settings.tls.listen.parse()).transpose().context("tls.listen")?;
     let telemetry = Arc::new(Telemetry::default());
     let stream_addr: SocketAddr = settings.server.listen.parse().context("server.listen")?;
     let admin_addr: SocketAddr = settings.server.admin_listen.parse().context("server.admin_listen")?;
@@ -64,7 +68,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         settings: RwLock::new(settings.clone()),
         config,
         admin_sessions: Mutex::new(HashSet::new()),
-        tls_enabled: tls.is_some(),
+        tls_enabled: pems.is_some() && https_addr.is_none(),
         rtc,
     });
 
@@ -95,22 +99,35 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
     let admin_router = crate::admin::router().fallback(assets::admin_asset).with_state(app.clone());
 
     tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async move {
-        let rustls = match &tls {
+        let rustls = match pems {
             Some((cert, key)) => {
                 let _ = rustls::crypto::ring::default_provider().install_default();
                 Some(
-                    axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+                    axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
                         .await
                         .context("load TLS certificate")?,
                 )
             }
             None => None,
         };
-        let scheme = if rustls.is_some() { "https" } else { "http" };
-        eprintln!("stream client on {scheme}://{stream_addr}, admin UI on {scheme}://{admin_addr}");
+        let (plain_tls, https) = match https_addr {
+            Some(addr) => (None, rustls.map(|cfg| (addr, cfg))),
+            None => (rustls, None),
+        };
+        let scheme = if plain_tls.is_some() { "https" } else { "http" };
+        let extra = https.as_ref().map(|(addr, _)| format!(" and https://{addr}")).unwrap_or_default();
+        eprintln!("stream client on {scheme}://{stream_addr}{extra}, admin UI on {scheme}://{admin_addr}");
+        let https_router = stream_router.clone();
+        let https = async move {
+            match https {
+                Some((addr, cfg)) => serve(addr, https_router, Some(cfg)).await,
+                None => Ok(()),
+            }
+        };
         tokio::try_join!(
-            serve(stream_addr, stream_router, rustls.clone()),
-            serve(admin_addr, admin_router, rustls)
+            serve(stream_addr, stream_router, plain_tls.clone()),
+            https,
+            serve(admin_addr, admin_router, plain_tls)
         )?;
         Ok(())
     })

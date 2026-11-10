@@ -19,3 +19,4 @@ pub mod rtc;
 pub mod shared;
 pub mod stream;
 pub mod telemetry;
+pub mod tls;

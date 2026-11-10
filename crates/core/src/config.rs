@@ -65,9 +65,17 @@ pub struct AuthSettings {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TlsSettings {
-    /// PEM paths; when both are set every listener uses HTTPS/WSS.
+    /// PEM paths of a certificate (chain) and its key.
     pub cert: String,
     pub key: String,
+    /// Without cert/key: generate a self-signed certificate (kept next to
+    /// the config file, renewed yearly); browsers warn once per device.
+    pub self_signed: bool,
+    /// Empty: every listener uses HTTPS. An address: the streaming client is
+    /// served over HTTPS there as well, and the other listeners stay plain
+    /// HTTP (e.g. behind a reverse proxy or Tailscale Funnel, plus a direct
+    /// HTTPS port).
+    pub listen: String,
 }
 
 /// Direct UDP transport (WebRTC data channels). The WebSocket stays as

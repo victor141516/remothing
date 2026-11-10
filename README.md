@@ -62,9 +62,19 @@ Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
 below it), `tuning.max_lossless_frame_kb`,
 `encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `input.keyboard_layout`,
-`auth.*`, `tls.cert`/`tls.key`, and on Linux `[platform]`:
+`auth.*`, and on Linux `[platform]`:
 `x11_displays = [":0"]`, `session_command = "openbox-session"`,
 `virtual_on_start = "1920x1080"`.
+
+`[tls]`: browsers only decode video (WebCodecs) in a secure context, so a
+client reaching the server directly, not on localhost and not through an
+HTTPS proxy, needs HTTPS. `cert`/`key`: PEM paths of your certificate;
+`self_signed = true` instead generates one (next to the config file in
+`tls/`, renewed yearly, SHA-256 fingerprint in the log; browsers warn until
+it is accepted). `listen`: empty serves every listener over HTTPS; an
+address (e.g. `"0.0.0.0:8443"`) adds an HTTPS listener for the client and
+keeps `server.listen` and the admin UI plain, for a reverse proxy or
+Tailscale Funnel in front of the plain port plus direct access.
 
 `[webrtc]`: `enabled` (default true), `udp_port` (0 = the listen port),
 `stun_servers` (public address discovery), `advertise` (extra candidate
