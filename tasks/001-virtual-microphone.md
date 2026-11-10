@@ -1,6 +1,6 @@
 # Virtual microphone: the client's microphone as a microphone on the server
 
-- Status: under discussion
+- Status: in progress
 - Created: 2026-11-10
 
 ## Goal
@@ -11,24 +11,37 @@ appears there as the input of a virtual microphone, so that programs on the
 remote desktop (calls, recorders, dictation) hear it. It has to work on
 Linux and on Windows.
 
-## Open questions
+## Decisions (2026-11-10, with the user)
 
-1. **Windows: where does the virtual cable come from?** (see Windows below)
-   - a) use one that is already installed, and say what to install when
-     there is none;
-   - b) also offer to install an open-source, already signed virtual audio
-     driver from `remothing service install` (once, as administrator);
-   - c) write and sign our own driver.
-   Recommended: a) and b) together. c) is not worth it.
-2. **Several clients with the microphone on**: one talker at a time (the
-   last one to switch it on), or mix them? Recommended: one at a time.
-3. **Transport**: WebSocket like the sound going the other way, or a WebRTC
-   audio track? Recommended: WebSocket first (see Alternatives).
-4. **Server switch**: a config key to forbid the microphone altogether
-   (`input.microphone`), default on or off?
-5. The user said they have ideas of their own about how to do this and held
-   them back so as not to bias the proposal. Compare them with this before
-   agreeing on anything.
+1. **Windows cable: VB-CABLE**, installed only with the user's consent.
+   No open-source cable loads on a normal Windows today: a kernel audio
+   driver needs Microsoft's attestation signature (EV certificate and a
+   company account). VirtualDrivers/Virtual-Audio-Driver (MIT) ships no
+   speaker-to-microphone loop in its public tree and still needs test
+   signing; JannesP/AudioMirror (MIT) is an unsigned, unfinished cable;
+   unitra-ai/Unitra.Mic.Driver (MIT) has the signing in progress but no
+   signed release. VB-CABLE is closed but free (donationware), signed, and
+   its licence page allows shipping and silent install with another
+   application when its origin (www.vb-cable.com) and donationware nature
+   are shown: https://vb-audio.com/Services/licensing.htm
+2. **Install flow**: when a client switches the microphone on and the cable
+   is missing, the client asks "this needs a component on the server,
+   install it now?", warning that Windows will ask for administrator
+   permission there and that a restart may be needed. On yes the server
+   installs it; once the cable is there it is used without asking. If a
+   restart is needed the client offers to restart the server computer. An
+   installed cable is detected and used directly.
+3. **One talker**: the server decides. The first request to arrive gets the
+   microphone; every other client's button is disabled until it is free
+   again, with no error message.
+4. **Transport**: our choice. WebCodecs Opus over the WebSocket, raw PCM at
+   16 kHz where the browser cannot encode.
+5. **No server switch**: the microphone is always available; clients decide
+   whether to connect theirs.
+6. The user's own idea was this one: a virtual microphone through an
+   installed driver.
+7. The driver may be installed on the development PC for testing; the user
+   accepts the Windows prompt.
 
 ## What exists today (the other direction)
 
