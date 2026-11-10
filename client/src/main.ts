@@ -15,7 +15,8 @@ declare global {
 const params = new URLSearchParams(location.search);
 const benchSeconds = Number(params.get('bench') ?? 0);
 const probeEnabled = benchSeconds > 0 || params.has('probe');
-const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+// Relative to the page, so the client also works behind a reverse proxy under a path prefix.
+const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${new URL('.', location.href).pathname}`;
 // Stream access token, given in the page URL (`?token=`).
 const auth = `?token=${encodeURIComponent(params.get('token') ?? '')}`;
 
@@ -24,7 +25,7 @@ const statsEl = document.getElementById('stats') as HTMLDivElement;
 
 let inputWs: WebSocket;
 function connectInput(): void {
-  inputWs = new WebSocket(`${wsBase}/input${auth}`);
+  inputWs = new WebSocket(`${wsBase}input${auth}`);
   inputWs.onclose = () => setTimeout(connectInput, 1000);
 }
 connectInput();
@@ -87,7 +88,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
 const offscreen = canvas.transferControlToOffscreen();
 // `noread` keeps timing stats but skips the GPU readback the barcode probe needs.
 const readBarcode = probeEnabled && !params.has('noread');
-toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}/ws${auth}`, probe: readBarcode }, [offscreen]);
+toWorker({ type: 'init', canvas: offscreen, url: `${wsBase}ws${auth}`, probe: readBarcode }, [offscreen]);
 statsEl.hidden = !(params.has('stats') || probeEnabled);
 if (!statsEl.hidden) setInterval(() => (statsEl.textContent = `${stats.text()}\n${pipeline}`), 500);
 // Recent stats go to the server for the admin UI.

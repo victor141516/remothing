@@ -196,7 +196,7 @@ function initLogin() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     $('login-error').textContent = '';
-    const res = await fetch('/api/login', {
+    const res = await fetch('api/login', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
@@ -213,7 +213,7 @@ function initLogin() {
   });
   $('logout').addEventListener('click', () =>
     action(async () => {
-      await api('POST', '/api/logout');
+      await api('POST', 'api/logout');
       showLogin('Logged out.');
     }),
   );
@@ -247,7 +247,7 @@ function selectTab(tab: Tab) {
 /** Sequential 1 s poll: the next request starts after the previous one finished, so slow responses never pile up. */
 async function pollStatus(gen: number) {
   try {
-    const s = await api<Status>('GET', '/api/status');
+    const s = await api<Status>('GET', 'api/status');
     if (gen !== pollGen) return;
     renderStatus(s);
   } catch (e) {
@@ -357,7 +357,7 @@ function renderStatus(s: Status) {
 // ---------------------------------------------------------------- displays
 
 async function loadDisplays() {
-  const d = await api<Displays>('GET', '/api/displays');
+  const d = await api<Displays>('GET', 'api/displays');
   if (currentTab === 'displays') renderDisplays(d);
 }
 
@@ -378,7 +378,7 @@ function renderDisplays(d: Displays) {
             disabled: current,
             onclick: () =>
               action(async () => {
-                await api('POST', '/api/displays/select', { id: x.id });
+                await api('POST', 'api/displays/select', { id: x.id });
                 banner('info', `Streaming ${x.name}.`);
                 await loadDisplays();
               }),
@@ -389,7 +389,7 @@ function renderDisplays(d: Displays) {
               onclick: () =>
                 action(async () => {
                   if (!confirm(`Destroy virtual display ${x.name}?`)) return;
-                  await api('DELETE', `/api/virtual/${encodeURIComponent(x.id)}`);
+                  await api('DELETE', `api/virtual/${encodeURIComponent(x.id)}`);
                   banner('info', `Destroyed ${x.name}.`);
                   await loadDisplays();
                 }),
@@ -419,7 +419,7 @@ function renderDisplays(d: Displays) {
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       void action(async () => {
-        const info = await api<DisplayInfo>('POST', '/api/virtual', { width: +width.value, height: +height.value });
+        const info = await api<DisplayInfo>('POST', 'api/virtual', { width: +width.value, height: +height.value });
         banner('info', `Created ${info.name} (${info.id}) ${fmtRes(info)}.`);
         await loadDisplays();
       });
@@ -457,12 +457,12 @@ function streamLink(s: Settings): string {
 }
 
 async function loadSettings() {
-  const s = await api<Settings>('GET', '/api/settings');
+  const s = await api<Settings>('GET', 'api/settings');
   if (currentTab === 'settings') renderSettings(s);
 }
 
 async function saveSettings(patch: Record<string, unknown>, what: string) {
-  const r = await api<{ ok: boolean; warnings?: string[] }>('PUT', '/api/settings', patch);
+  const r = await api<{ ok: boolean; warnings?: string[] }>('PUT', 'api/settings', patch);
   if (r.warnings?.length) banner('warn', `${what} saved with warnings:\n${r.warnings.join('\n')}`);
   else banner('info', `${what} saved.`);
   await loadSettings();
@@ -581,6 +581,6 @@ for (const b of document.querySelectorAll<HTMLButtonElement>('nav button')) {
 }
 
 // An existing session cookie skips the login form.
-fetch('/api/status', { credentials: 'same-origin' })
+fetch('api/status', { credentials: 'same-origin' })
   .then((r) => (r.ok ? showApp() : showLogin()))
   .catch((e: Error) => showLogin(`Server unreachable: ${e.message}`));
