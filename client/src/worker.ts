@@ -4,8 +4,9 @@
 // Frames arrive over the WebSocket or, when the worker picks the WebRTC path
 // (shorter round trip), in chunks over the data channel's frames channel
 // (relayed by the main thread). That channel is reliable but unordered: a
-// sequencer reassembles chunks and restores order. Frames left on an
-// abandoned channel are given up: the ACK reports them and the server
+// sequencer reassembles chunks and restores order. A frame missing for long
+// there means SCTP is recovering a loss: the channel is abandoned, the
+// frames left on it are given up, the ACK reports them and the server
 // re-sends what they touched.
 //
 // Frames are applied strictly in order and atomically: a frame carrying video
@@ -16,8 +17,9 @@ import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_HELLO_ACK, C_KEYFRAME, C_PING, C_SIGNAL, C_STATS, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD,
-  FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN, S_CURSOR, S_FRAME, S_HELLO, S_PONG, S_SIGNAL, now,
+  C_ACK, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_PING, C_SIGNAL, C_STATS, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4,
+  ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN, S_CURSOR, S_FRAME, S_HELLO, S_PONG,
+  S_SIGNAL, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { Recorder, type Batch } from './stats';
@@ -28,8 +30,13 @@ export type ToWorker =
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
   | { type: 'dc'; open: boolean }
+  /** The server's link model: the data channel carries less than the
+   * WebSocket did (SCTP under packet loss), without stalling. */
+  | { type: 'dcslow' }
   /** Round trip of a ping on the input WebSocket (unloaded: no frames on it). */
-  | { type: 'wsrtt'; rtt: number };
+  | { type: 'wsrtt'; rtt: number }
+  /** The tab is shown or hidden. */
+  | { type: 'visible'; visible: boolean };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
@@ -74,15 +81,23 @@ const syncSamples: { rtt: number; offset: number }[] = [];
 let lastTs = -1;
 let lastMarker = -1;
 
-/** Frames lost with an abandoned data channel are given up after this long
- * (frames still on their way over it arrive within a round trip). */
+/** Frames left on a data channel abandoned by choice (the WebSocket got
+ * shorter) are given up after this long: those still on their way arrive
+ * within a round trip. */
 const LOSS_WAIT_MS = 100;
-/** The data channel in use delivered nothing for this long while a frame is
- * missing, or left a ping unanswered this long (or 4 round trips): SCTP is
- * recovering losses (its retransmission timeout is ~1 s and its congestion
- * control collapses on random loss) or the path died. Frames go back to the
+/** On the data channel in use, a frame still missing this long (or 4 round
+ * trips) after a later one arrived: a packet was lost and everything behind
+ * it waits for SCTP, whose retransmission timeout is ~1 s and whose
+ * congestion control collapses on random loss. Frames go back to the
  * WebSocket, whose TCP copes better. */
-const DC_STALL_MS = 500;
+const DC_GAP_MS = 150;
+/** A data-channel ping unanswered this long (or 4 round trips): the path died. */
+const DC_STALL_MS = 300;
+/** Pings on the data channel in use, so a dead path shows quickly. */
+const DC_PING_MS = 250;
+/** After moving to the data channel, frames still arriving over the
+ * WebSocket leave gaps that are not losses. */
+const DC_GRACE_MS = 500;
 /** A stalled data channel is not used again for this long, doubling per stall. */
 const DC_BAN_MS = 30_000;
 const DC_BAN_MAX_MS = 300_000;
@@ -92,6 +107,12 @@ const RTT_WINDOW = 10;
 const RTT_MIN_SAMPLES = 5;
 /** An ACK not followed by another is re-sent after this long. */
 const ACK_REPEAT_MS = 100;
+/** A frame drawn this long after its change was captured is a stutter worth
+ * a line in the server's event log; reported in batches. */
+const LATE_MS = 200;
+const LATE_REPORT_MS = 5000;
+/** Not judged after a HELLO or a hidden tab: those frames carry old changes. */
+const LATE_SKIP_MS = 1000;
 /** Next frame to apply (-1 before the first HELLO). */
 let expected = -1;
 /** Newest frame seen (a chunk or all of it). */
@@ -116,8 +137,10 @@ let gapSince = 0;
 let dcOpen = false;
 /** Frames come over the data channel (the server was asked to). */
 let useDc = false;
-/** Last message on the frames channel. */
-let lastDcReceive = 0;
+/** Gaps before this are frames of the path used before (see DC_GRACE_MS). */
+let dcGraceUntil = 0;
+/** The data channel was given up as dead (see `setPath`). */
+let dcDead = false;
 /** Send time of the oldest unanswered data-channel ping (0: none). */
 let dcPingSince = 0;
 /** Round trips of the WebSocket path (input socket) and the data channel. */
@@ -127,6 +150,13 @@ let dcBannedUntil = 0;
 let dcBan = DC_BAN_MS;
 /** `?transport=webrtc`: the data channel whenever it is up, regardless of round trips. */
 let forceDc = false;
+/** The tab is shown; the server sends nothing to a hidden one. */
+let visible = true;
+/** Late frames since the last report: count, and the worst one's times. */
+let late = { n: 0, total: 0, server: 0, net: 0, client: 0 };
+/** Frames drawn before this are not judged: the first ones of a display, or
+ * after a hidden tab, carry old changes without being late. */
+let lateFrom = 0;
 
 /** `a` precedes `b` in wrapping 32-bit sequence order. */
 const before = (a: number, b: number) => ((b - a) | 0) > 0;
@@ -141,12 +171,26 @@ function sendDc(m: Uint8Array): void {
   post({ type: 'dcsend', buf }, [buf]);
 }
 
-function sendSignal(json: string): void {
-  const body = new TextEncoder().encode(json);
+/** A tagged UTF-8 message (signaling, stats, events). */
+function sendText(tag: number, text: string): void {
+  const body = new TextEncoder().encode(text);
   const msg = new Uint8Array(1 + body.length);
-  msg[0] = C_SIGNAL;
+  msg[0] = tag;
   msg.set(body, 1);
   send(msg);
+}
+
+function sendVisible(): void {
+  send(new Uint8Array([C_VISIBLE, visible ? 1 : 0]));
+}
+
+function requestKey(): void {
+  const m = new Uint8Array(8);
+  m[0] = C_KEYFRAME;
+  // The newest frame received: the server ignores requests that its last
+  // keyframe already answers (one goes out per undecodable frame).
+  new DataView(m.buffer).setUint32(4, (expected - 1) >>> 0, true);
+  send(m);
 }
 
 /** ACKs go over the WebSocket, which always works, and over the data channel
@@ -192,24 +236,39 @@ function choosePath(): void {
   if (want !== useDc) setPath(want);
 }
 
-function setPath(dc: boolean): void {
+/** `dead`: the data channel is given up as stalled or closed. The server
+ * then repairs what is unacknowledged there at once, and frames missing
+ * when the next one arrives over the WebSocket are not waited for. */
+function setPath(dc: boolean, dead = false): void {
   useDc = dc;
-  lastDcReceive = now();
+  dcDead = dead;
   dcPingSince = 0;
-  sendSignal(JSON.stringify({ type: 'path', webrtc: dc }));
+  dcGraceUntil = now() + DC_GRACE_MS;
+  sendText(C_SIGNAL, JSON.stringify({ type: 'path', webrtc: dc, dead }));
   post({ type: 'path', webrtc: dc });
+}
+
+/** Gives the data channel up as dead and keeps away from it for a while,
+ * longer each time. */
+function abandonDc(why: string): void {
+  if (!useDc) return;
+  sendText(C_EVENT, `data channel abandoned for ${dcBan / 1000} s: ${why}`);
+  dcBannedUntil = now() + dcBan;
+  dcBan = Math.min(2 * dcBan, DC_BAN_MAX_MS);
+  setPath(false, true);
 }
 
 /** Runs every 20 ms: data-channel health, and frames lost with an abandoned one. */
 function watchGap(): void {
   const t = now();
-  const pingLimit = Math.max(DC_STALL_MS, 4 * Math.min(...dcRtts));
-  if (useDc && ((gapSince && t - lastDcReceive > DC_STALL_MS) || (dcPingSince && t - dcPingSince > pingLimit))) {
-    dcBannedUntil = t + dcBan;
-    dcBan = Math.min(2 * dcBan, DC_BAN_MAX_MS);
-    setPath(false);
+  if (useDc) {
+    const limit = 4 * (dcRtts.length ? Math.min(...dcRtts) : 0);
+    const gap = gapSince ? t - Math.max(gapSince, dcGraceUntil) : 0;
+    const silent = dcPingSince ? t - dcPingSince : 0;
+    if (gap > Math.max(DC_GAP_MS, limit)) abandonDc(`a frame missing for ${gap.toFixed(0)} ms`);
+    else if (silent > Math.max(DC_STALL_MS, limit)) abandonDc(`no answer for ${silent.toFixed(0)} ms`);
   }
-  if (!gapSince || (useDc && dcOpen) || t - gapSince < LOSS_WAIT_MS) return;
+  if (!gapSince || (useDc && dcOpen) || t - gapSince < (dcDead ? 0 : LOSS_WAIT_MS)) return;
   // Everything missing before the next frame that arrived is gone.
   while (!early.has(expected) && before(expected, newest)) {
     const a = assembling.get(expected);
@@ -227,7 +286,6 @@ function watchGap(): void {
 
 /** Data-channel message: a frame chunk or a pong. */
 function onDcMessage(buf: ArrayBuffer, received: number): void {
-  lastDcReceive = received;
   const v = new DataView(buf);
   if (v.getUint8(0) === S_PONG) {
     dcPingSince = 0;
@@ -334,6 +392,7 @@ function createDecoder(): void {
     },
     error: (e) => {
       console.warn('decoder error, requesting keyframe', e);
+      sendText(C_EVENT, `decoder error: ${e.message}`);
       resetDecoder();
     },
   });
@@ -346,7 +405,7 @@ function resetDecoder(): void {
   // Frames waiting for pictures that will never come are shown without video.
   for (const f of queue) f.hasVideo = !!f.picture;
   createDecoder();
-  send(new Uint8Array([C_KEYFRAME]));
+  requestKey();
   pump();
 }
 
@@ -381,7 +440,7 @@ function onFrame(buf: ArrayBuffer, received: number): void {
         data: new Uint8Array(buf, videoAt + 4, len),
       }));
     } else {
-      send(new Uint8Array([C_KEYFRAME]));
+      requestKey();
     }
   }
   queue.push(f);
@@ -463,7 +522,23 @@ function apply(f: Frame): void {
   }
   rec.push('net', f.received + offset - f.sent);
   rec.push('client', drawn - f.received);
-  rec.push('total', drawn + offset - f.oldest);
+  const total = drawn + offset - f.oldest;
+  rec.push('total', total);
+  // Without clock sync yet, `total` is the difference between two clocks.
+  if (total > LATE_MS && now() >= lateFrom && syncSamples.length >= 5) {
+    late.n++;
+    if (total > late.total) {
+      late = { n: late.n, total, server: f.sent - f.oldest, net: f.received + offset - f.sent, client: drawn - f.received };
+    }
+  }
+}
+
+function reportLate(): void {
+  if (!late.n) return;
+  const ms = (x: number) => x.toFixed(0);
+  const frames = late.n === 1 ? '1 frame' : `${late.n} frames`;
+  sendText(C_EVENT, `${frames} late, worst ${ms(late.total)} ms (server ${ms(late.server)}, network ${ms(late.net)}, client ${ms(late.client)})`);
+  late = { n: 0, total: 0, server: 0, net: 0, client: 0 };
 }
 
 function connect(url: string): void {
@@ -472,6 +547,7 @@ function connect(url: string): void {
   ws.onopen = () => {
     syncSamples.length = 0;
     for (let i = 0; i < 20; i++) setTimeout(ping, i * 25);
+    if (!visible) sendVisible();
   };
   ws.onmessage = (ev) => {
     const received = now();
@@ -501,6 +577,7 @@ function connect(url: string): void {
         newest = -1;
         gapSince = 0;
         lost = [];
+        lateFrom = received + LATE_SKIP_MS;
         resetDecoder();
         post({ type: 'hello', width, height });
         // The server sends this display's frames once it knows we are ready.
@@ -532,6 +609,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       }, 1000);
       setInterval(watchGap, 20);
       setInterval(() => {
+        if (useDc) pingDc();
+      }, DC_PING_MS);
+      setInterval(reportLate, LATE_REPORT_MS);
+      setInterval(() => {
         const rtts = dcOpen ? `  rtt ws ${Math.min(...wsRtts).toFixed(0)} dc ${Math.min(...dcRtts).toFixed(0)} ms` : '';
         const path = useDc ? 'webrtc' : dcOpen ? 'websocket (webrtc standby)' : 'websocket';
         const pipeline = `${path}${rtts}  lost ${lostTotal}  queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
@@ -539,16 +620,20 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
       }, 250);
       break;
-    case 'report': {
-      const body = new TextEncoder().encode(m.json);
-      const msg = new Uint8Array(1 + body.length);
-      msg[0] = C_STATS;
-      msg.set(body, 1);
-      send(msg);
+    case 'report':
+      sendText(C_STATS, m.json);
       break;
-    }
     case 'signal':
-      sendSignal(m.json);
+      sendText(C_SIGNAL, m.json);
+      break;
+    case 'dcslow':
+      abandonDc('slower than the websocket was');
+      break;
+    case 'visible':
+      visible = m.visible;
+      // What changed meanwhile arrives as one frame: old, not late.
+      lateFrom = now() + LATE_SKIP_MS;
+      sendVisible();
       break;
     case 'wsrtt':
       wsRtts.push(m.rtt);
@@ -566,7 +651,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         for (let i = 1; i <= 5; i++) setTimeout(pingDc, i * 50);
         setTimeout(choosePath, 400);
       } else if (useDc) {
-        setPath(false);
+        setPath(false, true);
       }
       break;
   }

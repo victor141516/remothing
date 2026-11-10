@@ -29,6 +29,7 @@ interface ClientStatus {
   video_cap_mbps: number | null;
   transport: string;
   lost_frames: number;
+  paused: boolean;
   client_report: Record<string, Pair> | null;
 }
 
@@ -44,6 +45,8 @@ interface Status {
   cpu_percent: number;
   clients: ClientStatus[];
   errors: { at_ms: number; context: string; message: string }[];
+  /** What happened to each client's stream (path switches, cuts, losses, stutters). */
+  events: { at_ms: number; client: number; text: string }[];
 }
 
 interface Displays {
@@ -323,11 +326,15 @@ function renderStatus(s: Status) {
     {},
     h('h2', {}, 'Clients'),
     table(
-      ['Address', 'Connected', 'Transport', 'Encoder', 'FPS', 'Mbit/s', 'Link Mbit/s', 'RTT ms', 'Video cap Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
+      ['#', 'Address', 'Connected', 'Transport', 'Encoder', 'FPS', 'Mbit/s', 'Link Mbit/s', 'RTT ms', 'Video cap Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
       s.clients.map((c) => [
+        tdNum(String(c.id)),
         td(h('span', { class: 'mono' }, c.addr)),
         td(fmtAge(c.connected_ms)),
-        td(c.transport === 'webrtc' ? `WebRTC (UDP), ${c.lost_frames} lost` : 'WebSocket'),
+        td(
+          c.transport === 'webrtc' ? `WebRTC (UDP), ${c.lost_frames} lost` : 'WebSocket',
+          c.paused && h('div', { class: 'dim' }, 'paused (tab hidden)'),
+        ),
         td(
           c.encoder ?? h('span', { class: 'dim' }, 'lossless only'),
           c.encoder_fallback && h('div', { class: 'dim' }, `fallback: ${c.encoder_fallback}`),
@@ -361,7 +368,21 @@ function renderStatus(s: Status) {
     ),
   );
 
-  $('tab-status').replaceChildren(overview, gpus, clients, errors);
+  const events = h(
+    'section',
+    {},
+    h('h2', {}, 'Recent events'),
+    table(
+      ['Time', 'Client', 'Event'],
+      s.events
+        .slice(-60)
+        .reverse()
+        .map((e) => [td(new Date(e.at_ms).toLocaleTimeString()), tdNum(String(e.client)), td(e.text)]),
+      'No events.',
+    ),
+  );
+
+  $('tab-status').replaceChildren(overview, gpus, clients, events, errors);
 }
 
 // ---------------------------------------------------------------- displays

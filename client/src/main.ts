@@ -85,13 +85,19 @@ function onSignal(json: string): void {
   } else if (m.type === 'closed') {
     // The server dropped the peer: back to the WebSocket until the next offer.
     peer.close();
+  } else if (m.type === 'slow') {
+    toWorker({ type: 'dcslow' });
   }
 }
 
+// `?scale=1` shows remote pixels 1:1 (cropped when larger than the window);
+// by default a larger remote screen is scaled down to fit.
+const nativeScale = params.get('scale') === '1';
 function layout(width: number, height: number): void {
   const dpr = window.devicePixelRatio || 1;
-  canvas.style.width = `${width / dpr}px`;
-  canvas.style.height = `${height / dpr}px`;
+  const fit = nativeScale ? 1 : Math.min(1, (window.innerWidth * dpr) / width, (window.innerHeight * dpr) / height);
+  canvas.style.width = `${(width * fit) / dpr}px`;
+  canvas.style.height = `${(height * fit) / dpr}px`;
 }
 
 function setCursor(buf: ArrayBuffer): void {
@@ -152,6 +158,13 @@ statsEl.hidden = !(params.has('stats') || probeEnabled);
 if (!statsEl.hidden) setInterval(() => (statsEl.textContent = `${stats.text()}\n${pipeline}`), 500);
 // Recent stats go to the server for the admin UI.
 setInterval(() => toWorker({ type: 'report', json: JSON.stringify(stats.brief()) }), 1000);
+// A hidden tab asks for no frames: several open tabs would otherwise each
+// hold an encoder and a share of the link. Measurements must not depend on
+// which window has the focus.
+if (benchSeconds === 0) {
+  document.addEventListener('visibilitychange', () => toWorker({ type: 'visible', visible: !document.hidden }));
+  if (document.hidden) toWorker({ type: 'visible', visible: false });
+}
 
 if (benchSeconds > 0) {
   window.__bench = { done: false };

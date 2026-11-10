@@ -19,6 +19,10 @@ export const C_STATS = 4;
 export const C_SIGNAL = 5;
 /** The last HELLO was applied. */
 export const C_HELLO_ACK = 6;
+/** visible u8: the tab is shown; a hidden tab gets no frames. */
+export const C_VISIBLE = 7;
+/** UTF-8 text for the server's event log. */
+export const C_EVENT = 8;
 export const C_MOVE = 10;
 export const C_BUTTON = 11;
 export const C_WHEEL = 12;

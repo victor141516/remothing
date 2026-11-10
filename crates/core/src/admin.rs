@@ -109,6 +109,7 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
         "cpu_percent": cpu,
         "clients": app.telemetry.clients(),
         "errors": app.telemetry.errors(),
+        "events": app.telemetry.events(),
     }))
     .into_response())
 }

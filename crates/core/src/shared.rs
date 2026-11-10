@@ -125,11 +125,14 @@ pub enum Pull {
 /// lost frame can be repaired (see `recovery.rs`).
 #[derive(Clone, Debug, Default)]
 pub struct FrameContents {
-    /// Tiles whose client copy or layer the frame sets: lossless rects,
-    /// layer switches, tiles updated in the video picture.
+    /// Tiles whose lossless pixels the frame sets.
     pub tiles: Vec<u32>,
+    /// Tiles whose layer (lossless / video) the frame switches.
+    pub switches: Vec<u32>,
     /// Moves replayed on the client's lossless layer, in order.
     pub moves: Vec<MovedRect>,
+    /// The frame carries a video picture (what it shows is restored by the
+    /// next keyframe, not tile by tile).
     pub video: bool,
 }
 
@@ -235,15 +238,23 @@ impl Shared {
         waker.unpark();
     }
 
-    /// The client's copy of `tiles` may be wrong (a frame was lost): they are
-    /// re-sent losslessly, with an explicit switch to the lossless layer.
-    pub fn resync(&self, id: u64, tiles: &[u32]) {
+    /// A frame was lost: the client's lossless copy of `tiles` may be wrong
+    /// and it may show `layers` from the wrong layer. They are re-sent
+    /// losslessly with an explicit switch to the lossless layer. Tiles shown
+    /// from video on both sides need nothing: the lossless copy under a video
+    /// tile is never relied on (leaving video always re-sends its pixels).
+    pub fn resync(&self, id: u64, tiles: &[u32], layers: &[u32]) {
         let mut g = self.inner.lock().unwrap();
         let epoch = g.epoch;
         let Some(c) = g.clients.iter_mut().find(|c| c.id == id && c.epoch == epoch) else { return };
-        for &t in tiles {
+        for &t in layers {
             if let Some(r) = c.resync.get_mut(t as usize) {
                 *r = true;
+            }
+        }
+        for &t in tiles {
+            if c.video.get(t as usize) == Some(&false) {
+                c.resync[t as usize] = true;
             }
         }
         if !c.pending {
@@ -543,10 +554,7 @@ impl Shared {
         for &(_, first, n) in &codec.rects {
             contents.tiles.extend((first..first + n).map(|t| t as u32));
         }
-        contents.tiles.extend(switches.iter().map(|s| (s & 0x7fff) as u32));
-        for r in &codec.encoder_rects {
-            geometry.for_each_tile(*r, |t| contents.tiles.push(t as u32));
-        }
+        contents.switches.extend(switches.iter().map(|s| (s & 0x7fff) as u32));
         let (pixels, surface) = (pixels.clone(), surface.clone());
         drop(guard);
 

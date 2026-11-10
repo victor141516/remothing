@@ -3,11 +3,13 @@
 //! Frames sent over the data channel can be lost: the channel (or the path
 //! under it) may die with frames in flight, and the client skips them. The
 //! lossless layer is state, not history, so repairing it means re-sending the
-//! current pixels of every tile the lost frame touched. Moves
-//! make it subtler: the client replays later moves on a copy that misses the
-//! lost frame, so wrong content spreads from move sources to destinations.
-//! Video cannot be repaired that way: the decoder lost a reference, so the
-//! next video frame must be a keyframe.
+//! current pixels of every tile the lost frame touched. Moves make it
+//! subtler: the client replays later moves on a copy that misses the lost
+//! frame, so wrong content spreads from move sources to destinations. A lost
+//! layer switch leaves the client showing a tile from the wrong layer. Video
+//! is repaired as a whole: the decoder lost a reference, so the next video
+//! frame must be a keyframe, which also restores everything the lost
+//! picture showed.
 
 use std::collections::VecDeque;
 
@@ -25,8 +27,10 @@ struct Sent {
 
 #[derive(Debug, PartialEq)]
 pub struct Repair {
-    /// Tiles whose client copy may be wrong.
+    /// Tiles whose lossless copy on the client may be wrong.
     pub tiles: Vec<u32>,
+    /// Tiles the client may show from the wrong layer.
+    pub layers: Vec<u32>,
     /// The client's decoder lost a reference picture.
     pub keyframe: bool,
 }
@@ -64,7 +68,7 @@ impl SentLog {
         let at = self.frames.iter().position(|f| f.seq == seq)?;
         let lost = self.frames.remove(at)?;
         let mut tainted = vec![false; geometry.tiles()];
-        for &t in &lost.contents.tiles {
+        for &t in lost.contents.tiles.iter().chain(&lost.contents.switches) {
             if let Some(x) = tainted.get_mut(t as usize) {
                 *x = true;
             }
@@ -95,7 +99,7 @@ impl SentLog {
             }
         }
         let tiles = tainted.iter().enumerate().filter(|(_, &t)| t).map(|(i, _)| i as u32).collect();
-        Some(Repair { tiles, keyframe: lost.contents.video })
+        Some(Repair { tiles, layers: lost.contents.switches, keyframe: lost.contents.video })
     }
 
     /// Data-channel frames sent before `before_us` and still unacknowledged.
@@ -133,7 +137,7 @@ mod tests {
     const G: Geometry = Geometry { width: 256, height: 256, tile: 64 };
 
     fn frame(tiles: &[u32], moves: &[MovedRect], video: bool) -> FrameContents {
-        FrameContents { tiles: tiles.to_vec(), moves: moves.to_vec(), video }
+        FrameContents { tiles: tiles.to_vec(), moves: moves.to_vec(), video, ..Default::default() }
     }
 
     /// Scroll up by one tile row over the whole screen.
@@ -153,6 +157,16 @@ mod tests {
         assert!(!repair.keyframe);
         // Reported again (redundant ACKs): nothing left to repair.
         assert_eq!(log.lost(1, &G), None);
+    }
+
+    #[test]
+    fn lost_layer_switch_is_reported_with_its_tile() {
+        // The frame switched tile 6 to video and carried the picture: the
+        // client still shows its lossless copy there.
+        let mut log = SentLog::default();
+        log.push(1, 0, true, FrameContents { switches: vec![6], video: true, ..Default::default() });
+        let repair = log.lost(1, &G).unwrap();
+        assert_eq!((repair.tiles, repair.layers, repair.keyframe), (vec![6], vec![6], true));
     }
 
     #[test]

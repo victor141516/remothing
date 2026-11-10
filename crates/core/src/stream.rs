@@ -8,6 +8,7 @@
 //! travel over WebRTC data channels (`rtc.rs`, UDP, a direct path when one
 //! exists); the WebSocket keeps control messages and is the fallback.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,7 +28,6 @@ use crate::app::App;
 use crate::config::constant_time_eq;
 use crate::encode::EncoderRequest;
 use crate::pacer::Pacer;
-use crate::pixels::Geometry;
 use crate::platform::Button;
 use crate::proto;
 use crate::recovery::SentLog;
@@ -42,6 +42,11 @@ const PATH_RTC: u8 = 1;
 /// cannot report a last frame that never reached it.
 const LOSS_TIMEOUT_RTTS: u64 = 8;
 const LOSS_TIMEOUT_MIN_US: u64 = 1_000_000;
+/// The data channel is given up when its estimate falls below this share of
+/// what the WebSocket path carried before it: SCTP congestion control
+/// collapses on random loss that TCP shrugs off, without ever stalling long
+/// enough for the client to notice.
+const RTC_SLOWER: f64 = 0.5;
 
 /// Video cap changes cost an IDR with NVENC, itself a burst that can cut the
 /// estimate again: only for clear shifts, at most this often, unless the link
@@ -110,6 +115,10 @@ struct ClientLink {
     /// The frames channel is open (the client chooses whether to use it).
     rtc_open: AtomicBool,
     key_request: AtomicBool,
+    /// Sequence of the last keyframe sent.
+    last_key: Mutex<Option<u32>>,
+    /// The client's tab is hidden: nothing is sent until it shows again.
+    paused: AtomicBool,
     /// The client applied the last HELLO: frames of that display may go out.
     hello_acked: AtomicBool,
     /// PATH_WS or PATH_RTC.
@@ -125,6 +134,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         sent: Mutex::new(SentLog::default()),
         rtc_open: AtomicBool::new(false),
         key_request: AtomicBool::new(false),
+        last_key: Mutex::new(None),
+        paused: AtomicBool::new(false),
         // Open: the first pull is what produces the first HELLO.
         hello_acked: AtomicBool::new(true),
         path: AtomicU8::new(PATH_WS),
@@ -141,6 +152,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     };
     let waker = producer.thread().clone();
     app.telemetry.client_connected(link.id, addr);
+    app.telemetry.event(link.id, &format!("connected from {addr}"));
     app.shared.add_client(link.id, waker.clone());
     if let Some(hub) = &app.rtc {
         // The browser offers a peer connection with these STUN servers.
@@ -165,10 +177,27 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         on_ack(&b, &app, &link);
                         waker.unpark();
                     }
-                    (Some(proto::C_KEYFRAME), _) => {
-                        link.key_request.store(true, Ordering::Release);
-                        waker.unpark();
+                    (Some(proto::C_KEYFRAME), 8..) => {
+                        // Sent for every video frame the client cannot decode:
+                        // all but the first are answered by the keyframe that
+                        // is already on its way, and each one more would be
+                        // another burst.
+                        let seen = u32::from_le_bytes(b[4..8].try_into().unwrap());
+                        let answered = link.last_key.lock().unwrap().is_some_and(|k| (k.wrapping_sub(seen) as i32) > 0);
+                        if !answered && !link.key_request.swap(true, Ordering::AcqRel) {
+                            app.telemetry.event(link.id, "keyframe requested by the client");
+                            waker.unpark();
+                        }
                     }
+                    (Some(proto::C_VISIBLE), 2..) => {
+                        let paused = b[1] == 0;
+                        if link.paused.swap(paused, Ordering::AcqRel) != paused {
+                            app.telemetry.client_paused(link.id, paused);
+                            app.telemetry.event(link.id, if paused { "paused (tab hidden)" } else { "resumed (tab visible)" });
+                            waker.unpark();
+                        }
+                    }
+                    (Some(proto::C_EVENT), _) => app.telemetry.event(link.id, &String::from_utf8_lossy(&b[1..])),
                     (Some(proto::C_STATS), _) => {
                         if let Ok(v) = serde_json::from_slice(&b[1..]) {
                             app.telemetry.client_report(link.id, v);
@@ -213,12 +242,16 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         }
                     }
                     PeerEvent::Closed => {
-                        // Frames in flight there are reported lost by the client
-                        // (or expire); new ones take the WebSocket. The browser
-                        // may not have noticed yet: it must stop using the channels.
+                        // New frames take the WebSocket; those in flight
+                        // there are gone. The browser may not have noticed
+                        // yet: it must stop using the channels.
                         link.rtc_open.store(false, Ordering::Release);
-                        link.path.store(PATH_WS, Ordering::Release);
+                        if link.path.swap(PATH_WS, Ordering::AcqRel) != PATH_WS {
+                            app.telemetry.event(link.id, "path: websocket (data channel closed)");
+                        }
                         app.telemetry.client_transport(link.id, "websocket");
+                        let unacked = link.sent.lock().unwrap().older_than(u64::MAX);
+                        repair(&app, &link, &unacked);
                         let _ = out_tx.send(proto::signal(&json!({ "type": "closed" })));
                         waker.unpark();
                     }
@@ -249,6 +282,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     }
     app.shared.remove_client(link.id);
     app.telemetry.client_disconnected(link.id);
+    app.telemetry.event(link.id, "disconnected");
 }
 
 /// WebRTC signaling from the browser: its offer (answered here) and its ICE candidates.
@@ -276,11 +310,21 @@ async fn on_signal(
                 hub.candidate(link.id, c.to_string());
             }
         }
-        // The client measured both paths and picked one for frames.
+        // The client measured both paths and picked one for frames; `dead`
+        // when it gave up on the data channel (stalled, closed): what is
+        // still unacknowledged there is repaired now instead of waiting for
+        // the client to report it.
         Some("path") => {
             let rtc = v["webrtc"].as_bool() == Some(true) && link.rtc_open.load(Ordering::Acquire);
-            link.path.store(if rtc { PATH_RTC } else { PATH_WS }, Ordering::Release);
+            let path = if rtc { PATH_RTC } else { PATH_WS };
+            if link.path.swap(path, Ordering::AcqRel) != path {
+                app.telemetry.event(link.id, if rtc { "path: webrtc" } else { "path: websocket" });
+            }
             app.telemetry.client_transport(link.id, if rtc { "webrtc" } else { "websocket" });
+            if !rtc && v["dead"].as_bool() == Some(true) {
+                let unacked = link.sent.lock().unwrap().older_than(u64::MAX);
+                repair(app, link, &unacked);
+            }
         }
         _ => {}
     }
@@ -290,23 +334,49 @@ async fn on_signal(
 fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
     let seq = u32::from_le_bytes(b[4..8].try_into().unwrap());
     let hold_us = u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64;
-    let geometry = app.shared.geometry();
-    for lost in b[12..].chunks_exact(4).take(b[1] as usize) {
-        repair(app, link, u32::from_le_bytes(lost.try_into().unwrap()), &geometry);
-    }
+    let lost: Vec<u32> =
+        b[12..].chunks_exact(4).take(b[1] as usize).map(|s| u32::from_le_bytes(s.try_into().unwrap())).collect();
+    repair(app, link, &lost);
     link.sent.lock().unwrap().ack(seq);
-    link.pacer.lock().unwrap().on_ack(seq, proto::now_us(), hold_us);
+    let cut = {
+        let mut p = link.pacer.lock().unwrap();
+        p.on_ack(seq, proto::now_us(), hold_us);
+        p.take_cut()
+    };
+    if let Some((rate, queue_us)) = cut {
+        let text = format!("link estimate cut to {:.1} Mbit/s (queue {} ms)", rate * 8.0 / 1e6, queue_us / 1000);
+        app.telemetry.event(link.id, &text);
+    }
 }
 
-/// Frame `seq` never reached the client: re-send what it touched.
-fn repair(app: &App, link: &ClientLink, seq: u32, geometry: &Geometry) {
-    let Some(r) = link.sent.lock().unwrap().lost(seq, geometry) else { return };
-    link.pacer.lock().unwrap().on_lost(seq);
-    app.shared.resync(link.id, &r.tiles);
-    if r.keyframe {
+/// Frames `seqs` never reached the client: re-send what they touched.
+/// Frames already repaired (reported twice) are skipped.
+fn repair(app: &App, link: &ClientLink, seqs: &[u32]) {
+    if seqs.is_empty() {
+        return;
+    }
+    let geometry = app.shared.geometry();
+    let (mut frames, mut tiles, mut layers, mut keyframe) = (0, BTreeSet::new(), BTreeSet::new(), false);
+    for &seq in seqs {
+        let Some(r) = link.sent.lock().unwrap().lost(seq, &geometry) else { continue };
+        link.pacer.lock().unwrap().on_lost(seq);
+        app.telemetry.client_lost(link.id);
+        frames += 1;
+        tiles.extend(r.tiles);
+        layers.extend(r.layers);
+        keyframe |= r.keyframe;
+    }
+    if frames == 0 {
+        return;
+    }
+    let (tiles, layers): (Vec<u32>, Vec<u32>) = (tiles.into_iter().collect(), layers.into_iter().collect());
+    app.shared.resync(link.id, &tiles, &layers);
+    if keyframe {
         link.key_request.store(true, Ordering::Release);
     }
-    app.telemetry.client_lost(link.id);
+    let key = if keyframe { ", keyframe" } else { "" };
+    let lost = if frames == 1 { "1 frame lost".to_string() } else { format!("{frames} frames lost") };
+    app.telemetry.event(link.id, &format!("{lost}: {} tiles to repair{key}", tiles.len()));
 }
 
 /// How long a data-channel frame may stay unacknowledged before it counts as lost.
@@ -337,12 +407,19 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let mut need_key = true;
     let mut video_cap = VideoCap::default();
     let mut path = PATH_WS;
+    // Estimate on the WebSocket path when frames moved to the data channel
+    // (0: not there, or already found slower).
+    let mut ws_rate = 0.0;
     while !link.stop.load(Ordering::Acquire) {
         let current = link.path.load(Ordering::Acquire);
         if current != path {
-            // Another path is another link: measured afresh.
+            // Another path is another link, measured afresh from what the
+            // last one showed. Falling back to the WebSocket keeps content
+            // within that; the data channel is chosen for being shorter.
             path = current;
-            *link.pacer.lock().unwrap() = Pacer::default();
+            let mut p = link.pacer.lock().unwrap();
+            ws_rate = if path == PATH_RTC { p.rate() } else { 0.0 };
+            *p = p.for_new_path(path == PATH_WS);
         }
         // Frames left on an abandoned data channel whose ACK never came (the
         // channel died with them, the last ones revealed by no later frame).
@@ -350,12 +427,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         let abandoned = path == PATH_WS;
         if abandoned {
             let expired = link.sent.lock().unwrap().older_than(proto::now_us().saturating_sub(loss_timeout(link)));
-            if !expired.is_empty() {
-                let geometry = shared.geometry();
-                for seq in expired {
-                    repair(app, link, seq, &geometry);
-                }
-            }
+            repair(app, link, &expired);
         }
         let (can_send, model, rtt_us) = {
             let mut p = link.pacer.lock().unwrap();
@@ -366,6 +438,18 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
             }
             (can_send, Link { rate: p.rate(), proven: p.proven() }, p.base_rtt_us())
         };
+        if model.proven && model.rate < ws_rate * RTC_SLOWER {
+            let text = format!(
+                "data channel carries {:.1} Mbit/s, the websocket carried {:.1}: asking the client to go back",
+                model.rate * 8.0 / 1e6,
+                ws_rate * 8.0 / 1e6
+            );
+            app.telemetry.event(link.id, &text);
+            ws_rate = 0.0;
+            if out.send(proto::signal(&json!({ "type": "slow" }))).is_err() {
+                return;
+            }
+        }
         {
             let s = app.settings.read().unwrap();
             codec.tuning = s.tuning;
@@ -386,13 +470,19 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
             }
         }
         if let Some(e) = codec.encoder.as_mut() {
+            let before = video_cap.bps;
             if let Some(bps) = video_cap.update(budget, proto::now_us()) {
+                // A keyframe with NVENC (FFmpeg resets the encoder).
                 e.set_max_bitrate(bps);
+                let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
+                app.telemetry.event(link.id, &text);
             }
         }
         let mut wake_at_us = None;
-        // Nothing of a new display before the client applied its HELLO.
-        if can_send && link.hello_acked.load(Ordering::Acquire) {
+        // Nothing of a new display before the client applied its HELLO, and
+        // nothing at all for a hidden tab: changes keep accumulating and go
+        // out as one frame when it shows again.
+        if can_send && link.hello_acked.load(Ordering::Acquire) && !link.paused.load(Ordering::Acquire) {
             need_key |= link.key_request.swap(false, Ordering::AcqRel);
             let pulled = shared.pull(link.id, &mut codec, need_key, model);
             if codec.paced() {
@@ -402,6 +492,12 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 Ok(Pull::Frame { msg, key, contents }) => {
                     need_key &= !key;
                     let seq = u32::from_le_bytes(msg[4..8].try_into().unwrap());
+                    if key {
+                        // Requests made before this one are answered by it.
+                        *link.last_key.lock().unwrap() = Some(seq);
+                        link.key_request.store(false, Ordering::Release);
+                        app.telemetry.event(link.id, &format!("keyframe sent ({} KB)", msg.len() / 1024));
+                    }
                     let now = proto::now_us();
                     let over_rtc = path == PATH_RTC;
                     link.pacer.lock().unwrap().on_send(seq, msg.len() as u64, now);

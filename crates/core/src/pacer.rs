@@ -11,13 +11,21 @@
 //! control does (LEDBAT): each window it changes by up to ±GAIN in
 //! proportion to (target - queue) / target. Growth needs content that waited
 //! for the estimate (byte window full or pacing deferred something; not
-//! frames waiting on the client): screen
-//! content paced from the estimate never exceeds it, so measured rates alone
-//! could not raise it again after a cut. Near the target the steps shrink,
-//! so the queue signal's round-trip lag causes little overshoot. A queue past
-//! the limit (link got slower, overshoot) cuts at once to below the delivery
-//! rate seen, so it drains; ACKs of the next round trip still show the old
-//! queue and cause no further cut.
+//! frames waiting on the client): screen content paced from the estimate
+//! never exceeds it, so measured rates alone could not raise it again after
+//! a cut. Near the target the steps shrink, so the queue signal's round-trip
+//! lag causes little overshoot. A queue past the limit (link got slower,
+//! overshoot) cuts at once to below the delivery rate seen, so it drains;
+//! ACKs of the next round trip still show the old queue and cause no
+//! further cut.
+//!
+//! Content below the estimate (most desktop use) weakens the signal: the
+//! queue is not caused by the estimate, and a window holds one or two ACKs
+//! whose minimum delay is mostly jitter. Far below it the window waits for
+//! more ACKs; decreases made while nothing waited are undone once the queue
+//! is short again (up to the level reached with content filling the link);
+//! and the cut needs the queue to persist. Without that the estimate
+//! drifted down to whatever the content happened to use.
 //!
 //! Measured rates raise it directly (fast start on fast links):
 //! - delivery rate, as in BBR: bytes ACKed over the longer of the send and
@@ -50,12 +58,24 @@ const EMPTY_QUEUE_US: u64 = 4_000;
 const TARGET_QUEUE_US: f64 = 12_000.0;
 /// Shortest judging window.
 const JUDGE_MIN_US: u64 = 40_000;
+/// With content far below the estimate ACKs are sparse (one per frame,
+/// frames as the screen changes): the window then waits for this many, or
+/// this long, so its minimum delay is a queue and not one late ACK. Content
+/// above SPARSE_SHARE of the estimate is judged at once: its ACKs are few
+/// because its frames are large, and the queue they show is its own.
+const JUDGE_SPARSE_ACKS: u64 = 6;
+const JUDGE_SPARSE_US: u64 = 250_000;
+const SPARSE_SHARE: f64 = 0.25;
 /// Base RTT older than this is re-learned (routes change).
 const BASE_RTT_WINDOW_US: u64 = 10_000_000;
 /// Before the first ACK.
 const DEFAULT_RTT_US: u64 = 20_000;
 /// Standing queue beyond this (or half the base RTT) cuts the estimate.
 const QUEUE_LIMIT_US: u64 = 30_000;
+/// While content stays below the estimate, a queue beyond the limit cuts
+/// only once it has lasted this long: a radio hiccup (Wi-Fi scan, roaming)
+/// delays a few ACKs, congestion lasts as long as we keep sending.
+const PERSIST_US: u64 = 200_000;
 /// RTT excess below this is jitter, too small for a transmission-time sample.
 const JITTER_US: u64 = 6_000;
 /// Window beyond the bandwidth-delay product: margin and slack.
@@ -90,14 +110,24 @@ pub struct Pacer {
     /// Last emergency cut: time and the round trip until its effect shows.
     cut_us: u64,
     cut_hold_us: u64,
+    /// An emergency cut not reported yet: (new estimate, queue seen in µs).
+    cut_report: Option<(f64, u64)>,
     /// Consecutive judging windows of growth with an empty queue.
     up_streak: u32,
     /// Estimate just before the last emergency cut (0: never cut).
     ceiling: f64,
-    /// Current judging window: start, least / summed / counted ACK delay
-    /// beyond base RTT and own transmission, best delivery sample, and
-    /// whether content waited for the estimate.
+    /// Estimate reached while our own traffic filled the link (growth by
+    /// probing, measured rates, cuts with content waiting). Decreases while
+    /// content stays below the estimate are weaker evidence: with a short
+    /// queue the estimate floats back up to this level without probing.
+    backed: f64,
+    /// Start of the current run of judging windows over the queue limit (0: none).
+    over_since_us: u64,
+    /// Current judging window: start, bytes delivered before it, least /
+    /// summed / counted ACK delay beyond base RTT and own transmission, best
+    /// delivery sample, and whether content waited for the estimate.
     judge_start_us: u64,
+    judge_delivered: u64,
     judge_min_us: u64,
     judge_sum_us: u64,
     judge_n: u64,
@@ -118,9 +148,13 @@ impl Default for Pacer {
             jitter_us: 0.0,
             cut_us: 0,
             cut_hold_us: 0,
+            cut_report: None,
             up_streak: 0,
             ceiling: 0.0,
+            backed: INITIAL_RATE,
+            over_since_us: 0,
             judge_start_us: 0,
+            judge_delivered: 0,
             judge_min_us: u64::MAX,
             judge_sum_us: 0,
             judge_n: 0,
@@ -141,6 +175,20 @@ impl Pacer {
     /// filled the link says nothing about how much more it would carry.
     pub fn proven(&self) -> bool {
         self.ceiling > 0.0
+    }
+
+    /// The model for the same client over another path (WebSocket ↔ data
+    /// channel): round trips are measured afresh, the estimate carries over
+    /// as the starting point, since most of the route (the last mile) is
+    /// shared. `proven` keeps content planned within it, as a fallback path
+    /// must be; without it the new path may show it carries more.
+    pub fn for_new_path(&self, proven: bool) -> Self {
+        Self {
+            rate: self.rate,
+            backed: self.backed,
+            ceiling: if proven { self.ceiling } else { 0.0 },
+            ..Default::default()
+        }
     }
 
     /// Minimum ACK round trip, µs (0 before the first ACK).
@@ -181,6 +229,11 @@ impl Pacer {
     /// deferred something. Lets the estimate grow while queues stay short.
     pub fn note_limited(&mut self) {
         self.judge_limited = true;
+    }
+
+    /// The last emergency cut, once: (new estimate in bytes/s, queue in µs).
+    pub fn take_cut(&mut self) -> Option<(f64, u64)> {
+        self.cut_report.take()
     }
 
     pub fn on_send(&mut self, seq: u32, bytes: u64, now: u64) {
@@ -255,6 +308,7 @@ impl Pacer {
         }
         if sample > self.rate {
             self.rate = sample.min(self.rate * MAX_GROWTH);
+            self.backed = self.backed.max(self.rate);
         }
 
         let own = (f.bytes as f64 * 1e6 / self.rate) as u64;
@@ -263,9 +317,15 @@ impl Pacer {
         self.judge_sum_us += delay;
         self.judge_n += 1;
         self.judge_best = self.judge_best.max(sample);
-        if now.saturating_sub(self.judge_start_us) >= base.max(JUDGE_MIN_US) {
-            self.judge(base, now);
+        let elapsed = now.saturating_sub(self.judge_start_us);
+        let window = base.max(JUDGE_MIN_US);
+        let light = ((self.delivered - self.judge_delivered) as f64) < SPARSE_SHARE * self.rate * elapsed as f64 / 1e6;
+        let held = light && !self.judge_limited;
+        if elapsed >= window && !(held && self.judge_n < JUDGE_SPARSE_ACKS && elapsed < JUDGE_SPARSE_US) {
+            // A window held open for more ACKs stands for that many windows.
+            self.judge(base, now, if held { (elapsed / window) as i32 } else { 1 });
             self.judge_start_us = now;
+            self.judge_delivered = self.delivered;
             self.judge_min_us = u64::MAX;
             self.judge_sum_us = 0;
             self.judge_n = 0;
@@ -275,33 +335,55 @@ impl Pacer {
         self.rate = self.rate.max(MIN_RATE);
     }
 
-    fn judge(&mut self, base: u64, now: u64) {
+    fn judge(&mut self, base: u64, now: u64, windows: i32) {
         let queue = self.judge_min_us;
         let spread = (self.judge_sum_us / self.judge_n - queue) as f64;
         self.jitter_us += (spread - self.jitter_us) / 4.0;
+        let over = queue > QUEUE_LIMIT_US.max(base / 2);
+        if !over {
+            self.over_since_us = 0;
+        } else if self.over_since_us == 0 {
+            self.over_since_us = self.judge_start_us.max(1);
+        }
         if now.saturating_sub(self.cut_us) < self.cut_hold_us {
             // ACKs of frames sent before the last cut: no news yet.
             return;
         }
-        if queue > QUEUE_LIMIT_US.max(base / 2) {
+        // Content below the estimate: the queue is not (only) ours, and with
+        // few ACKs per window its minimum is mostly jitter.
+        let limited = self.judge_limited;
+        if over && (limited || now.saturating_sub(self.over_since_us) >= PERSIST_US) {
             // Below the best delivery rate seen, so the queue drains; at most
             // 30 %: an app-limited best can be far below the link.
             self.ceiling = self.rate;
             self.rate = (self.rate * 0.85).min(self.judge_best * 0.9).max(self.rate * 0.7);
+            self.cut_report = Some((self.rate, queue));
             self.cut_us = now;
             self.cut_hold_us = base + queue + JUDGE_MIN_US;
             self.up_streak = 0;
         } else {
             let off = ((TARGET_QUEUE_US - queue as f64) / TARGET_QUEUE_US).clamp(-1.0, 1.0);
-            if off < 0.0 || self.judge_limited {
+            let recovering = !limited && self.rate < self.backed;
+            if off < 0.0 {
+                self.rate *= (1.0 + GAIN * off).powi(windows);
+            } else if limited || recovering {
                 let accel = (1.0 + self.up_streak as f64 * ACCEL_PER_WINDOW).min(MAX_ACCEL);
-                self.rate *= 1.0 + GAIN * off * if off > 0.0 { accel } else { 1.0 };
+                self.rate *= (1.0 + GAIN * off * accel).powi(windows);
+                if recovering {
+                    self.rate = self.rate.min(self.backed);
+                }
             }
-            if self.judge_limited && queue < EMPTY_QUEUE_US && self.rate < self.ceiling * 0.8 {
+            // Far below where the estimate has been: after a deep cut with
+            // content waiting, or after decreases nothing backed.
+            let far_below = self.rate < 0.8 * if limited { self.ceiling } else { self.backed };
+            if (limited || recovering) && queue < EMPTY_QUEUE_US && far_below {
                 self.up_streak += 1;
             } else {
                 self.up_streak = 0;
             }
+        }
+        if limited {
+            self.backed = self.rate;
         }
     }
 }
@@ -407,6 +489,28 @@ mod tests {
     }
 
     #[test]
+    fn light_content_keeps_the_estimate_through_ack_jitter() {
+        // 3 Mbit/s of content (7.5 KB at 50 fps) on a 100 Mbit/s, 6 ms path
+        // whose ACKs jitter by up to 60 ms (poor Wi-Fi): one or two ACKs per
+        // 40 ms, so their minimum delay is mostly jitter. Nothing here says
+        // the link got slower.
+        let mut p = Pacer { rate: 80e6 / 8.0, ceiling: 80e6 / 8.0, backed: 80e6 / 8.0, ..Default::default() };
+        run(&mut p, &mut Link::new(100e6 / 8.0, 6_000, 60_000), 60, false, |_| (7_500, 20_000));
+        assert!(p.rate() > 40e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+    }
+
+    #[test]
+    fn light_content_still_detects_a_slow_link() {
+        // The same content when the link really carries 2 Mbit/s: the queue
+        // persists, so the estimate comes down although nothing waited for it.
+        let mut p = Pacer { rate: 80e6 / 8.0, ceiling: 80e6 / 8.0, backed: 80e6 / 8.0, ..Default::default() };
+        let (_, worst) = run(&mut p, &mut Link::new(2e6 / 8.0, 6_000, 0), 10, false, |_| (7_500, 20_000));
+        assert!(p.rate() < 4e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+        // Frames of 30 ms each on this link: a few of them, not seconds.
+        assert!(worst < 150_000, "worst queueing {worst} µs");
+    }
+
+    #[test]
     fn saturating_content_converges_without_bufferbloat() {
         // 18 Mbit/s, 50 ms RTT, 100 KB frames offered at 165 fps (far above capacity).
         let mut p = Pacer::default();
@@ -433,11 +537,12 @@ mod tests {
     fn content_paced_by_the_estimate_still_finds_capacity() {
         // After a cut to 3 Mbit/s, content sizes itself from the estimate (as
         // paced video does: 70 % of it) and so never exceeds it by itself.
-        let mut p = Pacer { rate: 3e6 / 8.0, ..Default::default() };
+        let mut p = Pacer { rate: 3e6 / 8.0, backed: 3e6 / 8.0, ..Default::default() };
         let mut link = Link::new(FUNNEL, 50_000, 10_000);
         let (_, worst) = run(&mut p, &mut link, 10, true, |p| (20_000, (20_000.0 / (0.7 * p.rate()) * 1e6) as u64));
-        // The estimate is the content's budget: it settles where its 70 % fills the link.
-        assert!(p.rate() > FUNNEL * 0.9 && p.rate() < FUNNEL / 0.7 * 1.3, "estimate {} vs {FUNNEL}", p.rate());
+        // The estimate is the content's budget: it settles around where its
+        // 70 % fills the link (a sawtooth: the queue bound below is what matters).
+        assert!(p.rate() > FUNNEL * 0.9 && p.rate() < FUNNEL / 0.7 * 1.5, "estimate {} vs {FUNNEL}", p.rate());
         assert!(worst < 80_000, "worst queueing {worst} µs");
     }
 

@@ -102,6 +102,17 @@ only the network is modelled; a slow client still holds frames back):
   pacing deferred something); frames waiting on a client that has not drawn
   the previous ones do not count (on short paths that made it grow without
   bound).
+- **Content below the estimate** (most desktop use) weakens the queue
+  signal: the queue is not caused by the estimate, and a window holds one
+  or two ACKs whose minimum delay is mostly jitter. So, with content under
+  a quarter of the estimate, the window waits for six ACKs (or 250 ms);
+  decreases made while nothing waited for the estimate are undone once the
+  queue is short again, up to the level reached with content filling the
+  link; and the emergency cut needs the queue to persist 200 ms (a Wi-Fi
+  scan delays a few ACKs; congestion lasts). Otherwise the estimate drifted
+  down to what the content happened to use (80 → 10 Mbit/s in 30 s with
+  30 ms of ACK jitter), dragging the video cap along, and each cap change
+  is a keyframe with NVENC.
 - **Proven vs. lower bound**: until the link has queued once, the estimate
   only paces sending; what content the link affords (video vs. lossless,
   bitrate cap, zstd) is planned against the configured `bandwidth_mbps`, so
@@ -142,20 +153,32 @@ flowchart LR
   same path TCP wins: SCTP's congestion control (Reno, 1 s minimum RTO
   fixed in str0m) collapses on random loss — measured 2–5× fewer fps at
   0.5–1 % loss. The client tells the server (`{"type":"path"}` signal);
-  the server resets the link model, since another path is another link.
-- **Health**: a data channel in use that delivers nothing for 500 ms while a
-  frame is missing, or leaves a ping unanswered for 500 ms / 4 RTTs, is
-  abandoned (back to the WebSocket in ~1.3 s after UDP is cut) and banned
-  for 30 s, doubling per stall up to 5 min.
-- **Ordering**: frames are numbered (HELLO carries the first sequence); the
-  worker reassembles chunks and applies frames strictly in order. Frames
-  left on an abandoned channel never arrive: the client skips them after
-  100 ms (when a later frame arrived) and reports them in the ACK; the
-  server also presumes abandoned-channel frames lost after 8 RTTs (≥ 1 s).
-  `recovery.rs` then repairs state, not history: it re-sends the current
-  pixels of every tile a lost frame touched — following later moves, which
-  the client replayed on content missing that frame — and requests a
-  keyframe if the frame carried video.
+  the link model restarts from the last estimate, since most of the route
+  is shared (a fallback to the WebSocket also keeps content within it).
+- **Health**: the data channel in use is given up, and not used again for
+  30 s (doubling each time, up to 5 min), when
+  - a frame is still missing 150 ms (or 4 RTTs) after a later one arrived:
+    a packet was lost and everything behind it waits for SCTP;
+  - a ping (every 250 ms while in use) stays unanswered for 300 ms (or
+    4 RTTs): the path died, or SCTP stopped delivering;
+  - the server's estimate there falls below half of what the WebSocket
+    carried (`{"type":"slow"}` signal): SCTP under loss often does not
+    stall, it just carries a fraction (measured 4 Mbit/s and 50 fps where
+    the relayed WebSocket gave 14 Mbit/s and 169 fps).
+- **Ordering and repair**: frames are numbered (HELLO carries the first
+  sequence); the worker reassembles chunks and applies frames strictly in
+  order. When the client gives the channel up it says so (`dead`): the
+  server treats everything unacknowledged there as lost at once, and the
+  client skips what is missing when the next frame arrives over the
+  WebSocket. (After a switch by choice it waits 100 ms for stragglers and
+  reports the rest in the ACK; the server presumes them lost after 8 RTTs,
+  ≥ 1 s.) `recovery.rs` repairs state, not history: the current pixels of
+  every tile whose lossless copy a lost frame set — following later moves,
+  which the client replayed on content missing that frame — and the layer
+  of tiles whose switch was lost. Tiles shown from video on both sides need
+  only the keyframe that a lost video frame triggers anyway; re-sending
+  them losslessly turned a fallback during full-screen video into a 2.5 s
+  freeze (now ~0.6 s, mostly detection).
 - Unreliable delivery with NACK-based retransmission was tried and dropped:
   abandoned SCTP packets still count as losses for its congestion control,
   so it gained nothing over reliable unordered delivery and added repair
@@ -167,15 +190,22 @@ Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
 PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME); client →
-server PING, ACK (with client hold time and lost frames), KEYFRAME request,
-STATS (JSON for the admin UI), SIGNAL, HELLO_ACK, MOVE, BUTTON, WHEEL, KEY.
+server PING, ACK (with client hold time and lost frames), KEYFRAME request
+(with the newest frame received: requests the last keyframe already answers
+are ignored, since the client sends one per undecodable frame), STATS (JSON
+for the admin UI), SIGNAL, HELLO_ACK, VISIBLE (a hidden tab gets no frames;
+changes accumulate into one frame for when it shows again), EVENT (text for
+the event log), MOVE, BUTTON, WHEEL, KEY.
 
 ## Admin
 
 Separate listener (`server.admin_listen`, default `127.0.0.1:8081`):
 token/password login (cookie session or `Authorization: Bearer`), status
 (platform, provider, encoders and fallback reasons, GPUs, CPU, clients with
-fps/Mbit/s and client-reported latencies, recent errors), display selection
+fps/Mbit/s and client-reported latencies, recent errors, and per-client
+events: path switches, estimate cuts, video cap changes, lost frames,
+keyframe requests, and the stutters the client saw — frames drawn more than
+200 ms after their change, with the server/network/client split), display selection
 (hot switch), simulated display create/destroy (Linux), live settings
 (bandwidth budget, lossless limit, encoder preference, keyboard layout, stream
 token, admin password). Settings persist in the TOML config file.

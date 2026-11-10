@@ -186,3 +186,40 @@ Reading the numbers:
   client NACKs was worse still (0 fps at 1 % loss): abandoned packets still
   shrink SCTP's congestion window, and every given-up frame triggered a
   state repair plus keyframe that loaded the link further.
+
+## Stutters: link model with light content, data-channel fallback
+
+Found on a real direct session (6 ms, Wi-Fi jitter, 2-3 Mbit/s of desktop
+content): the link estimate fell from 77 to 10 Mbit/s in 35 s and the video
+cap with it (42 -> 6.7 Mbit/s at 3168x1440, four cap changes in 40 s, each a
+keyframe). With one or two ACKs per judging window the queue signal was
+mostly jitter, and nothing raised the estimate again while content stayed
+below it. Pacer simulator, 3 Mbit/s of content on a 100 Mbit/s, 6 ms link,
+estimate starting at 80 Mbit/s:
+
+| ACK jitter | before, after 30 s | before, after 60 s | now, after 60 s |
+|---|---|---|---|
+| 20 ms | 56.5 | 37.2 | 80 |
+| 30 ms | 9.9 | 9.4 | 80 |
+| 60 ms | | | 55 (7 without waiting for more ACKs in sparse windows) |
+
+The same content on a link that really carries 2 Mbit/s still brings the
+estimate down (below 4 Mbit/s within 10 s, queue around 100 ms).
+
+Data channel in trouble (Docker, Xvfb 1920x1080, WebSocket relayed: +30 ms
+on TCP; `late` = longest capture->draw the client saw):
+
+| scenario | before | now |
+|---|---|---|
+| UDP cut during full-screen video, 20 Mbit/s | frozen ~2.5 s | late 0.6 s, one keyframe |
+| UDP cut during scroll, 20 Mbit/s | frozen ~2 s | late 0.6 s |
+| UDP with 1 % loss, full: fps / Mbit/s / total | 50 / 4.0 / 54 / 193 (stays on the data channel; measured without the server-side rule) | 159 / 13.3 / 50 / 98 (leaves it after 2.3 s) |
+| data channel forced on a 1 % loss link, box: total | 17 / 986 | 16 / 104 |
+| data channel forced on a 1 % loss link, full: fps / total | 53 / 42 / 134 | 79 / 50 / 151 |
+| clean UDP (no loss), box / full: total | 16 / 28, 22 / 42 | 17 / 33, 21 / 47 |
+
+Single-path profiles (WebSocket) are unchanged or better: LAN 264 / 175 /
+201 fps (box / scroll / full), 18M/40ms 206 / 163 / 173, WAN 50M/20ms scroll
+20 / 31 and full 19 / 24 (were 20 / 76 and 20 / 77), Wi-Fi 50M/10ms +-3 with
+2 % loss scroll 20 / 77 (was 22-30 / 245-309), mobile 6M/50ms +-10 with
+0.5 % loss 92 / 150 / 53 fps (were 99 / 154 / 52).

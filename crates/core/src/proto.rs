@@ -15,7 +15,9 @@ pub const S_FRAME: u8 = 2;
 pub const S_CURSOR: u8 = 3;
 pub const S_PONG: u8 = 4;
 /// UTF-8 JSON, WebRTC signaling over the WebSocket: `{"type":"config",
-/// "iceServers":[...]}` on connect, `{"type":"answer","sdp":...}`.
+/// "iceServers":[...]}` on connect, `{"type":"answer","sdp":...}`,
+/// `{"type":"closed"}` (the server dropped the peer) and `{"type":"slow"}`
+/// (the data channel carries less than the WebSocket did: leave it).
 pub const S_SIGNAL: u8 = 5;
 /// One piece of a FRAME on the data channel: flags u8 (FLAG_VIDEO of the
 /// frame), part u16, parts u16, pad u16, seq u32 (offsets 1/2/4/6/8), data.
@@ -35,16 +37,24 @@ pub const C_PING: u8 = 1;
 /// time from receiving that frame to drawing it, excluded from the network
 /// round trip.
 pub const C_ACK: u8 = 2;
-/// Client decoder lost sync and needs an IDR frame.
+/// The client's decoder needs an IDR frame: pad u8 x 3, seq u32 of the
+/// newest frame it received (requests older than the last keyframe sent are
+/// already answered).
 pub const C_KEYFRAME: u8 = 3;
 /// UTF-8 JSON with the client's measured stats (shown in the admin UI).
 pub const C_STATS: u8 = 4;
 /// UTF-8 JSON, WebRTC signaling: `{"type":"offer","sdp":...}`,
 /// `{"type":"candidate","candidate":"candidate:..."}`, and the path the
-/// client wants frames on: `{"type":"path","webrtc":bool}`.
+/// client wants frames on: `{"type":"path","webrtc":bool,"dead":bool}`
+/// (`dead`: it gave the data channel up; frames left there are lost).
 pub const C_SIGNAL: u8 = 5;
 /// The client applied the last HELLO.
 pub const C_HELLO_ACK: u8 = 6;
+/// visible u8: the tab is shown (1) or hidden (0); a hidden tab gets no frames.
+pub const C_VISIBLE: u8 = 7;
+/// UTF-8 text: something the client noticed (a freeze, a path change and
+/// why), for the server's event log.
+pub const C_EVENT: u8 = 8;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
 pub const C_WHEEL: u8 = 12;

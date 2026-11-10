@@ -11,12 +11,25 @@ use crate::proto::now_us;
 use crate::shared::Link;
 
 const MAX_ERRORS: usize = 100;
+const MAX_EVENTS: usize = 200;
+/// Longest client-supplied event text kept.
+const MAX_EVENT_LEN: usize = 200;
 
 #[derive(Clone, Serialize)]
 pub struct ErrorEntry {
     pub at_ms: u64,
     pub context: String,
     pub message: String,
+}
+
+/// Something that happened to one client's stream (path switch, estimate
+/// cut, lost frames, a freeze the client saw): what explains a stutter
+/// after the fact.
+#[derive(Clone, Serialize)]
+pub struct EventEntry {
+    pub at_ms: u64,
+    pub client: u64,
+    pub text: String,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -39,6 +52,8 @@ pub struct ClientStatus {
     pub transport: String,
     /// Data-channel frames lost and repaired.
     pub lost_frames: u64,
+    /// The client's tab is hidden: nothing is sent until it shows again.
+    pub paused: bool,
     /// Latest stats reported by the client itself (C_STATS JSON).
     pub client_report: Option<serde_json::Value>,
     #[serde(skip)]
@@ -49,18 +64,38 @@ pub struct ClientStatus {
     window_bytes: u64,
 }
 
+impl ClientStatus {
+    /// Closes the rate window once it is a second old.
+    fn roll_window(&mut self, now: u64) {
+        let elapsed = now - self.window_start_us;
+        if elapsed >= 1_000_000 {
+            self.fps = self.window_frames as f64 * 1e6 / elapsed as f64;
+            self.mbps = self.window_bytes as f64 * 8.0 / elapsed as f64;
+            self.window_start_us = now;
+            self.window_frames = 0;
+            self.window_bytes = 0;
+        }
+    }
+}
+
 pub struct Telemetry {
     errors: Mutex<VecDeque<ErrorEntry>>,
+    events: Mutex<VecDeque<EventEntry>>,
     clients: Mutex<HashMap<u64, ClientStatus>>,
     cpu: Mutex<sysinfo::System>,
 }
 
 impl Default for Telemetry {
     fn default() -> Self {
+        let mut cpu = sysinfo::System::new();
+        // Usage is measured between refreshes: without this one the first
+        // status request would report garbage.
+        cpu.refresh_cpu_usage();
         Self {
             errors: Mutex::new(VecDeque::new()),
+            events: Mutex::new(VecDeque::new()),
             clients: Mutex::new(HashMap::new()),
-            cpu: Mutex::new(sysinfo::System::new()),
+            cpu: Mutex::new(cpu),
         }
     }
 }
@@ -79,6 +114,21 @@ impl Telemetry {
 
     pub fn errors(&self) -> Vec<ErrorEntry> {
         self.errors.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Logs to stderr and keeps the event for the admin UI.
+    pub fn event(&self, client: u64, text: &str) {
+        let text: String = text.chars().filter(|c| !c.is_control()).take(MAX_EVENT_LEN).collect();
+        eprintln!("client {client}: {text}");
+        let mut q = self.events.lock().unwrap();
+        if q.len() == MAX_EVENTS {
+            q.pop_front();
+        }
+        q.push_back(EventEntry { at_ms: now_us() / 1000, client, text });
+    }
+
+    pub fn events(&self) -> Vec<EventEntry> {
+        self.events.lock().unwrap().iter().cloned().collect()
     }
 
     pub fn client_connected(&self, id: u64, addr: SocketAddr) {
@@ -108,18 +158,10 @@ impl Telemetry {
     }
 
     pub fn client_sent(&self, id: u64, bytes: usize) {
-        let now = now_us();
         if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
             c.window_frames += 1;
             c.window_bytes += bytes as u64;
-            let elapsed = now - c.window_start_us;
-            if elapsed >= 1_000_000 {
-                c.fps = c.window_frames as f64 * 1e6 / elapsed as f64;
-                c.mbps = c.window_bytes as f64 * 8.0 / elapsed as f64;
-                c.window_start_us = now;
-                c.window_frames = 0;
-                c.window_bytes = 0;
-            }
+            c.roll_window(now_us());
         }
     }
 
@@ -144,6 +186,12 @@ impl Telemetry {
         }
     }
 
+    pub fn client_paused(&self, id: u64, paused: bool) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.paused = paused;
+        }
+    }
+
     pub fn client_report(&self, id: u64, report: serde_json::Value) {
         if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
             c.client_report = Some(report);
@@ -151,7 +199,17 @@ impl Telemetry {
     }
 
     pub fn clients(&self) -> Vec<ClientStatus> {
-        let mut v: Vec<_> = self.clients.lock().unwrap().values().cloned().collect();
+        let now = now_us();
+        let mut clients = self.clients.lock().unwrap();
+        // An idle or paused client sends nothing, so nothing else would
+        // bring its rate down.
+        let mut v: Vec<_> = clients
+            .values_mut()
+            .map(|c| {
+                c.roll_window(now);
+                c.clone()
+            })
+            .collect();
         v.sort_by_key(|c| c.id);
         v
     }

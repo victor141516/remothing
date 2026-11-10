@@ -55,8 +55,14 @@ On first start a config file is created (Linux: `/etc/remothing/config.toml`
 as root, else `~/.config/remothing/config.toml`; Windows:
 `%ProgramData%\remothing\config.toml`) with random admin and stream tokens.
 
-- Streaming client: `http://HOST:8080/?token=STREAM_TOKEN` (add `&stats` for the overlay)
-- Admin UI: `http://127.0.0.1:8081/` (login with the admin token or password)
+- Streaming client: `http://HOST:8080/?token=STREAM_TOKEN`. A remote screen
+  larger than the window is scaled down to fit (`&scale=1`: 1:1 pixels);
+  `&stats` shows the latency overlay. A hidden tab receives nothing until
+  it is shown again, so spare tabs cost neither an encoder nor bandwidth.
+- Admin UI: `http://127.0.0.1:8081/` (login with the admin token or
+  password). Its status page lists what happened to each client's stream
+  (path switches, estimate cuts, lost frames, stutters the client saw with
+  their server/network/client split): the place to look after a hiccup.
 
 Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
