@@ -173,6 +173,7 @@ async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
         "admin_password_set": !s.auth.admin_password.is_empty(),
         "tls": app.tls_enabled,
         "config_path": app.config.path,
+        "stream_listen": s.server.listen,
     }))
     .into_response())
 }

@@ -30,6 +30,9 @@ use crate::shared::{ClientCodec, Pull};
 /// screen changes; the pull model coalesces the skipped updates.
 const MAX_INFLIGHT: i32 = 2;
 
+/// Longest gap between messages from a live client (it pings every second).
+const CLIENT_SILENCE: Duration = Duration::from_secs(5);
+
 #[derive(Deserialize)]
 pub struct TokenQuery {
     #[serde(default)]
@@ -103,7 +106,9 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     let reader = {
         let (app, link, waker) = (app.clone(), link.clone(), waker.clone());
         async move {
-            while let Some(Ok(msg)) = rx.next().await {
+            // Clients ping every second; a silent peer (half-open connection,
+            // e.g. through a port forwarder) is dropped so it stops holding an encoder.
+            while let Ok(Some(Ok(msg))) = tokio::time::timeout(CLIENT_SILENCE, rx.next()).await {
                 let Message::Binary(b) = msg else { continue };
                 match (b.first().copied(), b.len()) {
                     (Some(proto::C_PING), 16..) => {
