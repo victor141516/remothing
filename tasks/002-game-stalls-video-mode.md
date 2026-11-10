@@ -1,6 +1,6 @@
 # Games: stalls of 200-450 ms, and a motion mode (whole screen as video)
 
-- Status: under discussion (one question left: when to build the fallback)
+- Status: agreed
 - Created: 2026-11-10
 
 ## Goal
@@ -12,14 +12,7 @@ with no composition and no detection of changed areas, would solve it.
 
 ## Open questions
 
-1. **Build the WebRTC video track right away, or once WebTransport runs?**
-   The user's plan is both transports, WebTransport first (decided,
-   below). The assistant's view: build WebTransport, then decide. Both
-   need the same thing from the network, a UDP port of the server that
-   the client can reach, so the video track only adds the cases listed
-   under "WebRTC video track (second)". How often those happen can be
-   read from the event log once WebTransport is in use, and the track is
-   a second stack to keep working.
+None. All were answered on 2026-11-10 and are under "Decided".
 
 ## Decided (user, 2026-11-10)
 
@@ -33,10 +26,16 @@ with no composition and no detection of changed areas, would solve it.
   relay servers. If it cannot connect for whatever reason (a proxy that
   does not carry UDP, a closed port), fall back to the other transports,
   down to TCP.
-- **Two UDP transports, in this order**: WebTransport datagrams first,
-  because the video stays in our own pipeline and under our control, which
-  is closest to what Sunshine does; if that cannot connect, a WebRTC video
-  track; if that cannot either, the transports of today.
+- **One UDP transport: WebTransport datagrams**, because the video stays
+  in our own pipeline and under our control, which is closest to what
+  Sunshine does. If it cannot connect, the transports of today. No WebRTC
+  video track: it needs the same of the network as WebTransport (a UDP
+  port of the server the client can reach), so it would fail in the same
+  places.
+- **Self-signed certificates must keep working** for WebTransport, without
+  the user having to obtain a certificate. The user proposed a link to a
+  page where the browser's warning is accepted once; the pinned
+  certificate below does it with no click at all.
 - **Measuring which stage stalls** is still wanted as analysis, but it
   does not come before UDP any more.
 - **"The whole screen is moving a lot"**: at least half of the screen in
@@ -203,7 +202,7 @@ through the video encoder. Motion mode removes:
 
 By itself it does not remove a TCP retransmission stall (that is what
 "Video over UDP" is for), nor the encoder waiting for a GPU the game keeps
-busy (step 6).
+busy (step 5).
 
 ### Costs and risks
 
@@ -217,8 +216,7 @@ busy (step 6).
 
 ## Video over UDP
 
-Decided: UDP first, direct. WebTransport datagrams, then a WebRTC video
-track, then what exists.
+Decided: UDP first, direct, as WebTransport datagrams; then what exists.
 
 Why it helps, and what it does not do by itself: compressed video frames
 build on the previous ones, so a frame that lost a packet cannot just be
@@ -237,9 +235,9 @@ along, or give up and ask for a keyframe.
 | cost | medium: media in str0m, keyframes on request, bitrate from its feedback | very high: a third transport, plus error correction in the client |
 | main risk | the browser's own buffering adds delay; to be measured (cloud gaming in browsers uses this path) | each loss the redundancy cannot repair costs a keyframe until the encoder can invalidate references (task 003, candidate 5) |
 
-### WebTransport datagrams (first)
+### WebTransport datagrams
 
-What it gives that the video track does not:
+What it gives that a WebRTC video track would not:
 
 - **Possibly less delay.** The video track goes through the browser's own
   buffer, which holds frames a little to smooth the network; datagrams
@@ -256,11 +254,7 @@ What has to be built:
 - An HTTP/3 (QUIC) listener on a UDP port. The client must reach that
   port directly (a forwarded port, as for today's UDP); unlike WebRTC it
   cannot open a path through a NAT in front of the server.
-- A certificate the browser accepts without asking: WebTransport has no
-  "continue anyway" page. Either a CA certificate for the name the client
-  connects to, or a self-signed one pinned by its hash
-  (`serverCertificateHashes`: valid 14 days at most, so renewed by the
-  server). Which browsers take the pinned kind has to be checked.
+- A certificate, see "Certificate" below.
 - Loss handling, ours on both sides: a frame is cut into datagrams; a
   little redundancy rebuilds a single lost one; the client asks again for
   what is still missing (one round trip); a keyframe is the last resort.
@@ -271,22 +265,42 @@ What has to be built:
 - Lossless data stays on a reliable channel (the WebSocket, or a reliable
   stream of the same WebTransport session).
 
-### WebRTC video track (second)
+### Certificate
 
-For clients where WebTransport does not come up:
+Without options a browser checks a WebTransport server like any HTTPS
+site against the public certificate authorities, and there is no warning
+page to click through: the connection just fails. Accepting our
+self-signed HTTPS certificate on the page is not expected to carry over
+to it (not tried here; check it in the first test, it costs nothing).
 
-- a browser without it (Safari and iOS before March 2026);
-- a certificate the browser does not accept (no CA certificate and no
-  support for the pinned kind);
-- a server only reachable through a path WebRTC opened by itself (ICE
-  through a NAT).
+The API has its own way for servers without a CA certificate, and it
+needs no click: the page tells the browser the SHA-256 hash of the one
+certificate to accept (`serverCertificateHashes`).
 
-It serves motion mode only: the browser shows the video itself, outside
-our compositor. It uses the UDP port and direct path the data channel
-already has. TURN is a relay server; none is used and none is added. STUN
-only lets the server find its public address by itself and is optional
-(`webrtc.stun_servers`); `webrtc.advertise` with a forwarded UDP port does
-the same by hand.
+- The server makes a certificate only for WebTransport: ECDSA P-256,
+  valid less than two weeks (the limit browsers set for pinned ones), and
+  makes the next one before it expires.
+- The client gets the hash over the WebSocket it already has, so the pin
+  is as trustworthy as the page itself (reached through HTTPS the user
+  accepted, or through the proxy).
+- With `tls.cert` / `tls.key` set to a CA certificate that matches the
+  name the client connects to, that one is used and no hash is sent.
+- Support of the pinned kind per browser has to be checked on real
+  browsers (MDN documents it; Safari is the unknown). A browser that
+  refuses it stays on today's transports unless a CA certificate is
+  configured, and the client says why.
+
+### Alternative left out: WebRTC video track
+
+The browser's own real-time video path, over the UDP port the data channel
+already uses (first column of the table). Left out because it comes up
+and fails together with WebTransport, would be a second stack to keep
+working, and only serves motion mode (the browser shows the video itself,
+outside our compositor). It would only add: browsers without
+WebTransport (Safari and iOS before March 2026), browsers that refuse the
+pinned certificate, and servers reachable only through a path WebRTC
+opens by itself through a NAT. Look at it again if the event log shows
+those cases matter.
 
 ### Order of attempts
 
@@ -294,11 +308,10 @@ the same by hand.
    it in both modes: no comparing round trips first (today the data channel
    is only chosen when it is clearly shorter, because a reliable channel
    over the same path gains nothing).
-2. Not up within a few seconds, or dead later: the WebRTC video track, for
-   motion mode, when the peer connection is up.
-3. Neither: today's frames over the data channel or the WebSocket.
+2. Not up within a few seconds, or dead later: today's frames over the
+   data channel or the WebSocket.
 
-The client reports which one it ended on and why the earlier ones failed
+The client reports which one it ended on and why WebTransport failed
 (event log), like every optional feature.
 
 Already tried, do not repeat: an unreliable WebRTC data channel with our
@@ -312,20 +325,19 @@ sending rate is decided by our server, so the same idea is sound there.
    to the capture loop, a path in `crates/core/src/shared.rs` and
    `stream.rs` that bypasses the tile policy, the exact picture after 5 s
    still, and a client that draws video only while the mode is on.
-2. **Video over WebTransport datagrams**, both modes.
-3. **WebRTC video track** as the fallback for motion mode (when, see open
-   question 1).
-4. **Per-client size and rate**: the client's report (debounced), the
+2. **Video over WebTransport datagrams**, both modes, with the pinned
+   certificate and the fallback.
+3. **Per-client size and rate**: the client's report (debounced), the
    ladder, scalers in `crates/encoder`.
-5. **Find the stage of what is left** (analysis, small, any time): put the
+4. **Find the stage of what is left** (analysis, small, any time): put the
    server's own split into the late-frame report: waiting for the window,
    upload, encode (the client already has the three numbers per frame).
    The report is built in `client/src/worker.ts`. It tells whether the
    "almost all server" stalls are the GPU.
-6. **If it is the GPU**: candidates 1, 2 and 4 of task 003 (process and
+5. **If it is the GPU**: candidates 1, 2 and 4 of task 003 (process and
    thread priority, GPU priority, MMCSS for the compositor). Small.
    GPU priority above normal may need the elevated or service process.
-7. **Estimate without bound** on short paths: reproduce on the current
+6. **Estimate without bound** on short paths: reproduce on the current
    build and bound it (separate small fix, whatever the rest).
 
 ## Testing
@@ -334,7 +346,7 @@ sending rate is decided by our server, so the same idea is sound there.
   plays, the event log is read afterwards. `AGENTS.md`: do not type or
   click into the live session.
 - For repeatable numbers: a GPU-bound load next to `rt-testapp --mode
-  full` on a private instance, before and after steps 1 and 6, compared
+  full` on a private instance, before and after steps 1 and 5, compared
   with the profiles in `docs/RESULTS.md`. Task 003 holds the baseline
   under load measured so far ("Measured under load").
 - Loss: the Linux bench container with `netem loss` on UDP and on TCP
@@ -355,12 +367,13 @@ sending rate is decided by our server, so the same idea is sound there.
 
 ## Not verified
 
-- Which of the two readings of "server" time is the real one (step 5).
-- How much delay the browser's own buffering adds to a WebRTC video
-  track, and how much our own path over datagrams has: measure both when
-  they exist. Which browsers accept a certificate pinned by hash for
-  WebTransport (Safari in particular). From general knowledge and MDN,
-  not tried here.
+- Which of the two readings of "server" time is the real one (step 4).
+- How much delay our own path over datagrams has: measure it when it
+  exists.
+- Which browsers accept a certificate pinned by hash for WebTransport
+  (Safari in particular), and that an HTTPS exception the user accepted
+  does not apply to WebTransport. From MDN and general knowledge, not
+  tried here.
 - That the stalls in the log happened during a match and not in the
   launcher or on the desktop.
 - Decoder limits on the clients, and how Moonlight was configured
