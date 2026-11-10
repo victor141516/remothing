@@ -1,6 +1,6 @@
 # Games: stalls of 200-450 ms, and a motion mode (whole screen as video)
 
-- Status: under discussion (one question left: how video goes over UDP)
+- Status: agreed
 - Created: 2026-11-10
 
 ## Goal
@@ -12,11 +12,7 @@ with no composition and no detection of changed areas, would solve it.
 
 ## Open questions
 
-1. **How video goes over UDP from a browser.** The user wants UDP first,
-   direct, with fallback (decided, below). A web page cannot open a UDP
-   socket of its own; it has two ways to UDP, compared in "Video over
-   UDP": a WebRTC video track (recommended) or WebTransport datagrams.
-   Which one?
+None. All were answered on 2026-11-10 and are under "Decided".
 
 ## Decided (user, 2026-11-10)
 
@@ -30,6 +26,9 @@ with no composition and no detection of changed areas, would solve it.
   relay servers. If it cannot connect for whatever reason (a proxy that
   does not carry UDP, a closed port), fall back to the other transports,
   down to TCP.
+- **UDP video is a WebRTC video track.** WebTransport datagrams were the
+  other way and are left out; what they would give, and when to look at
+  them again, is under "Alternative left out" below.
 - **Measuring which stage stalls** is still wanted as analysis, but it
   does not come before UDP any more.
 - **"The whole screen is moving a lot"**: at least half of the screen in
@@ -210,8 +209,8 @@ busy (step 5).
 
 ## Video over UDP
 
-Decided: UDP first, direct, fallback to what exists. Open: which of the
-two ways a browser has (open question 1).
+Decided: UDP first, direct, fallback to what exists, as a WebRTC video
+track carrying the video of motion mode.
 
 Why it helps, and what it does not do by itself: compressed video frames
 build on the previous ones, so a frame that lost a packet cannot just be
@@ -230,7 +229,29 @@ along, or give up and ask for a keyframe.
 | cost | medium: media in str0m, keyframes on request, bitrate from its feedback | very high: a third transport, plus error correction in the client |
 | main risk | the browser's own buffering adds delay; to be measured (cloud gaming in browsers uses this path) | each loss the redundancy cannot repair costs a keyframe until the encoder can invalidate references (task 003, candidate 5) |
 
-Recommended: the WebRTC video track, carrying the video of motion mode.
+### Alternative left out: WebTransport datagrams
+
+The table shows its costs. What it would give that the video track does
+not:
+
+- **Possibly less delay.** The video track goes through the browser's own
+  buffer, which holds frames a little to smooth the network; with
+  datagrams the frames would stay in our decoder, which shows each one as
+  soon as it is complete. How much the browser's buffer adds is not
+  measured, so neither is this gain.
+- **Video in tile mode too.** Frames would stay in our compositor, so the
+  video areas of tile mode could also travel without retransmission
+  stalls, in step with the lossless tiles. The video track only serves
+  motion mode.
+- **Our own link model** would set the sending rate, instead of the
+  estimate WebRTC derives from the browser's feedback.
+
+Look at it again if the video track's delay, once measured, turns out too
+high, or if stalls in tile mode's video areas become the complaint.
+Before that it would need the Safari check and the encoder able to
+invalidate references (task 003, candidate 5).
+
+### How the video track is used
 
 - **Direct, no relay**: TURN is a relay server; none is used and none is
   added. STUN only lets the server find its public address by itself and is
@@ -301,8 +322,10 @@ Recommended: the WebRTC video track, carrying the video of motion mode.
 
 - Which of the two readings of "server" time is the real one (step 4).
 - How much delay the browser's own buffering adds to a WebRTC video track
-  on each browser, and whether Safari has WebTransport with pinned
-  certificates. Both from general knowledge, not tried here.
+  on each browser: measure it when step 2 is done, it is the one thing
+  that could reopen the WebTransport alternative. Whether Safari has
+  WebTransport with pinned certificates. Both from general knowledge, not
+  tried here.
 - That the stalls in the log happened during a match and not in the
   launcher or on the desktop.
 - Decoder limits on the clients, and how Moonlight was configured
