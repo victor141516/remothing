@@ -5,8 +5,8 @@
 //! an async reader handles pings, ACKs, keyframe requests and stats.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -23,12 +23,15 @@ use crate::config::constant_time_eq;
 use crate::encode::EncoderRequest;
 use crate::platform::Button;
 use crate::proto;
-use crate::shared::{ClientCodec, Pull};
+use crate::pacer::Pacer;
+use crate::shared::{ClientCodec, Link, Pull, VIDEO_SHARE};
 
-/// Frames sent but not yet acknowledged by the client. Caps queueing in
-/// socket buffers so latency stays bounded when the link is slower than the
-/// screen changes; the pull model coalesces the skipped updates.
-const MAX_INFLIGHT: i32 = 2;
+/// Video cap changes cost an IDR with NVENC, itself a burst that can cut the
+/// estimate again: only for clear shifts, at most this often, unless the link
+/// collapsed (target under CAP_COLLAPSE of the cap).
+const CAP_HOLD_US: u64 = 3_000_000;
+const CAP_DEADBAND: (f64, f64) = (0.67, 1.5);
+const CAP_COLLAPSE: f64 = 0.33;
 
 /// Longest gap between messages from a live client (it pings every second).
 const CLIENT_SILENCE: Duration = Duration::from_secs(5);
@@ -78,7 +81,7 @@ pub async fn input_handler(
 
 struct ClientLink {
     id: u64,
-    inflight: AtomicI32,
+    pacer: Mutex<Pacer>,
     key_request: AtomicBool,
     stop: AtomicBool,
 }
@@ -87,7 +90,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     let (mut tx, mut rx) = socket.split();
     let link = Arc::new(ClientLink {
         id: app.shared.new_client_id(),
-        inflight: AtomicI32::new(0),
+        pacer: Mutex::new(Pacer::default()),
         key_request: AtomicBool::new(false),
         stop: AtomicBool::new(false),
     });
@@ -116,8 +119,9 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         let _ = out_tx.send(proto::pong(ts));
                     }
                     (Some(proto::C_ACK), 8..) => {
-                        // Signed: a client acking unknown frames only hurts its own pacing.
-                        link.inflight.fetch_sub(1, Ordering::AcqRel);
+                        let seq = u32::from_le_bytes(b[4..8].try_into().unwrap());
+                        let hold_us = b.get(8..12).map_or(0, |h| u32::from_le_bytes(h.try_into().unwrap()) as u64);
+                        link.pacer.lock().unwrap().on_ack(seq, proto::now_us(), hold_us);
                         waker.unpark();
                     }
                     (Some(proto::C_KEYFRAME), _) => {
@@ -159,14 +163,24 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     app.telemetry.client_disconnected(link.id);
 }
 
-/// Client thread: pulls frames whenever the window allows, parks otherwise.
+/// Client thread: pulls frames whenever the link window allows, parks otherwise.
 fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let shared = &app.shared;
     let mut codec = ClientCodec::new(app.settings.read().unwrap().tuning);
     let mut encoder_pref = String::new();
     let mut size = (0, 0);
     let mut need_key = true;
+    let mut video_cap = VideoCap::default();
     while !link.stop.load(Ordering::Acquire) {
+        let (can_send, model, rtt_us) = {
+            let mut p = link.pacer.lock().unwrap();
+            let can_send = p.can_send(proto::now_us());
+            if !can_send {
+                // Woken (new content) while the window is full.
+                p.note_limited();
+            }
+            (can_send, Link { rate: p.rate(), proven: p.proven() }, p.base_rtt_us())
+        };
         {
             let s = app.settings.read().unwrap();
             codec.tuning = s.tuning;
@@ -174,24 +188,37 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 // Preference changed at runtime: rebuild the encoder.
                 encoder_pref = s.encoder.preferred.clone();
                 drop(s);
-                create_encoder(app, link.id, &mut codec, size, &encoder_pref);
+                video_cap.reset(model.budget(&codec.tuning));
+                create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
                 shared.drop_video(link.id);
                 need_key = true;
             }
         }
+        let budget = model.budget(&codec.tuning);
         if let Some(c) = shared.take_cursor(link.id) {
             if out.send(c.to_vec()).is_err() {
                 return;
             }
         }
+        if let Some(e) = codec.encoder.as_mut() {
+            if let Some(bps) = video_cap.update(budget, proto::now_us()) {
+                e.set_max_bitrate(bps);
+            }
+        }
         let mut wake_at_us = None;
-        if link.inflight.load(Ordering::Acquire) < MAX_INFLIGHT {
+        if can_send {
             need_key |= link.key_request.swap(false, Ordering::AcqRel);
-            match shared.pull(link.id, &mut codec, need_key) {
+            let pulled = shared.pull(link.id, &mut codec, need_key, model);
+            if codec.paced() {
+                link.pacer.lock().unwrap().note_limited();
+            }
+            match pulled {
                 Ok(Pull::Frame { msg, key }) => {
                     need_key &= !key;
-                    link.inflight.fetch_add(1, Ordering::AcqRel);
+                    let seq = u32::from_le_bytes(msg[4..8].try_into().unwrap());
+                    link.pacer.lock().unwrap().on_send(seq, msg.len() as u64, proto::now_us());
                     app.telemetry.client_sent(link.id, msg.len());
+                    app.telemetry.client_link(link.id, model, rtt_us, codec.encoder.as_ref().map(|_| video_cap.bps));
                     if out.send(msg).is_err() {
                         return;
                     }
@@ -200,10 +227,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 Ok(Pull::Reset(g)) => {
                     size = (g.width, g.height);
                     encoder_pref = app.settings.read().unwrap().encoder.preferred.clone();
-                    create_encoder(app, link.id, &mut codec, size, &encoder_pref);
+                    video_cap.reset(budget);
+                    create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
-                    link.inflight.store(0, Ordering::Release);
+                    link.pacer.lock().unwrap().forget_inflight();
                     if out.send(proto::hello(g.width, g.height, g.tile)).is_err() {
                         return;
                     }
@@ -226,7 +254,38 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     }
 }
 
-fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): (u32, u32), pref: &str) {
+/// Video bitrate cap following the link estimate, with hysteresis.
+#[derive(Default)]
+struct VideoCap {
+    bps: u64,
+    changed_us: u64,
+}
+
+impl VideoCap {
+    fn target(rate: f64) -> u64 {
+        (rate * 8.0 * VIDEO_SHARE) as u64
+    }
+
+    fn reset(&mut self, rate: f64) {
+        self.bps = Self::target(rate);
+        self.changed_us = proto::now_us();
+    }
+
+    /// New cap when the target moved out of the dead band (or collapsed).
+    fn update(&mut self, rate: f64, now: u64) -> Option<u64> {
+        let target = Self::target(rate);
+        let ratio = target as f64 / self.bps.max(1) as f64;
+        let shifted = ratio < CAP_DEADBAND.0 || ratio > CAP_DEADBAND.1;
+        if ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= CAP_HOLD_US) {
+            self.bps = target;
+            self.changed_us = now;
+            return Some(target);
+        }
+        None
+    }
+}
+
+fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): (u32, u32), pref: &str, max_bitrate: u64) {
     codec.encoder = None;
     app.shared.set_gpu_input(id, false);
     let req = EncoderRequest {
@@ -234,6 +293,7 @@ fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): 
         height,
         preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
         surface: app.shared.surface(),
+        max_bitrate,
     };
     match app.platform.encoders().create(&req) {
         Ok(e) => {

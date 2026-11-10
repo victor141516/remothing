@@ -14,6 +14,8 @@ pub const S_PONG: u8 = 4;
 
 // Client -> server
 pub const C_PING: u8 = 1;
+/// Frame drawn: pad u8 x3, seq u32, hold_us u32 (client time from receiving
+/// the frame to drawing it, excluded from the network round trip).
 pub const C_ACK: u8 = 2;
 /// Client decoder lost sync and needs an IDR frame.
 pub const C_KEYFRAME: u8 = 3;
@@ -28,6 +30,8 @@ pub const C_KEY: u8 = 13;
 pub const ENC_RAW: u8 = 0;
 /// LZ4 block (lz4_flex::block) of the raw BGRX rows.
 pub const ENC_LZ4: u8 = 1;
+/// zstd frame of the raw BGRX rows (used on slow links: smaller, more CPU).
+pub const ENC_ZSTD: u8 = 2;
 
 /// FRAME flags.
 pub const FLAG_VIDEO: u8 = 1;

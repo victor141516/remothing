@@ -58,7 +58,8 @@ as root, else `~/.config/remothing/config.toml`; Windows:
 - Admin UI: `http://127.0.0.1:8081/` (login with the admin token or password)
 
 Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
-`tuning.bandwidth_mbps`, `tuning.max_lossless_frame_kb`,
+`tuning.bandwidth_mbps` (upper bound; each client's measured link decides
+below it), `tuning.max_lossless_frame_kb`,
 `encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `input.keyboard_layout`,
 `auth.*`, `tls.cert`/`tls.key`, and on Linux `[platform]`:
 `x11_displays = [":0"]`, `session_command = "openbox-session"`,

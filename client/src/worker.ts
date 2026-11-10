@@ -5,10 +5,11 @@
 // waits for its decoded picture, and later frames wait behind it, so lossless
 // rects, tile layer switches and the video picture always match.
 
+import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_KEYFRAME, C_PING, C_STATS, COPY_LEN, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
+  C_ACK, C_KEYFRAME, C_PING, C_STATS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN,
   S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
 } from './proto';
@@ -44,7 +45,9 @@ let renderer: Renderer;
 /** Decompression target, one row of tiles. */
 let staging = new Uint8Array(0);
 let barcode: BarcodeReader | null = null;
-let ws: WebSocket;
+const zstd = new ZSTDDecoder();
+/** Opened once the zstd decoder is ready. */
+let ws: WebSocket | undefined;
 let decoder: VideoDecoder;
 let awaitingKey = true;
 const queue: Frame[] = [];
@@ -57,7 +60,7 @@ let lastTs = -1;
 let lastMarker = -1;
 
 function send(m: Uint8Array): void {
-  if (ws.readyState === WebSocket.OPEN) ws.send(m);
+  if (ws?.readyState === WebSocket.OPEN) ws.send(m);
 }
 
 function ping(): void {
@@ -169,6 +172,8 @@ function apply(f: Frame): void {
       const out = staging.subarray(0, w * h * 4);
       lz4Decode(data, out);
       renderer.upload(x, y, w, h, out);
+    } else if (enc === ENC_ZSTD) {
+      renderer.upload(x, y, w, h, zstd.decode(data, w * h * 4));
     }
     off += len;
   }
@@ -186,9 +191,12 @@ function apply(f: Frame): void {
   const code = barcode?.read();
   const drawn = now();
 
-  const ack = new Uint8Array(8);
+  // The server leaves this frame's time here out of its network model.
+  const ack = new Uint8Array(12);
   ack[0] = C_ACK;
-  new DataView(ack.buffer).setUint32(4, f.seq, true);
+  const av = new DataView(ack.buffer);
+  av.setUint32(4, f.seq, true);
+  av.setUint32(8, Math.max(0, Math.round((now() - f.received) * 1000)), true);
   send(ack);
 
   if (code) {
@@ -262,7 +270,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       renderer = new Renderer(m.canvas);
       if (m.probe) barcode = new BarcodeReader(renderer);
       createDecoder();
-      connect(m.url);
+      // WASM zstd (~1.5 GB/s; pure-JS decoders run ~60x slower and stall
+      // this worker, delaying video output and ACKs). Ready before any frame.
+      void zstd.init().then(() => connect(m.url));
       setInterval(ping, 1000);
       setInterval(() => {
         const pipeline = `queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;

@@ -12,6 +12,8 @@ pub struct EncoderRequest {
     pub preferred: Option<String>,
     /// Capture surface, when the capture is GPU-based; enables zero-copy input.
     pub surface: Option<GpuSurface>,
+    /// Initial bitrate cap, bits/s (see [`VideoEncoder::set_max_bitrate`]).
+    pub max_bitrate: u64,
 }
 
 pub struct Encoded {
@@ -44,4 +46,8 @@ pub trait VideoEncoder: Send {
     fn load_gpu(&mut self, surface: &GpuSurface, rects: &[Rect]) -> Result<()>;
     /// Low-latency H.264, no reordering; `force_key` produces an IDR.
     fn encode(&mut self, force_key: bool) -> Result<Encoded>;
+    /// Caps the bitrate (bits/s) of following frames so video fits the link;
+    /// quality stays at the encoder's fixed level whenever the cap allows.
+    /// Returns false for backends that keep a fixed-quality mode.
+    fn set_max_bitrate(&mut self, bits_per_sec: u64) -> bool;
 }

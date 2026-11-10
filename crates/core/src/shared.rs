@@ -23,7 +23,7 @@ use crate::geom::{MovedRect, Rect};
 pub use crate::pixels::Geometry;
 use crate::pixels::{Differ, Pixels};
 use crate::platform::GpuSurface;
-use crate::proto::{self, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
+use crate::proto::{self, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN};
 
 /// A tile is "moving" when its 3rd most recent change is this recent (>= ~20 Hz).
 const HOT_WINDOW_US: u64 = 150_000;
@@ -31,6 +31,22 @@ const HOT_WINDOW_US: u64 = 150_000;
 const COOL_US: u64 = 250_000;
 /// Moves queued for one client before falling back to resending destinations.
 const MAX_PENDING_COPIES: usize = 64;
+/// Link time per frame that lossless sending is sized against (one 60 Hz frame).
+const FRAME_SLICE_US: f64 = 16_000.0;
+/// Fresh lossless changes costing more than this many slices go to video
+/// first and are refined afterwards (a full repaint over a slow link would
+/// otherwise block everything behind it).
+const BURST_SLICES: f64 = 4.0;
+/// Share of the link that refinement (video tiles back to lossless) may use,
+/// leaving room so fresh changes find no queue.
+const REFINE_SHARE: f64 = 0.8;
+/// Below this link rate lossless rects use zstd: 1.7x smaller than LZ4 on a
+/// 4K desktop capture, at a CPU cost that only pays off when the link is the limit.
+const ZSTD_BELOW: f64 = 200e6 / 8.0;
+const ZSTD_LEVEL: i32 = 1;
+/// Share of the link the video layer may use (lossless refinement and
+/// protocol overhead need the rest). Its bitrate cap and frame pacing follow it.
+pub const VIDEO_SHARE: f64 = 0.7;
 
 pub struct Shared {
     inner: Mutex<Inner>,
@@ -337,10 +353,12 @@ impl Shared {
     }
 
     /// Builds the next FRAME for this client: screen moves, lossless rects
-    /// (horizontal runs of tiles, LZ4), tile layer switches, and an H.264 frame
-    /// when any video tile changed. Without an encoder everything stays lossless.
-    pub fn pull(&self, id: u64, codec: &mut ClientCodec, force_key: bool) -> Result<Pull> {
+    /// (horizontal runs of tiles, LZ4 or zstd), tile layer switches, and an
+    /// H.264 frame when any video tile changed. Without an encoder everything
+    /// stays lossless. `link` is the server's model of the client's link.
+    pub fn pull(&self, id: u64, codec: &mut ClientCodec, force_key: bool, link: Link) -> Result<Pull> {
         let now = proto::now_us();
+        codec.paced = false;
         let mut guard = self.inner.lock().unwrap();
         let Inner { epoch, pixels, changes, clients, surface, .. } = &mut *guard;
         let geometry = pixels.geometry;
@@ -358,49 +376,108 @@ impl Shared {
             return Ok(Pull::Reset(geometry));
         }
 
+        let tuning = codec.tuning;
+        // Pacing, bursts and refinement follow the (conservative) estimate;
+        // what content the link affords follows the budget.
+        let rate = link.rate.min(tuning.bandwidth_mbps * 1e6 / 8.0);
+        let budget = link.budget(&tuning);
+        let slice = rate * FRAME_SLICE_US / 1e6;
+        let has_encoder = codec.encoder.is_some();
+
         // Moving tiles go to video only when keeping them lossless would cost
-        // too much: per frame (transfer time adds latency) or per second (budget).
+        // too much: per frame (transfer time adds latency) or per second
+        // (budget). Tiles already on video count too (their last lossless
+        // size), so the decision is the same whichever layer they are on.
         let hot = |i: usize| changes[i][2] != 0 && now.saturating_sub(changes[i][2]) < HOT_WINDOW_US;
         let (mut hot_frame_bytes, mut hot_rate) = (0u64, 0f64);
-        for i in (0..changes.len()).filter(|&i| hot(i) && !c.video[i]) {
+        for i in (0..changes.len()).filter(|&i| hot(i)) {
             let cost = codec.cost[i] as u64;
             hot_frame_bytes += cost;
             hot_rate += cost as f64 * 2e6 / (changes[i][0] - changes[i][2]).max(1) as f64;
         }
-        let tuning = codec.tuning;
-        let allow_video = codec.encoder.is_some()
-            && (hot_frame_bytes > tuning.max_lossless_frame_kb * 1024
-                || hot_rate > tuning.bandwidth_mbps * 1e6 / 8.0 / 2.0);
+        let frame_limit = ((tuning.max_lossless_frame_kb * 1024) as f64).min(budget * FRAME_SLICE_US * 2.0 / 1e6);
+        let allow_video = has_encoder && (hot_frame_bytes as f64 > frame_limit || hot_rate > budget / 2.0);
+        // A large one-off change (window opened, page loaded) would hold the
+        // link for many frames losslessly: show it from video now, refine later.
+        let fresh_cost: u64 = (0..changes.len())
+            .filter(|&i| c.dirty[i] && !c.video[i] && !c.force_video[i] && !(allow_video && hot(i)))
+            .map(|i| codec.cost[i] as u64)
+            .sum();
+        let burst = has_encoder && fresh_cost as f64 > slice * BURST_SLICES;
+        // Refinement runs from a token bucket at REFINE_SHARE of the link.
+        let refill = rate * REFINE_SHARE * now.saturating_sub(codec.refine_at) as f64 / 1e6;
+        codec.refine_tokens = (codec.refine_tokens + refill).min(slice * 2.0);
+        codec.refine_at = now;
+
+        // Video frames are paced so their bytes fit the video share of the
+        // link: a slow link gets fewer, decent pictures instead of a queue.
+        let video_ready = now >= codec.next_video_us;
+        let mut video_deferred = false;
+        let mut refine_deferred = false;
 
         let mut switches: Vec<u16> = Vec::new();
         let mut video_dirty = false;
         let mut wake_at_us: Option<u64> = None;
+        let mut wake = |t: u64| wake_at_us = Some(wake_at_us.map_or(t, |w: u64| w.min(t)));
         for (i, ch) in changes.iter().enumerate() {
             let dirty = std::mem::take(&mut c.dirty[i]);
-            let forced = std::mem::take(&mut c.force_video[i]) && codec.encoder.is_some();
+            let forced = std::mem::take(&mut c.force_video[i]) && has_encoder;
             c.send[i] = false;
             let cools_at = ch[0].max(c.video_since[i]) + COOL_US;
             if c.video[i] {
-                if !forced && (now >= cools_at || codec.encoder.is_none()) {
+                // Back to lossless once still, or while moving if that is
+                // affordable (e.g. it went to video with a one-off burst).
+                // Content moved in from video keeps video until it settles.
+                let affordable = hot(i) && !allow_video && now >= c.video_since[i] + COOL_US;
+                let cooled = !forced && (now >= cools_at || !has_encoder || affordable);
+                // Without an encoder lossless is the only layer: no pacing.
+                if cooled && (!has_encoder || codec.refine_tokens > 0.0) {
+                    codec.refine_tokens -= codec.cost[i] as f64;
                     c.video[i] = false;
                     c.send[i] = true;
                     switches.push(i as u16);
                 } else {
-                    video_dirty |= dirty || forced;
-                    wake_at_us = Some(wake_at_us.map_or(cools_at, |w| w.min(cools_at)));
+                    if !video_ready && (dirty || forced) {
+                        // Keep the change for the next paced video frame.
+                        c.dirty[i] = dirty;
+                        c.force_video[i] = forced;
+                        video_deferred = true;
+                    } else {
+                        video_dirty |= dirty || forced;
+                    }
+                    if cooled {
+                        // Out of tokens: retry once the bucket has refilled a little.
+                        let wait = (-codec.refine_tokens).max(0.0) / (rate * REFINE_SHARE) * 1e6;
+                        wake(now + wait as u64 + 1_000);
+                        refine_deferred = true;
+                    } else {
+                        wake(cools_at);
+                    }
                 }
-            } else if forced || (allow_video && hot(i)) {
+            } else if forced || (allow_video && hot(i)) || (burst && dirty) {
+                if !video_ready {
+                    // Switching needs a video picture: wait for the next paced one.
+                    c.dirty[i] = dirty;
+                    c.force_video[i] = forced;
+                    video_deferred = true;
+                    continue;
+                }
                 c.video[i] = true;
                 video_dirty = true;
                 switches.push(i as u16 | 0x8000);
-                wake_at_us = Some(wake_at_us.map_or(cools_at, |w| w.min(cools_at)));
+                wake(cools_at);
             } else {
                 c.send[i] = dirty;
             }
         }
+        if video_deferred {
+            wake(codec.next_video_us);
+        }
+        codec.paced = video_deferred || refine_deferred;
         let has_lossless = c.send.iter().any(|&s| s);
         if !has_lossless && !video_dirty && switches.is_empty() && c.copies.is_empty() {
-            c.pending = false;
+            // Deferred video keeps the pending changes' age for latency stats.
+            c.pending = video_deferred;
             return Ok(Pull::Idle { wake_at_us });
         }
 
@@ -414,7 +491,7 @@ impl Shared {
             c.oldest_us = now;
             c.newest_us = now;
         }
-        c.pending = false;
+        c.pending = video_deferred;
         c.seq = c.seq.wrapping_add(1);
         let (seq, oldest_us, newest_us) = (c.seq, c.oldest_us, c.newest_us);
         codec.copies.clear();
@@ -453,6 +530,10 @@ impl Shared {
                 msg.extend_from_slice(&(v as u16).to_le_bytes());
             }
         }
+        let use_zstd = budget < ZSTD_BELOW;
+        if use_zstd && codec.zstd.is_none() {
+            codec.zstd = Some(zstd::bulk::Compressor::new(ZSTD_LEVEL)?);
+        }
         let mut raw_at = 0;
         for &(r, first_tile, n_tiles) in &codec.rects {
             let raw = &codec.raw[raw_at..raw_at + (r.w * r.h * 4) as usize];
@@ -463,10 +544,20 @@ impl Shared {
             let header_at = msg.len();
             msg.extend_from_slice(&[ENC_RAW, 0, 0, 0, 0, 0, 0, 0]);
             let data_at = msg.len();
-            msg.resize(data_at + lz4_flex::block::get_maximum_output_size(raw.len()), 0);
-            let len = match lz4_flex::block::compress_into(raw, &mut msg[data_at..]) {
-                Ok(n) if n < raw.len() => {
-                    msg[header_at] = ENC_LZ4;
+            let compressed = match codec.zstd.as_mut().filter(|_| use_zstd) {
+                Some(z) => {
+                    msg.resize(data_at + zstd::zstd_safe::compress_bound(raw.len()), 0);
+                    z.compress_to_buffer(raw, &mut msg[data_at..]).ok().map(|n| (n, ENC_ZSTD))
+                }
+                None => {
+                    msg.resize(data_at + lz4_flex::block::get_maximum_output_size(raw.len()), 0);
+                    lz4_flex::block::compress_into(raw, &mut msg[data_at..]).ok().map(|n| (n, ENC_LZ4))
+                }
+            };
+            // Both bounds exceed the raw size, so the raw fallback fits too.
+            let len = match compressed {
+                Some((n, enc)) if n < raw.len() => {
+                    msg[header_at] = enc;
                     n
                 }
                 _ => {
@@ -489,6 +580,7 @@ impl Shared {
             let encode_start = proto::now_us();
             let v = codec.encoder.as_mut().expect("loaded implies encoder").encode(force_key)?;
             encode_us = (proto::now_us() - encode_start) as u32;
+            codec.next_video_us = now + (v.data.len() as f64 / (rate * VIDEO_SHARE) * 1e6) as u64;
             key = v.key;
             msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 };
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
@@ -512,11 +604,37 @@ impl Shared {
     }
 }
 
+/// The server's model of one client's link (see [`crate::pacer::Pacer`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Link {
+    /// Estimated bandwidth, bytes/s.
+    pub rate: f64,
+    /// The link queued at least once: the estimate is its capacity, not
+    /// just a lower bound.
+    pub proven: bool,
+}
+
+impl Link {
+    /// Bytes/s content may be planned against: the configured cap, lowered to
+    /// the estimate once the link has shown where it runs full. Before that,
+    /// a fast link must not be treated as slow because content stayed light.
+    pub fn budget(&self, tuning: &Tuning) -> f64 {
+        let cap = tuning.bandwidth_mbps * 1e6 / 8.0;
+        if self.proven {
+            self.rate.min(cap)
+        } else {
+            cap
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Tuning {
-    /// Lossless bandwidth budget; moving areas beyond half of it go to video.
+    /// Upper bound on the lossless budget (the link estimate usually decides);
+    /// moving areas beyond half of it go to video.
     pub bandwidth_mbps: f64,
-    /// Moving areas costing more than this per frame go to video (transfer time is latency).
+    /// Moving areas costing more than this per frame go to video (transfer
+    /// time is latency); slow links lower it further.
     pub max_lossless_frame_kb: u64,
 }
 
@@ -532,6 +650,14 @@ pub struct ClientCodec {
     /// Scratch: areas to refresh in the encoder input.
     encoder_rects: Vec<Rect>,
     copies: Vec<MovedRect>,
+    /// Refinement token bucket (bytes) and its last refill time.
+    refine_tokens: f64,
+    refine_at: u64,
+    zstd: Option<zstd::bulk::Compressor<'static>>,
+    /// Earliest time of the next video frame (video pacing).
+    next_video_us: u64,
+    /// The last pull held content back for pacing (video or refinement).
+    paced: bool,
 }
 
 impl ClientCodec {
@@ -544,6 +670,16 @@ impl ClientCodec {
             rects: Vec::new(),
             encoder_rects: Vec::new(),
             copies: Vec::new(),
+            refine_tokens: 0.0,
+            refine_at: 0,
+            zstd: None,
+            next_video_us: 0,
+            paced: false,
         }
+    }
+
+    /// The last pull held content back to stay within the link estimate.
+    pub fn paced(&self) -> bool {
+        self.paced
     }
 }

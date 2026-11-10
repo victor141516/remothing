@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM base AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xvfb x11-utils x11-xkb-utils xkb-data openbox xterm fonts-dejavu-core \
+      xvfb x11-utils x11-xkb-utils xkb-data openbox xterm fonts-dejavu-core iproute2 \
       libavcodec60 libavformat60 libswscale7 \
     && rm -rf /var/lib/apt/lists/*
 # NVENC needs the driver's video libraries injected by `--gpus`.

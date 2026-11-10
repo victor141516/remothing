@@ -15,7 +15,7 @@ flowchart LR
   subgraph Core["remothing-core (OS independent)"]
     CL[capture loop<br/>hot display switch] --> TD[TileDiff<br/>lock-free tile compare]
     TD --> S[Shared tiles<br/>motion history]
-    S --> P[per-client producer thread<br/>lossless/video policy, LZ4, ACK window]
+    S --> P[per-client producer thread<br/>lossless/video policy, LZ4/zstd, link pacer]
     P --> W[WS writer]
     R[WS reader: ACK, ping, keyframe, stats] --> P
     IN["/input WS"] --> I
@@ -61,20 +61,56 @@ flowchart LR
 4. **Commit** (`Shared::commit`, short metadata lock): motion history, per
    client dirty/encoder-stale flags and pending moves; client threads woken.
 5. **Per-client producer** (`stream.rs::produce`, one OS thread per client):
-   when the ACK window (2 frames in flight) allows, `Shared::pull` builds a
-   frame:
+   when the client's link window allows (see *Link model*), `Shared::pull`
+   builds a frame:
    - tiles changing ≥20 Hz whose lossless cost exceeds the per-frame limit or
-     half of the bandwidth budget switch to the **video layer**; everything
-     else is sent **lossless** (LZ4 rows of tile runs);
-   - video tiles unchanged for 250 ms are re-sent losslessly → anything that
-     stops moving becomes pixel-exact;
+     half of the link budget switch to the **video layer**; everything else
+     is sent **lossless** (rows of tile runs: LZ4, or zstd when the link is
+     under 200 Mbit/s — 1.7× smaller on desktop content);
+   - a one-off change too big for ~64 ms of link time (window opened, page
+     loaded) is shown from video first and refined afterwards;
+   - video tiles unchanged for 250 ms (or still moving but affordable
+     losslessly) are re-sent losslessly, paced by a token bucket at 80 % of
+     the link so fresh changes find no queue → anything that stops moving
+     becomes pixel-exact;
    - when a video tile changed, only the changed tiles are uploaded to the
      encoder input (CUDA surface / D3D11 texture copy / host frame) and one
      H.264 access unit is encoded (no B-frames, no lookahead, IDR on demand,
      SPS marked "no reordering" so browsers output each picture immediately).
+     Video frames are paced to 70 % of the link and the encoder's bitrate
+     cap follows the same share (NVENC VBR / x264 CRF with VBV, QP floor 20);
+     cap changes cost an IDR with NVENC, so they need a clear shift and hold
+     3 s unless the link collapses.
 6. **Client** (`worker.ts`): frames are applied in order and atomically —
    moves, then lossless rects to one texture, decoded VideoFrame to another;
-   a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing.
+   a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing,
+   carrying the time the frame was held (receive → draw). zstd is decoded in
+   WASM (`zstddec`, ~1.5 GB/s; pure-JS decoders stall the worker).
+
+## Link model
+
+`pacer.rs`, per client, from frame ACKs (client hold time subtracted, so
+only the network is modelled; a slow client still holds frames back):
+
+- **Bandwidth estimate**: raised by measured delivery rates (BBR-style
+  samples, transmission time of large frames); steered by the standing queue
+  — the least ACK delay beyond base RTT and the frame's own transmission over
+  a window of about one RTT, so single late ACKs (relay jitter) are ignored.
+  Proportional control toward 12 ms of queue (±4 %/RTT, accelerating after a
+  deep cut); an emergency cut to the measured delivery rate beyond 30 ms.
+  Growth needs content that waited for the estimate (window full or pacing
+  deferred something).
+- **Proven vs. lower bound**: until the link has queued once, the estimate
+  only paces sending; what content the link affords (video vs. lossless,
+  bitrate cap, zstd) is planned against the configured `bandwidth_mbps`, so
+  a fast link with light content is not treated as slow.
+- **Window**: estimated rate × (base RTT + jitter) with 10 % margin, so the
+  frame rate is not bound by the round trip (was a fixed 2 frames); and the
+  oldest unacknowledged frame must not be overdue, so a stalled client gets
+  no backlog — held-back updates coalesce into one current frame.
+
+Over Tailscale Funnel (≈18 Mbit/s, ≈50 ms) this took the harness from
+10–34 fps to ~170 fps with lower latency; see `docs/RESULTS.md`.
 
 Input goes through its own WebSocket (`/input`) so it never queues behind
 frame data; the server injects it through the selected display's
@@ -85,7 +121,7 @@ frame data; the server injects it through the selected display's
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
-PONG; client → server PING, ACK, KEYFRAME request, STATS (JSON for the admin
+PONG; client → server PING, ACK (with client hold time), KEYFRAME request, STATS (JSON for the admin
 UI), MOVE, BUTTON, WHEEL, KEY.
 
 ## Admin

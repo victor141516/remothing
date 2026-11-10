@@ -11,6 +11,7 @@ pub mod config;
 pub mod encode;
 pub mod geom;
 pub mod pixels;
+pub mod pacer;
 pub mod platform;
 pub mod proto;
 pub mod shared;

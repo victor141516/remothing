@@ -52,6 +52,12 @@ impl Backend {
         }
     }
 
+    /// Rate control follows a bitrate cap (`set_max_bitrate`). AMF and
+    /// QuickSync keep constant QP: their capped modes are untested here.
+    pub(crate) fn caps_bitrate(self) -> bool {
+        matches!(self, Backend::Nvenc | Backend::X264)
+    }
+
     /// Input paths to try, best first.
     fn inputs(self, has_surface: bool) -> Vec<InputKind> {
         let mut v = Vec::new();
@@ -92,7 +98,7 @@ impl FfmpegEncoders {
             if ff::encoder::find_by_name(b.ffmpeg_name()).is_none() {
                 continue;
             }
-            match FfmpegEncoder::open(b, InputKind::Host, 256, 256, None, &[]) {
+            match FfmpegEncoder::open(b, InputKind::Host, 256, 256, None, 1_000_000, &[]) {
                 Ok(_) => available.push(b),
                 Err(e) => unavailable.push((b.name().to_string(), format!("{e:#}"))),
             }
@@ -139,7 +145,7 @@ impl EncoderProvider for FfmpegEncoders {
         for backend in order {
             let opts = self.overrides.iter().find(|(b, _)| *b == backend).map_or(&[][..], |(_, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {
-                match FfmpegEncoder::open(backend, kind, req.width, req.height, req.surface.as_ref(), opts) {
+                match FfmpegEncoder::open(backend, kind, req.width, req.height, req.surface.as_ref(), req.max_bitrate, opts) {
                     Ok(mut e) => {
                         if !skipped.is_empty() {
                             e.fallback = Some(skipped.join("; "));

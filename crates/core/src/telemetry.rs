@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 
 use crate::proto::now_us;
+use crate::shared::Link;
 
 const MAX_ERRORS: usize = 100;
 
@@ -28,6 +29,12 @@ pub struct ClientStatus {
     /// Server-side send rate over the last second.
     pub fps: f64,
     pub mbps: f64,
+    /// Server's estimate of the client link: bandwidth (a lower bound until
+    /// `link_proven`), round trip, and the video bitrate cap derived from it.
+    pub link_mbps: f64,
+    pub link_proven: bool,
+    pub rtt_ms: f64,
+    pub video_cap_mbps: Option<f64>,
     /// Latest stats reported by the client itself (C_STATS JSON).
     pub client_report: Option<serde_json::Value>,
     #[serde(skip)]
@@ -102,6 +109,15 @@ impl Telemetry {
                 c.window_frames = 0;
                 c.window_bytes = 0;
             }
+        }
+    }
+
+    pub fn client_link(&self, id: u64, link: Link, rtt_us: u64, video_cap_bps: Option<u64>) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
+            c.link_mbps = link.rate * 8.0 / 1e6;
+            c.link_proven = link.proven;
+            c.rtt_ms = rtt_us as f64 / 1e3;
+            c.video_cap_mbps = video_cap_bps.map(|b| b as f64 / 1e6);
         }
     }
 

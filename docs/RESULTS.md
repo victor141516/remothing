@@ -99,3 +99,45 @@ Reading the numbers:
 |---|---|
 | screen moves: DXGI move rects / detected vertical scroll applied before the diff, replayed by clients as GPU copies | scrolling text stays lossless when cheap |
 | moved video content stays video in the destination | Linux scroll 55 → 5 Mbit/s, capture→draw 10.3 → 8.8 ms |
+
+## Bad links (link model, `pacer.rs`)
+
+Linux bench container (Xvfb 1920×1080, NVENC) with the same harness, before
+(fixed 2-frame ACK window, LZ4 only, constant-QP video) and after (link
+model, paced video with a bitrate cap, zstd, video-first bursts). "Funnel
+(real)": through Tailscale Funnel's public ingress from the same machine
+(curl: ≈18 Mbit/s, ping RTT ≈50 ms). The other links are `tc netem` on the
+container's egress (server → client); all delay sits on that direction, so
+the clock sync halves it and capture→draw reads ≈half the one-way delay low.
+One client per run.
+
+| link | scenario | fps before | capture→draw before | fps after | capture→draw after | video fps after | Mbit/s after |
+|---|---|---|---|---|---|---|---|
+| Funnel (real) | idle | 31 | 56 / 114 | 170 | 26 / 99 | 0 | 6.6 |
+| Funnel (real) | box | 34 | 57 / 119 | 168 | 26 / 106 | 152 | 3.7 |
+| Funnel (real) | scroll | 10 | 259 / 1508 | 165 | 32 / 76 | 161 | 5.8 |
+| Funnel (real) | full | 30 | 68 / 124 | 169 | 31 / 62 | 169 | 13.7 |
+| WAN 50M/20ms | box | 61 | 35 / 63 | 205 | 16 / 23 | 0 | 27.7 |
+| WAN 50M/20ms | scroll | 62 | 38 / 124 | 165 | 20 / 76 | 161 | 7.4 |
+| WAN 50M/20ms | full | 65 | 35 / 51 | 173 | 20 / 77 | 173 | 13.6 |
+| Funnel-like 18M/40ms | box | 32 | 74 / 139 | 195 | 26 / 80 | 175 | 4.4 |
+| Funnel-like 18M/40ms | scroll | 11 | 194 / 875 | 166 | 32 / 88 | 150 | 6.8 |
+| Funnel-like 18M/40ms | full | 36 | 60 / 92 | 173 | 33 / 59 | 173 | 14.1 |
+| Mobile 6M/50ms±10 0.5%loss | box | 11 | 144 / 2910 | 99 | 79 / 679 | 61 | 3.4 |
+| Mobile 6M/50ms±10 0.5%loss | scroll | 1 | 2231 / 5889 | 154 | 72 / 998 | 57 | 4.8 |
+| Mobile 6M/50ms±10 0.5%loss | full | 21 | 108 / 246 | 52 | 73 / 241 | 52 | 4.1 |
+| LAN (Docker) | idle | 288 | 2 / 10 | 289 | 2 / 20 | 0 | 11.9 |
+| LAN (Docker) | box | 237 | 6 / 13 | 257 | 3 / 18 | 0 | 30.0 |
+| LAN (Docker) | scroll | 179 | 10 / 18 | 181 | 9 / 17 | 181 | 5.4 |
+| LAN (Docker) | full | 201 | 8 / 14 | 209 | 7 / 14 | 209 | 14.7 |
+
+Reading the numbers:
+- With a fixed window of 2 unacknowledged frames, frame rate was bound by the
+  round trip (≈2 / RTT: ~30 fps over Funnel) and large lossless updates
+  queued for seconds (scroll). Now small frames go out at screen rate and
+  content is sized to the measured link.
+- The mobile profile's p99 is TCP loss recovery (0.5 % random loss with
+  reordering): retransmissions stall everything behind them. Only a
+  datagram transport would avoid that; Funnel and WebSocket are TCP-only.
+- LAN is unchanged at p50; box became lossless because 30 Mbit/s of moving
+  pixels is affordable on an unproven (fast) link, which is also faster.

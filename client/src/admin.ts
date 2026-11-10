@@ -23,6 +23,10 @@ interface ClientStatus {
   encoder_fallback: string | null;
   fps: number;
   mbps: number;
+  link_mbps: number;
+  link_proven: boolean;
+  rtt_ms: number;
+  video_cap_mbps: number | null;
   client_report: Record<string, Pair> | null;
 }
 
@@ -317,7 +321,7 @@ function renderStatus(s: Status) {
     {},
     h('h2', {}, 'Clients'),
     table(
-      ['Address', 'Connected', 'Encoder', 'FPS', 'Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
+      ['Address', 'Connected', 'Encoder', 'FPS', 'Mbit/s', 'Link Mbit/s', 'RTT ms', 'Video cap Mbit/s', ...LATENCIES.map(([, label]) => `${label} p50/p99 ms`)],
       s.clients.map((c) => [
         td(h('span', { class: 'mono' }, c.addr)),
         td(fmtAge(c.connected_ms)),
@@ -327,6 +331,9 @@ function renderStatus(s: Status) {
         ),
         tdNum(c.fps.toFixed(1)),
         tdNum(c.mbps.toFixed(2)),
+        tdNum(`${c.link_proven ? '' : '≥ '}${c.link_mbps.toFixed(1)}`),
+        tdNum(c.rtt_ms.toFixed(1)),
+        tdNum(c.video_cap_mbps === null ? '—' : c.video_cap_mbps.toFixed(1)),
         ...LATENCIES.map(([key]) => tdNum(fmtPair(c.client_report?.[key]))),
       ]),
       'No clients connected.',
@@ -486,7 +493,7 @@ function renderSettings(s: Settings) {
   const streaming = h(
     'form',
     { class: 'grid' },
-    ...field('Bandwidth budget', bandwidth, h('span', { class: 'dim' }, 'Mbit/s')),
+    ...field('Bandwidth cap', bandwidth, h('span', { class: 'dim' }, 'Mbit/s — upper bound; each client\'s measured link usually decides')),
     ...field('Max lossless frame', maxKb, h('span', { class: 'dim' }, 'KB — larger moving areas go to video')),
     ...field('Codec', codec),
     ...field('Encoder preference', encoder, h('span', { class: 'dim' }, s.encoders.length ? '' : 'no hardware/software encoder available')),

@@ -927,7 +927,14 @@ mod bench {
             let frame = gpu.surface(w, h)?;
             let gs: GpuSurface = frame.clone();
             for backend in ["nvenc", "amf", "qsv", "x264"] {
-                let req = EncoderRequest { width: w, height: h, preferred: Some(backend.into()), surface: Some(gs.clone()) };
+                // Uncapped: the encoder clamps to its highest supported cap.
+                let req = EncoderRequest {
+                    width: w,
+                    height: h,
+                    preferred: Some(backend.into()),
+                    surface: Some(gs.clone()),
+                    max_bitrate: u64::MAX,
+                };
                 let e = provider.create(&req)?;
                 println!("{w}x{h} prefer {backend}: opened {:?}, fallback: {:?}", e.name(), e.fallback_reason());
             }
@@ -942,6 +949,7 @@ mod bench {
                             height: h,
                             preferred: Some(backend.into()),
                             surface: gpu_input.then(|| gs.clone()),
+                            max_bitrate: u64::MAX,
                         };
                         let mut e = provider.create(&req)?;
                         let prefix = format!("| {} | {label} | {w}x{h} | {} ", e.name(), scene.name());
