@@ -98,8 +98,10 @@ only the network is modelled; a slow client still holds frames back):
   a window of about one RTT, so single late ACKs (relay jitter) are ignored.
   Proportional control toward 12 ms of queue (±4 %/RTT, accelerating after a
   deep cut); an emergency cut to the measured delivery rate beyond 30 ms.
-  Growth needs content that waited for the estimate (window full or pacing
-  deferred something).
+  Growth needs content that waited for the estimate (byte window full or
+  pacing deferred something); frames waiting on a client that has not drawn
+  the previous ones do not count (on short paths that made it grow without
+  bound).
 - **Proven vs. lower bound**: until the link has queued once, the estimate
   only paces sending; what content the link affords (video vs. lossless,
   bitrate cap, zstd) is planned against the configured `bandwidth_mbps`, so

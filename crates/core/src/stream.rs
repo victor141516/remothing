@@ -360,8 +360,8 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         let (can_send, model, rtt_us) = {
             let mut p = link.pacer.lock().unwrap();
             let can_send = p.can_send(proto::now_us());
-            if !can_send {
-                // Woken (new content) while the window is full.
+            if !can_send && p.window_full() {
+                // Woken (new content) while the estimate's window is full.
                 p.note_limited();
             }
             (can_send, Link { rate: p.rate(), proven: p.proven() }, p.base_rtt_us())

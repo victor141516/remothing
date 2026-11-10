@@ -10,7 +10,8 @@
 //! The estimate (bytes/s) moves on that signal, as delay-based congestion
 //! control does (LEDBAT): each window it changes by up to ±GAIN in
 //! proportion to (target - queue) / target. Growth needs content that waited
-//! for the estimate (window full or pacing deferred something): screen
+//! for the estimate (byte window full or pacing deferred something; not
+//! frames waiting on the client): screen
 //! content paced from the estimate never exceeds it, so measured rates alone
 //! could not raise it again after a cut. Near the target the steps shrink,
 //! so the queue signal's round-trip lag causes little overshoot. A queue past
@@ -147,18 +148,33 @@ impl Pacer {
         self.base_rtt.0
     }
 
+    /// Round trip the window covers: base RTT plus typical jitter, µs.
+    fn path_us(&self) -> f64 {
+        if self.base_rtt.0 == 0 { DEFAULT_RTT_US as f64 } else { self.base_rtt.0 as f64 + self.jitter_us }
+    }
+
+    fn window(&self) -> f64 {
+        self.rate * (self.path_us() * WINDOW_MARGIN + WINDOW_SLACK_US) / 1e6
+    }
+
     pub fn can_send(&self, now: u64) -> bool {
         let Some(oldest) = self.sent.front() else { return true };
-        let path = if self.base_rtt.0 == 0 { DEFAULT_RTT_US as f64 } else { self.base_rtt.0 as f64 + self.jitter_us };
-        let window = self.rate * (path * WINDOW_MARGIN + WINDOW_SLACK_US) / 1e6;
         // Two frames always (as many as one round trip of a fast path needs).
         // Beyond that, the oldest unacknowledged frame must not be overdue: a
         // client that stalls (busy decoding, GC, hidden tab) would otherwise
         // collect a backlog of stale frames, while frames held back here
         // coalesce into one current frame (pull model).
-        let due = path * WINDOW_MARGIN + WINDOW_SLACK_US + oldest.bytes as f64 * 1e6 / self.rate;
+        let due = self.path_us() * WINDOW_MARGIN + WINDOW_SLACK_US + oldest.bytes as f64 * 1e6 / self.rate;
         let overdue = self.sent.len() >= 2 && now.saturating_sub(oldest.sent_us) as f64 > due;
-        self.sent.len() < MAX_FRAMES && (self.inflight as f64) < window && !overdue
+        self.sent.len() < MAX_FRAMES && (self.inflight as f64) < self.window() && !overdue
+    }
+
+    /// The estimate is what holds content back: the bytes in flight fill the
+    /// window. Frames waiting on a client that has not drawn the previous
+    /// ones yet (overdue) say nothing about the link, and counting them made
+    /// the estimate grow without bound on short paths.
+    pub fn window_full(&self) -> bool {
+        self.inflight as f64 >= self.window()
     }
 
     /// Content waited for the estimate: the window was full or pacing
@@ -295,11 +311,13 @@ mod tests {
     use super::*;
 
     /// FIFO bottleneck of `rate` bytes/s with `rtt_us` base round trip, plus
-    /// up to `jitter_us` of extra ACK delay (deterministic, order kept).
+    /// up to `jitter_us` of extra ACK delay (deterministic, order kept), and
+    /// `hold_us` the client keeps each frame before drawing (ACKing) it.
     struct Link {
         rate: f64,
         rtt_us: u64,
         jitter_us: u64,
+        hold_us: u64,
         busy_until: u64,
         last_ack: u64,
         lcg: u64,
@@ -307,7 +325,7 @@ mod tests {
 
     impl Link {
         fn new(rate: f64, rtt_us: u64, jitter_us: u64) -> Self {
-            Self { rate, rtt_us, jitter_us, busy_until: 0, last_ack: 0, lcg: 1 }
+            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1 }
         }
 
         /// ACK time of a frame handed to the link at `now`.
@@ -316,7 +334,7 @@ mod tests {
             self.busy_until = start + (bytes as f64 * 1e6 / self.rate) as u64;
             self.lcg = self.lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let jitter = if self.jitter_us == 0 { 0 } else { (self.lcg >> 33) % self.jitter_us };
-            self.last_ack = (self.busy_until + self.rtt_us + jitter).max(self.last_ack);
+            self.last_ack = (self.busy_until + self.rtt_us + jitter + self.hold_us).max(self.last_ack);
             self.last_ack
         }
     }
@@ -340,7 +358,7 @@ mod tests {
         while t < end {
             while acks.front().is_some_and(|&(at, _)| at <= t) {
                 let (_, s) = acks.pop_front().unwrap();
-                p.on_ack(s, t, 0);
+                p.on_ack(s, t, link.hold_us);
             }
             if t >= next_frame {
                 if p.can_send(t) {
@@ -356,7 +374,7 @@ mod tests {
                     acks.push_back((link.deliver(bytes, t), seq));
                     sent += 1;
                     next_frame = t + gap;
-                } else {
+                } else if p.window_full() {
                     p.note_limited();
                 }
             }
@@ -373,6 +391,19 @@ mod tests {
         let mut p = Pacer::default();
         let (sent, _) = run(&mut p, &mut Link::new(2.5e6, 100_000, 0), 4, false, |_| (2_000, 6_060));
         assert!(sent as f64 >= 165.0 * 4.0 * 0.95, "sent {sent}");
+    }
+
+    #[test]
+    fn client_hold_does_not_inflate_the_estimate() {
+        // Light content changing at 144 Hz (7.5 KB frames) on a fast, short
+        // path (100 Mbit/s, 5 ms): the client draws each frame 12 ms after it
+        // arrives, so frames wait for ACKs while the link idles. That is the
+        // client, not the link: the estimate must not grow without bound.
+        let mut p = Pacer::default();
+        let mut link = Link::new(100e6 / 8.0, 5_000, 0);
+        link.hold_us = 12_000;
+        run(&mut p, &mut link, 10, false, |_| (7_500, 6_944));
+        assert!(p.rate() < 2.0 * 100e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
     }
 
     #[test]
