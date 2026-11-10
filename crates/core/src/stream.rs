@@ -27,6 +27,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::app::App;
 use crate::config::constant_time_eq;
 use crate::encode::EncoderRequest;
+use crate::mic;
 use crate::pacer::Pacer;
 use crate::platform::Button;
 use crate::proto;
@@ -71,6 +72,22 @@ const CLIENT_SILENCE: Duration = Duration::from_secs(5);
 pub struct TokenQuery {
     #[serde(default)]
     token: String,
+}
+
+/// C_MIC_INFO.
+#[derive(Deserialize)]
+struct MicRequest {
+    on: Option<bool>,
+    #[serde(default)]
+    install: bool,
+    #[serde(default)]
+    restart: bool,
+    #[serde(default)]
+    codec: String,
+    #[serde(default)]
+    rate: u32,
+    #[serde(default)]
+    channels: usize,
 }
 
 fn authorized(app: &App, q: &TokenQuery) -> bool {
@@ -251,9 +268,31 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
             }
         }
     };
+    // Whether the microphone is free or another client has it. What happens
+    // to this client's own request goes to it directly (`MicHub::start`).
+    let mic_state = {
+        let (mut talker, out_tx, id) = (app.mic.talker(), out_tx.clone(), link.id);
+        async move {
+            loop {
+                let state = match *talker.borrow_and_update() {
+                    Some(talker) if talker == id => None,
+                    Some(_) => Some("busy"),
+                    None => Some("free"),
+                };
+                if let Some(state) = state {
+                    let _ = out_tx.send(proto::text(proto::S_MIC_INFO, &json!({ "state": state }).to_string()));
+                }
+                if talker.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    };
     let reader = {
         let (app, link, waker) = (app.clone(), link.clone(), waker.clone());
         async move {
+            // This client's hold on the session's microphone, while it talks.
+            let mut microphone: Option<std::sync::mpsc::Sender<mic::Command>> = None;
             // Clients ping every second; a silent peer (half-open connection,
             // e.g. through a port forwarder) is dropped so it stops holding an encoder.
             while let Ok(Some(Ok(msg))) = tokio::time::timeout(CLIENT_SILENCE, rx.next()).await {
@@ -295,6 +334,34 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                     }
                     (Some(proto::C_AUDIO), 2..) => {
                         audio_on.send_replace(b[1] != 0);
+                    }
+                    (Some(proto::C_MIC_INFO), _) => {
+                        let Ok(request) = serde_json::from_slice::<MicRequest>(&b[1..]) else { continue };
+                        match request.on {
+                            // The first to ask gets it; the others see it taken (`mic_state`).
+                            // An earlier request of this client may have ended by itself
+                            // (no microphone to offer): asking again starts over.
+                            Some(true) if !app.mic.talks(link.id) => {
+                                let format = mic::Format { codec: request.codec, rate: request.rate, channels: request.channels };
+                                microphone = app.mic.start(link.id, format, out_tx.clone());
+                            }
+                            Some(false) => microphone = None,
+                            _ => {}
+                        }
+                        if let Some(microphone) = &microphone {
+                            if request.install {
+                                let _ = microphone.send(mic::Command::Install);
+                            }
+                            if request.restart {
+                                let _ = microphone.send(mic::Command::Restart);
+                            }
+                        }
+                    }
+                    (Some(proto::C_MIC), _) => {
+                        // The sender is gone once the microphone gave up by itself.
+                        if microphone.as_ref().is_some_and(|m| m.send(mic::Command::Packet(b.to_vec())).is_err()) {
+                            microphone = None;
+                        }
                     }
                     (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, app.control.current().map(|d| d.id)),
                     (Some(proto::C_DISPLAY), _) => {
@@ -386,6 +453,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         _ = peer => {}
         _ = clipboard => {}
         _ = audio => {}
+        _ = mic_state => {}
     }
     link.stop.store(true, Ordering::Release);
     link.held.lock().unwrap().release(&app);

@@ -10,6 +10,8 @@ const WHEEL_STEP_PX = 100;
 const TOUCH_WHEEL_STEP_PX = 24;
 /** A finger never rests perfectly still: fingers that travel less than this, all together, made a tap. */
 const TAP_SLOP_PX = 10;
+/** A touch this soon after a tap holds the left button: the second click of a double click, or a drag. */
+const DOUBLE_TAP_MS = 300;
 
 export class Input {
   private keys = new Set<number>();
@@ -22,6 +24,9 @@ export class Input {
   /** The touch gesture going on: most fingers down at once, and how far they travelled. */
   private fingers = 0;
   private travel = 0;
+  /** When the last left tap ended, and whether this touch holds the left button because it followed one. */
+  private tappedAt = -Infinity;
+  private dragging = false;
   /** Remote screen size; the canvas itself belongs to the render worker. */
   screenWidth = 0;
   screenHeight = 0;
@@ -58,7 +63,8 @@ export class Input {
     // Touch works as on a trackpad, and so anywhere around the picture too
     // (a wide screen on an upright phone is a narrow strip): one finger
     // moves the pointer from where it is, a tap clicks, a tap with two
-    // fingers is the right button, two fingers dragged scroll.
+    // fingers is the right button, two fingers dragged scroll, and a touch
+    // right after a tap holds the left button while it lasts (drag).
     const body = document.body;
     body.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch' || (e.target !== canvas && e.target !== body)) return;
@@ -122,6 +128,12 @@ export class Input {
     if (this.touches.size === 0) {
       this.fingers = 0;
       this.travel = 0;
+      if (performance.now() - this.tappedAt < DOUBLE_TAP_MS && this.screenWidth > 0) {
+        this.dragging = true;
+        this.moveTo(Math.round(this.pointerX), Math.round(this.pointerY));
+        this.buttons.add(LEFT);
+        this.send(new Uint8Array([C_BUTTON, LEFT, 1]));
+      }
     }
     this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.fingers = Math.max(this.fingers, this.touches.size);
@@ -140,14 +152,14 @@ export class Input {
     last.y = e.clientY;
     this.travel += Math.hypot(dx, dy);
     if (this.travel < TAP_SLOP_PX) return;
-    if (this.fingers === 1) {
+    if (this.dragging ? this.touches.size === 1 : this.fingers === 1) {
       // As far on the remote screen as the finger went over its picture.
       const scale = this.screenWidth / this.canvas.getBoundingClientRect().width;
       this.pointerX = Math.max(0, Math.min(this.screenWidth - 1, this.pointerX + dx * scale));
       this.pointerY = Math.max(0, Math.min(this.screenHeight - 1, this.pointerY + dy * scale));
       this.moveTo(Math.round(this.pointerX), Math.round(this.pointerY));
       this.pointerChanged();
-    } else if (this.touches.size === 2) {
+    } else if (!this.dragging && this.touches.size === 2) {
       // Each finger reports its half of the drag. What is on the screen
       // follows the fingers, as when scrolling the phone's own pages.
       this.scroll(-dx / 2 / TOUCH_WHEEL_STEP_PX, -dy / 2 / TOUCH_WHEEL_STEP_PX);
@@ -158,13 +170,23 @@ export class Input {
   private touchUp(e: PointerEvent, completed: boolean): void {
     if (!this.touches.delete(e.pointerId)) return;
     if (!completed) this.travel = Infinity;
-    if (this.touches.size > 0 || this.travel >= TAP_SLOP_PX || this.screenWidth === 0) return;
+    if (this.touches.size > 0) return;
+    const tapped = this.travel < TAP_SLOP_PX && this.screenWidth > 0;
+    this.tappedAt = -Infinity;
+    if (this.dragging) {
+      this.dragging = false;
+      if (this.buttons.delete(LEFT)) this.send(new Uint8Array([C_BUTTON, LEFT, 0]));
+      // Without moving it was a click: one more touch right away continues the series.
+      if (tapped) this.tappedAt = performance.now();
+      return;
+    }
     const button = this.fingers === 1 ? LEFT : this.fingers === 2 ? RIGHT : undefined;
-    if (button === undefined) return;
+    if (!tapped || button === undefined) return;
     // The click goes where the pointer is drawn, even if something else moved the remote one since.
     this.moveTo(Math.round(this.pointerX), Math.round(this.pointerY));
     this.send(new Uint8Array([C_BUTTON, button, 1]));
     this.send(new Uint8Array([C_BUTTON, button, 0]));
+    if (button === LEFT) this.tappedAt = performance.now();
   }
 
   private onWheel(e: WheelEvent): void {

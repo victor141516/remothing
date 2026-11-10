@@ -45,6 +45,8 @@ interface Status {
   cpu_percent: number;
   /** What plays to the clients, or what was tried to capture the sound. */
   sound: string;
+  /** Who has the session's microphone, and where it plays. */
+  microphone: string;
   clients: ClientStatus[];
   errors: { at_ms: number; context: string; message: string }[];
   /** What happened to each client's stream (path switches, cuts, losses, stutters). */
@@ -307,6 +309,8 @@ function renderStatus(s: Status) {
       h('dd', {}, bar(s.cpu_percent), `${s.cpu_percent.toFixed(1)} %`),
       h('dt', {}, 'Sound'),
       h('dd', {}, s.sound),
+      h('dt', {}, 'Microphone'),
+      h('dd', {}, s.microphone),
     ),
   );
 

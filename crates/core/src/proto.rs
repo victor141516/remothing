@@ -39,6 +39,12 @@ pub const S_DISPLAYS: u8 = 8;
 pub const S_AUDIO_INFO: u8 = 9;
 /// One encoded sound packet.
 pub const S_AUDIO: u8 = 10;
+/// UTF-8 JSON, the microphone as this client sees it: `{"state":"free"}`,
+/// `"busy"` (another client talks), `"active"` (`sink`: where it plays),
+/// `"install"` (`component`: `{name, notice, restart}` is missing on the
+/// server and can be installed), `"installing"`, `"restart"` (installed,
+/// the computer has to restart) or `"unavailable"` (`reason`, `tried`).
+pub const S_MIC_INFO: u8 = 11;
 
 // Client -> server
 /// client_ts f64 at offset 8; answered with S_PONG on the same path (the
@@ -86,6 +92,13 @@ pub const C_DISPLAY: u8 = 15;
 pub const C_TEXT: u8 = 16;
 /// on u8: send this client the session's sound (S_AUDIO_INFO, S_AUDIO) or stop.
 pub const C_AUDIO: u8 = 17;
+/// UTF-8 JSON about this client's microphone: `{"on":true,"codec":"opus"|
+/// "pcm","rate","channels"}` asks for the session's microphone (the first
+/// client to ask gets it), `{"on":false}` releases it, `{"install":true}`
+/// and `{"restart":true}` answer the S_MIC_INFO states of those names.
+pub const C_MIC_INFO: u8 = 18;
+/// One packet of the microphone, in the format given with C_MIC_INFO.
+pub const C_MIC: u8 = 19;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;

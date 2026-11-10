@@ -25,7 +25,14 @@
   #ui-bar { position: fixed; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px;
     align-items: center; padding: 6px; background: rgba(24,26,30,.95); border: 1px solid #454a54;
     border-radius: 6px; max-width: calc(100vw - 16px); flex-wrap: wrap; justify-content: center; z-index: 2; }
-  #ui-bar[hidden], #ui-clipboard[hidden], #ui-keyboard[hidden] { display: none; }
+  #ui-bar[hidden], #ui-clipboard[hidden], #ui-keyboard[hidden], #ui-prompt[hidden] { display: none; }
+  #ui button:disabled { opacity: .4; cursor: default; }
+  /* A question to the user (see Ui.ask). */
+  #ui-prompt { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 3;
+    width: min(480px, calc(100vw - 16px)); box-sizing: border-box; padding: 12px; text-align: right;
+    background: rgba(24,26,30,.97); border: 1px solid #454a54; border-radius: 6px; }
+  #ui-prompt p { margin: 0 0 10px; text-align: left; }
+  #ui-prompt button { margin-left: 6px; }
   #ui-bar select { max-width: 40vw; }
   #ui-clipboard { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 2;
     width: min(560px, calc(100vw - 16px)); }

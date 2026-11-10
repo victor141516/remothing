@@ -5,6 +5,7 @@
 
 import { Sound } from './audio';
 import { Input } from './input';
+import { Microphone } from './mic';
 import { Peer } from './peer';
 import { InputProber } from './probe';
 import { C_PING, S_PONG, now } from './proto';
@@ -79,6 +80,7 @@ const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
   selectDisplay: (id) => toWorker({ type: 'display', id }),
   toggleStats: () => (statsEl.hidden = !statsEl.hidden),
   toggleSound: () => sound.toggle(),
+  toggleMic: () => void mic.toggle(),
   layout,
 });
 
@@ -88,6 +90,15 @@ const sound = new Sound({
   changed: () => ui.sound(sound.playing, sound.status),
 });
 ui.sound(sound.playing, sound.status);
+
+const mic = new Microphone({
+  tell: (message) => toWorker({ type: 'mic', json: JSON.stringify(message) }),
+  send: (message) => toWorker({ type: 'micdata', buf: message.buffer as ArrayBuffer }, [message.buffer]),
+  log: (text) => toWorker({ type: 'event', text }),
+  ask: (question) => ui.ask(question),
+  changed: () => ui.microphone(mic.state, mic.status),
+});
+ui.microphone(mic.state, mic.status);
 
 // `?transport=ws` keeps everything on the WebSocket, `?transport=webrtc` uses
 // the data channel whenever it is up (comparisons, troubleshooting); by
@@ -205,6 +216,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'audio':
       sound.packet(m.buf);
+      break;
+    case 'micinfo':
+      mic.info(m.json);
       break;
   }
 };

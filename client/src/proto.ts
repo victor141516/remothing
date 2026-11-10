@@ -17,6 +17,8 @@ export const S_DISPLAYS = 8;
 export const S_AUDIO_INFO = 9;
 /** One encoded sound packet. */
 export const S_AUDIO = 10;
+/** UTF-8 JSON: this client's view of the session's microphone (`state`, see mic.ts). */
+export const S_MIC_INFO = 11;
 
 export const C_PING = 1;
 /** Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, n_lost x lost seq u32. */
@@ -46,6 +48,10 @@ export const C_DISPLAY = 15;
 export const C_TEXT = 16;
 /** on u8: send the session's sound, or stop. */
 export const C_AUDIO = 17;
+/** UTF-8 JSON: asks for the session's microphone, releases it, or answers its questions. */
+export const C_MIC_INFO = 18;
+/** One packet of this device's microphone. */
+export const C_MIC = 19;
 
 export const ENC_RAW = 0;
 export const ENC_LZ4 = 1;

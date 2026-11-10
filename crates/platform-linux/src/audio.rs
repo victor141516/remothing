@@ -39,6 +39,8 @@ const SERVER_START: Duration = Duration::from_secs(5);
 const WAIT: Duration = Duration::from_millis(100);
 /// What is kept of a helper's error output.
 const STDERR_KEPT: usize = 600;
+/// The sink of our own sound server, where the sessions' programs play.
+pub(crate) const OWN_SINK: &str = "remothing";
 
 /// The sound server started here, if any, and what was found instead.
 pub struct SoundServer {
@@ -82,6 +84,13 @@ impl SoundServer {
                 }
             }
         }
+        // Programs started from now on find the microphone as their default one.
+        if let Some(address) = &server.address {
+            match crate::microphone::prepare(address, OWN_SINK) {
+                Ok(()) => server.notes.push("virtual microphone remothing-mic created in it".into()),
+                Err(e) => server.notes.push(format!("virtual microphone: {e:#}")),
+            }
+        }
         for note in &server.notes {
             eprintln!("sound: {note}");
         }
@@ -91,6 +100,10 @@ impl SoundServer {
     /// For the programs of the sessions we start.
     pub fn address(&self) -> Option<&str> {
         self.address.as_deref()
+    }
+
+    pub(crate) fn pipewire_dir(&self) -> Option<&Path> {
+        self.pipewire_dir.as_deref()
     }
 
     fn start_pulseaudio(&mut self) -> Result<()> {
@@ -104,7 +117,8 @@ impl SoundServer {
             .args(["--high-priority=no", "--realtime=no", "--log-target=stderr", "--log-level=error"])
             .arg("-L")
             .arg(format!("module-native-protocol-unix socket={} auth-anonymous=1", socket.display()))
-            .args(["-L", "module-null-sink sink_name=remothing sink_properties=device.description=remothing"])
+            .arg("-L")
+            .arg(format!("module-null-sink sink_name={OWN_SINK} rate={AUDIO_RATE} sink_properties=device.description=remothing"))
             .env("XDG_RUNTIME_DIR", &dir);
         self.daemons.push(spawn_daemon(cmd, &log)?);
         wait_for_socket(&socket, &log)?;
@@ -269,7 +283,7 @@ fn wait_for_socket(socket: &Path, log: &Path) -> Result<()> {
     Ok(())
 }
 
-fn connects(socket: &Path) -> bool {
+pub(crate) fn connects(socket: &Path) -> bool {
     UnixStream::connect(socket).is_ok()
 }
 
@@ -282,7 +296,7 @@ fn tail(text: &str) -> String {
 /// Runtime directories where a user's sound server keeps its sockets: ours
 /// first, then every logged-in user's (a server run as root streams the
 /// desktop of another user).
-fn runtime_dirs() -> Vec<PathBuf> {
+pub(crate) fn runtime_dirs() -> Vec<PathBuf> {
     let own = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let mut dirs: Vec<PathBuf> = own.iter().cloned().collect();
     if let Ok(users) = std::fs::read_dir("/run/user") {
@@ -293,7 +307,7 @@ fn runtime_dirs() -> Vec<PathBuf> {
 
 /// PulseAudio-protocol servers that accept a connection: (`PULSE_SERVER`
 /// address, authentication cookie when it is another user's).
-fn pulse_servers() -> Vec<(String, Option<PathBuf>)> {
+pub(crate) fn pulse_servers() -> Vec<(String, Option<PathBuf>)> {
     let mut servers = Vec::new();
     if let Some(address) = std::env::var("PULSE_SERVER").ok().filter(|a| !a.is_empty()) {
         servers.push((address, None));

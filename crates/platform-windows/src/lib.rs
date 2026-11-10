@@ -12,6 +12,7 @@ mod dxgi;
 mod gpu_diff;
 mod input;
 mod keymap;
+mod microphone;
 mod monitor;
 pub mod service;
 mod uipi;
@@ -21,7 +22,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
-    AudioSource, Clipboard, DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor,
+    AudioSink, AudioSource, Clipboard, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform,
+    SystemMonitor,
 };
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -114,5 +116,17 @@ impl Platform for WindowsPlatform {
                 Err(e)
             }
         }
+    }
+
+    fn open_microphone(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSink>, MicUnavailable> {
+        Ok(Box::new(microphone::CableSink::open(tried)?))
+    }
+
+    fn install_microphone(&self) -> Result<()> {
+        microphone::install()
+    }
+
+    fn restart(&self) -> Result<()> {
+        microphone::restart()
     }
 }

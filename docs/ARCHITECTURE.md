@@ -160,7 +160,10 @@ coordinates, evdev key codes on the wire).
 - **Touch** (client, `input.ts`): a trackpad, on the picture and around it.
   One finger moves the pointer from where this client last put it, by as
   much as the finger travelled over the picture; a tap is a left click, a
-  tap with two fingers a right click, two fingers dragged scroll. The
+  tap with two fingers a right click, two fingers dragged scroll, and a
+  touch within 300 ms of a tap holds the left button until it ends (the
+  second click of a double click when it does not move, a drag when it
+  does). The
   server only ever gets absolute positions. The browser shows no cursor
   for a finger, so the remote cursor's shape (`S_CURSOR`) is drawn over
   the picture at that position.
@@ -229,6 +232,61 @@ After a second of plain zeros nothing is sent until something plays.
   asked for at the first one. No WebCodecs (plain HTTP): no sound, and the
   client says so.
 
+## Microphone
+
+The other direction: a client's microphone as the session's microphone
+(`mic.rs`). The browser records it (`getUserMedia`, with its echo
+cancellation, since the remote sound plays on the same page), an
+AudioWorklet hands over the samples and they go to the server on the
+WebSocket (`C_MIC`) as Opus (WebCodecs `AudioEncoder`, mono, 32 kbit/s,
+20 ms packets) or, where the browser cannot encode, as plain 16 kHz
+samples. The server decodes (FFmpeg's Opus decoder; plain samples are
+interpolated to 48 kHz) and plays into the platform's `AudioSink`, the
+virtual microphone that programs of the session record from.
+
+- **One talker, decided by the server**: the first `C_MIC_INFO {"on":true}`
+  to arrive gets the microphone (a compare-and-set on a watch channel that
+  every session follows). The others get `S_MIC_INFO` `busy`, which
+  disables their button, and `free` when it is released: switched off, or
+  the talker's connection ended. There is no server setting: the
+  microphone is always on offer and clients decide.
+- **Playout**: one thread per talker. Every 10 ms of the server's clock the
+  sink gets one piece: the client's sound when at least 60 ms were queued
+  (and until the queue runs out), silence otherwise. The client's clock
+  runs a little faster or slower than the server's; more than 250 ms queued
+  is cut back to 60 ms. A device fed evenly never runs dry.
+- **Linux** (`platform-linux/src/microphone.rs`): a null sink
+  `remothing-mic-sink` and the source `remothing-mic` over its monitor (a
+  remapped source: many programs leave monitors out of their microphone
+  list), made with `pactl`; `pacat` plays into the sink. In our own sound
+  server the pair exists from the start and is the default source. In
+  somebody else's it is made when a client starts talking and is the
+  default source meanwhile; the previous default comes back and the pair is
+  removed afterwards. PipeWire without pulseaudio-utils: `pw-loopback`
+  makes the pair and `pw-cat` plays into it (one virtual source node is
+  not enough: the session manager links players to sinks only).
+- **Windows** (`platform-windows/src/microphone.rs`): there is no way to
+  make a microphone without a kernel driver, and a driver only loads with
+  Microsoft's signature, which no open-source virtual cable has today. So
+  VB-CABLE is used (VB-Audio, donationware, www.vb-cable.com; its licence
+  allows other applications to install its package as it is when its
+  origin is shown): the server plays into `CABLE Input` with WASAPI (or
+  into `CABLE In 16ch`, the same cable's other playing end, when the first
+  refuses: seen right after installing, before a restart) and programs
+  record `CABLE Output`, which is made the default recording device while
+  a client talks (the undocumented `IPolicyConfig`, as the Sound control
+  panel does) and put back afterwards.
+- **Installing it** only happens when a client asks. Without the cable the
+  talker gets `install` with what is missing and whose it is; the client
+  asks the user, warning that the server will want administrator consent
+  and may have to restart. On yes the server downloads the package from
+  VB-Audio, checks it against the SHA-256 this build knows, and runs its
+  setup elevated (`ShellExecute` "runas": Windows asks on the server's own
+  screen unless remothing runs elevated). Playback and recording defaults
+  are put back if the new device took them. Then the cable is opened; if
+  it only appears after a restart, the client offers to restart the
+  computer (`restart`). An installed cable is simply used.
+
 ## Transport: WebSocket and WebRTC data channel
 
 The WebSocket is always there: signaling, HELLO, cursor, pongs, and frames
@@ -291,14 +349,17 @@ HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
 PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME), CLIPBOARD
 (text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
-there is no sound), AUDIO (one encoded packet); client → server PING, ACK
-(with client hold time and lost frames), KEYFRAME request (with the newest
-frame received: requests the last keyframe already answers are ignored,
-since the client sends one per undecodable frame), STATS (JSON for the
-admin UI), SIGNAL, HELLO_ACK, VISIBLE (a hidden tab gets no frames; changes
-accumulate into one frame for when it shows again), EVENT (text for the
-event log), CLIPBOARD, DISPLAYS, DISPLAY, AUDIO (on/off), MOVE, BUTTON,
-WHEEL, KEY, TEXT.
+there is no sound), AUDIO (one encoded packet), MIC_INFO (JSON: the
+microphone is free, taken, playing, needs something installed, needs a
+restart, or why not); client → server PING, ACK (with client hold time and
+lost frames), KEYFRAME request (with the newest frame received: requests
+the last keyframe already answers are ignored, since the client sends one
+per undecodable frame), STATS (JSON for the admin UI), SIGNAL, HELLO_ACK,
+VISIBLE (a hidden tab gets no frames; changes accumulate into one frame for
+when it shows again), EVENT (text for the event log), CLIPBOARD, DISPLAYS,
+DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
+it, agree to install or restart), MIC (one packet), MOVE, BUTTON, WHEEL,
+KEY, TEXT.
 
 ## Admin
 

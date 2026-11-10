@@ -11,6 +11,7 @@ pub mod capture;
 pub mod config;
 pub mod encode;
 pub mod geom;
+pub mod mic;
 pub mod pixels;
 pub mod pacer;
 pub mod platform;

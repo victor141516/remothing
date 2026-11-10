@@ -33,6 +33,8 @@ pub trait EncoderProvider: Send + Sync {
     /// Sound encoder for the platform's audio format, the best codec this
     /// build has. Every codec tried goes to `tried` with its outcome.
     fn audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioEncoder>>;
+    /// Decoder for Opus packets of `channels` channels (a client's microphone).
+    fn opus_decoder(&self, channels: usize) -> Result<Box<dyn AudioDecoder>>;
 }
 
 pub trait VideoEncoder: Send {
@@ -66,4 +68,10 @@ pub trait AudioEncoder: Send {
     /// Encodes one frame of interleaved samples and appends the packet to
     /// `out`; false while the encoder still needs input for its first one.
     fn encode(&mut self, pcm: &[i16], out: &mut Vec<u8>) -> Result<bool>;
+}
+
+pub trait AudioDecoder: Send {
+    /// Decodes one packet and appends its samples to `out` in the
+    /// platform's audio format (interleaved, `AUDIO_CHANNELS` at `AUDIO_RATE`).
+    fn decode(&mut self, packet: &[u8], out: &mut Vec<i16>) -> Result<()>;
 }

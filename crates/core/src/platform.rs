@@ -21,6 +21,18 @@ pub trait Platform: Send + Sync + 'static {
     /// Opens the capture of what the session plays. Every path tried goes
     /// to `tried` with its outcome, so the log tells why there is no sound.
     fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>>;
+    /// Opens the session's virtual microphone: what is written to it is
+    /// what programs recording from the microphone hear. `tried` as above.
+    fn open_microphone(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSink>, MicUnavailable>;
+    /// Installs the component a [`MicUnavailable::Install`] named. The
+    /// system asks whoever is at the server for consent where it needs one.
+    fn install_microphone(&self) -> Result<()> {
+        bail!("nothing to install on this platform")
+    }
+    /// Restarts the computer, after an installation that needs it.
+    fn restart(&self) -> Result<()> {
+        bail!("restarting is not supported on this platform")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -173,6 +185,34 @@ pub trait AudioSource: Send {
     /// of a second when there is nothing: some paths deliver nothing while
     /// nothing plays.
     fn read(&mut self, out: &mut Vec<i16>) -> Result<()>;
+}
+
+/// The session's virtual microphone, fed in the format of [`AudioSource`].
+pub trait AudioSink: Send {
+    /// Where the samples go, for the log and the client.
+    fn name(&self) -> String;
+    /// Plays samples at once. Called in real time; what does not fit is dropped.
+    fn write(&mut self, pcm: &[i16]) -> Result<()>;
+}
+
+/// Why there is no virtual microphone.
+pub enum MicUnavailable {
+    /// A component is missing that [`Platform::install_microphone`] installs.
+    Install(MicComponent),
+    /// The component is installed but only works after a restart.
+    Restart,
+    /// Nothing worked; `tried` tells what.
+    Failed,
+}
+
+/// Something the virtual microphone needs installed on the server.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct MicComponent {
+    pub name: &'static str,
+    /// Whose it is and on what terms, for whoever decides to install it.
+    pub notice: &'static str,
+    /// Installing it may need the computer restarted.
+    pub restart: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

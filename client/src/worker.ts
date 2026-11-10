@@ -17,9 +17,10 @@ import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_PING, C_SIGNAL, C_STATS,
-  C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
-  RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_PONG, S_SIGNAL, now,
+  C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
+  C_STATS, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN,
+  RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
+  S_SIGNAL, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { Recorder, type Batch } from './stats';
@@ -45,7 +46,10 @@ export type ToWorker =
   /** Ask the server for the session's sound, or to stop sending it. */
   | { type: 'audio'; on: boolean }
   /** Text for the server's event log. */
-  | { type: 'event'; text: string };
+  | { type: 'event'; text: string }
+  /** About this device's microphone: a C_MIC_INFO as JSON, or a complete C_MIC message. */
+  | { type: 'mic'; json: string }
+  | { type: 'micdata'; buf: ArrayBuffer };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
@@ -62,7 +66,9 @@ export type FromWorker =
   | { type: 'displays'; json: string }
   /** The sound stream, or why there is none (S_AUDIO_INFO), and its packets (S_AUDIO). */
   | { type: 'audioinfo'; json: string }
-  | { type: 'audio'; buf: ArrayBuffer };
+  | { type: 'audio'; buf: ArrayBuffer }
+  /** How the server sees this client's microphone (S_MIC_INFO). */
+  | { type: 'micinfo'; json: string };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -598,6 +604,9 @@ function connect(url: string): void {
       case S_AUDIO:
         post({ type: 'audio', buf }, [buf]);
         break;
+      case S_MIC_INFO:
+        post({ type: 'micinfo', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
+        break;
       case S_HELLO: {
         const width = v.getUint32(4, true);
         const height = v.getUint32(8, true);
@@ -685,6 +694,12 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       break;
     case 'event':
       sendText(C_EVENT, m.text);
+      break;
+    case 'mic':
+      sendText(C_MIC_INFO, m.json);
+      break;
+    case 'micdata':
+      send(new Uint8Array(m.buf));
       break;
     case 'wsrtt':
       wsRtts.push(m.rtt);

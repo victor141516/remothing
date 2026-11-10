@@ -9,3 +9,7 @@ gpu-interop.workspace = true
 remothing-core.workspace = true
 toml = "0.8"
 windows.workspace = true
+# VB-CABLE's package is checked against a known hash before it is run.
+sha2 = "0.10"
+# The `#[interface]` macro (IPolicyConfig) names this crate directly.
+windows-core = "0.61"

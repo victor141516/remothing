@@ -22,7 +22,8 @@ libavutil-dev libswscale-dev`), `libxcb1-dev`, clang (bindgen) and, at runtime,
 `Xvfb`, `setxkbmap` and an X server for real displays. Sound needs `parec`
 (`pulseaudio-utils`) or `pw-record` to record the sound server in use, and
 `pulseaudio` (or PipeWire with WirePlumber, pipewire-pulse and
-`dbus-daemon`) where none runs, as in a container.
+`dbus-daemon`) where none runs, as in a container. The microphone needs
+`pactl` and `pacat` (`pulseaudio-utils`), or `pw-loopback` and `pw-cat`.
 
 ```sh
 cargo build --release -p remothing -p rt-testapp
@@ -71,8 +72,9 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   client holds is released if it disconnects.
 - On a phone or tablet the screen works as a trackpad: one finger moves the
   pointer, a tap clicks, a tap with two fingers is the right button, two
-  fingers dragged scroll. `Type` in the controls opens the device's own
-  keyboard.
+  fingers dragged scroll, and a tap followed at once by another touch holds
+  the button for as long as that touch lasts (double click, or drag).
+  `Type` in the controls opens the device's own keyboard.
 - Sound: what the remote session plays is sent along (Opus) and starts with
   the first click or key in the page; `Sound` in the controls switches it
   and its tooltip tells whether it plays or why not (so does the last line
@@ -80,6 +82,17 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   Windows: whatever plays on the default playback device. Linux: the
   PulseAudio or PipeWire server in use, or one started by remothing for
   the programs of its simulated displays.
+- Microphone: `Mic` in the controls (pages served over HTTPS or localhost)
+  sends this device's microphone to the remote session, where programs
+  hear it as their microphone. One client talks at a time; for the others
+  the button is disabled meanwhile. Linux: a virtual source
+  `remothing-mic` in the sound server. Windows: through
+  [VB-CABLE](https://www.vb-cable.com), a virtual audio cable by VB-Audio
+  (donationware: free to use, donations to its author welcome). If it is
+  not installed, the client offers to install it: remothing downloads the
+  package from VB-Audio and runs its setup, Windows asks for administrator
+  permission on the server's screen, and a restart may be needed. Programs
+  record `CABLE Output`, the default microphone while a client talks.
 - A stream starts at 5 Mbit/s and rises within the first second or two as
   far as the link carries, so a slow link is not flooded on connect.
 - Admin UI: `http://127.0.0.1:8081/` (login with the admin token or

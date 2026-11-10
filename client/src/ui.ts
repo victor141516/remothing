@@ -32,6 +32,8 @@ export interface UiActions {
   toggleStats(): void;
   /** Switches the remote session's sound on or off. */
   toggleSound(): void;
+  /** Switches this device's microphone into the remote session, or out of it. */
+  toggleMic(): void;
   /** The space left for the picture changed (the keyboard opened or closed). */
   layout(): void;
 }
@@ -46,6 +48,10 @@ export class Ui {
   private readonly keyboard: OnScreenKeyboard;
   private readonly fullscreenButton: HTMLButtonElement;
   private readonly soundButton: HTMLButtonElement;
+  private readonly micButton: HTMLButtonElement;
+  private readonly prompt = document.createElement('div');
+  /** Answers the question on screen, if there is one. */
+  private answer: ((yes: boolean) => void) | null = null;
   private clipboardTimer = 0;
 
   constructor(root: HTMLElement, actions: UiActions) {
@@ -96,16 +102,22 @@ export class Ui {
     // Only with a touch screen: a computer has its keyboard already.
     typeButton.hidden = navigator.maxTouchPoints === 0;
     this.soundButton = this.button('Sound', '', actions.toggleSound);
+    this.micButton = this.button('Mic', '', actions.toggleMic);
+    // Browsers only give the microphone to secure pages.
+    this.micButton.hidden = navigator.mediaDevices?.getUserMedia === undefined;
     this.bar.append(
       this.fullscreenButton,
       this.displaySelect,
       clipboardButton,
       this.soundButton,
+      this.micButton,
       typeButton,
       keyboardButton,
       this.button('Stats', 'Latency overlay', actions.toggleStats),
     );
-    root.append(handle, this.bar, clipboardPanel, textEntry.element, this.keyboard.element);
+    this.prompt.id = 'ui-prompt';
+    this.prompt.hidden = true;
+    root.append(handle, this.bar, clipboardPanel, this.prompt, textEntry.element, this.keyboard.element);
 
     document.addEventListener('fullscreenchange', () => {
       const on = document.fullscreenElement !== null;
@@ -129,6 +141,34 @@ export class Ui {
   sound(playing: boolean, status: string): void {
     this.soundButton.classList.toggle('on', playing);
     this.soundButton.title = `Sound of the remote session: ${status}`;
+  }
+
+  /** This device's microphone in the remote session (`Microphone.state`), and why. */
+  microphone(state: 'off' | 'pending' | 'on' | 'taken', status: string): void {
+    this.micButton.classList.toggle('on', state === 'on');
+    // Another client talks: nothing to switch.
+    this.micButton.disabled = state === 'taken';
+    this.micButton.title = `This device's microphone as the remote one: ${status}`;
+  }
+
+  /** Asks a yes/no question over the stream; a newer question answers the old one with no. */
+  ask(question: string): Promise<boolean> {
+    this.answer?.(false);
+    const text = document.createElement('p');
+    text.textContent = question;
+    this.prompt.replaceChildren(
+      text,
+      this.button('Yes', '', () => this.answer?.(true)),
+      this.button('No', '', () => this.answer?.(false)),
+    );
+    this.prompt.hidden = false;
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    this.answer = (yes) => {
+      this.answer = null;
+      this.prompt.hidden = true;
+      resolve(yes);
+    };
+    return promise;
   }
 
   displays(list: DisplayEntry[], current: string | null): void {

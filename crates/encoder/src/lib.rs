@@ -13,7 +13,7 @@ mod ffmpeg;
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ff;
-use remothing_core::encode::{AudioEncoder, EncoderProvider, EncoderRequest, VideoEncoder};
+use remothing_core::encode::{AudioDecoder, AudioEncoder, EncoderProvider, EncoderRequest, VideoEncoder};
 
 use crate::ffmpeg::{FfmpegEncoder, InputKind};
 
@@ -174,5 +174,9 @@ impl EncoderProvider for FfmpegEncoders {
             }
         }
         Err(anyhow!("no sound encoder in this FFmpeg build"))
+    }
+
+    fn opus_decoder(&self, channels: usize) -> Result<Box<dyn AudioDecoder>> {
+        Ok(Box::new(audio::FfmpegOpusDecoder::open(channels)?))
     }
 }

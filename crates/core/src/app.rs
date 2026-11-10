@@ -15,6 +15,7 @@ use crate::assets;
 use crate::audio::AudioHub;
 use crate::capture::{CaptureLoop, DisplayControl};
 use crate::config::{ConfigFile, Settings};
+use crate::mic::MicHub;
 use crate::platform::Platform;
 use crate::shared::Shared;
 use crate::stream;
@@ -26,6 +27,7 @@ pub struct App {
     pub control: Arc<DisplayControl>,
     pub telemetry: Arc<Telemetry>,
     pub audio: Arc<AudioHub>,
+    pub mic: Arc<MicHub>,
     pub settings: RwLock<Settings>,
     pub config: ConfigFile,
     pub keyboard_layout: Arc<RwLock<String>>,
@@ -77,6 +79,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         control: Arc::new(DisplayControl::default()),
         telemetry: telemetry.clone(),
         audio: AudioHub::new(platform.clone(), telemetry.clone()),
+        mic: MicHub::new(platform.clone(), telemetry.clone()),
         keyboard_layout: Arc::new(RwLock::new(settings.input.keyboard_layout.clone())),
         settings: RwLock::new(settings.clone()),
         config,

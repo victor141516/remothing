@@ -260,3 +260,30 @@ Chromium (pieces handed to the AudioContext, measured in the page):
 With FFmpeg built without libopus the same Windows capture went out as AAC
 (141 kbit/s measured). The ALSA loopback path was not exercised (no
 snd-aloop module in the test kernel).
+
+## Microphone
+
+A sine as the client's microphone (a synthetic `MediaStream` in headless
+Chromium), recorded for 3-6 s by a program on the server from the default
+microphone:
+
+| server | path | sent as | tone recorded |
+|---|---|---|---|
+| Linux container | own PulseAudio: `remothing-mic`, `pacat` | Opus | 2.99 s of 3.00 at 440 Hz, level as sent |
+| Linux container | the same | plain 16 kHz samples | 2.99 s of 2.99 at 660 Hz |
+| Linux, PipeWire only | own PipeWire, `pactl` + `pacat` via pipewire-pulse | Opus | 3.07 s of 3.07 at 440 Hz |
+| Linux, PipeWire without pulseaudio-utils | `pw-loopback` + `pw-cat` | Opus | 2.98 s of 2.99 at 440 Hz |
+| Linux, a user's PulseAudio with its own default microphone, server as root | pair added while talking, default source switched and put back | Opus | 2.98 s of 2.99 (pitch read as 453 Hz: that server resamples between 44.1 and 48 kHz) |
+| Windows 11 | VB-CABLE (`CABLE In 16ch` → `CABLE Output`) | Opus | 5.99 s of 6.00 at 435-440 Hz, level as sent |
+| Windows 11 | the same | plain 16 kHz samples | 5.99 s of 6.00 at 660 Hz |
+
+A second client's button was disabled while the first talked and enabled
+when it stopped or its tab closed. On Windows the cable was installed from
+the client's question (13 s, with the administrator prompt accepted on the
+server): its two-channel playing end refused to open before any restart
+(0x8889000A) and the 16-channel end of the same cable was used; the default
+playback device, which the new cable had taken, was put back. The default
+recording device was `CABLE Output` while a client talked and the previous
+one afterwards. The restart offer (cable installed but not there yet) did
+not come up and was not exercised. Latency from mouth to program was not
+measured.

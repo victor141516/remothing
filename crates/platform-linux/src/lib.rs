@@ -9,6 +9,7 @@ mod audio;
 mod clipboard;
 mod cursor;
 mod input;
+mod microphone;
 mod monitor;
 mod x11;
 mod xfb;
@@ -20,7 +21,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
-    AudioSource, Clipboard, DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor, VirtualDisplays,
+    AudioSink, AudioSource, Clipboard, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform,
+    SystemMonitor, VirtualDisplays,
 };
 
 use crate::audio::SoundServer;
@@ -159,5 +161,9 @@ impl Platform for LinuxPlatform {
 
     fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>> {
         self.sound.open(tried)
+    }
+
+    fn open_microphone(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSink>, MicUnavailable> {
+        microphone::open(&self.sound, tried)
     }
 }

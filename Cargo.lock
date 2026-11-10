@@ -1695,8 +1695,10 @@ dependencies = [
  "anyhow",
  "gpu-interop",
  "remothing-core",
+ "sha2 0.10.9",
  "toml",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -26,10 +26,10 @@ const WAIT: Duration = Duration::from_millis(100);
 const DEVICE_CHECK: Duration = Duration::from_secs(2);
 
 /// COM on the calling thread for as long as this lives.
-struct Com(bool);
+pub(crate) struct Com(bool);
 
 impl Com {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // SAFETY: no preconditions. An error means the thread already has
         // COM in another mode, which works as well and is not ours to undo.
         Self(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
@@ -60,13 +60,34 @@ pub struct Loopback {
 // used by the audio thread, which also opened them.
 unsafe impl Send for Loopback {}
 
-fn endpoint_id(device: &IMMDevice) -> Result<String> {
+pub(crate) fn endpoint_id(device: &IMMDevice) -> Result<String> {
     // SAFETY: GetId returns a string allocated for the caller to free.
     unsafe {
         let id = device.GetId()?;
         let text = id.to_string();
         CoTaskMemFree(Some(id.0.cast()));
         Ok(text?)
+    }
+}
+
+/// The name Windows shows for an endpoint, e.g. "Speakers (Some Device)".
+pub(crate) fn friendly_name(device: &IMMDevice) -> Option<String> {
+    // SAFETY: COM calls on a valid device.
+    let name = unsafe { device.OpenPropertyStore(STGM_READ).and_then(|store| store.GetValue(&PKEY_Device_FriendlyName)) };
+    name.ok().map(|name| name.to_string())
+}
+
+/// Our sample format, as WASAPI wants it described.
+pub(crate) fn wave_format() -> WAVEFORMATEX {
+    let block = (AUDIO_CHANNELS * size_of::<i16>()) as u16;
+    WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: AUDIO_CHANNELS as u16,
+        nSamplesPerSec: AUDIO_RATE,
+        nAvgBytesPerSec: AUDIO_RATE * u32::from(block),
+        nBlockAlign: block,
+        wBitsPerSample: 16,
+        cbSize: 0,
     }
 }
 
@@ -79,21 +100,9 @@ impl Loopback {
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).context("audio device enumerator")?;
             let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).context("no playback device")?;
             let device_id = endpoint_id(&device)?;
-            let name = device
-                .OpenPropertyStore(STGM_READ)
-                .and_then(|store| store.GetValue(&PKEY_Device_FriendlyName))
-                .map_or_else(|_| device_id.clone(), |name| name.to_string());
+            let name = friendly_name(&device).unwrap_or_else(|| device_id.clone());
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).context("open the playback device")?;
-            let block = (AUDIO_CHANNELS * size_of::<i16>()) as u16;
-            let format = WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_PCM as u16,
-                nChannels: AUDIO_CHANNELS as u16,
-                nSamplesPerSec: AUDIO_RATE,
-                nAvgBytesPerSec: AUDIO_RATE * u32::from(block),
-                nBlockAlign: block,
-                wBitsPerSample: 16,
-                cbSize: 0,
-            };
+            let format = wave_format();
             let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
             client
                 .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_HNS, 0, &format, None)

@@ -1,12 +1,12 @@
-//! Sound encoder through FFmpeg: Opus (libopus) where the build has it, the
-//! built-in AAC encoder otherwise.
+//! Sound through FFmpeg. Encoding: Opus (libopus) where the build has it,
+//! the built-in AAC encoder otherwise. Decoding: Opus (a client's microphone).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ff::format::sample::Type;
 use ff::format::Sample;
 use ffmpeg_next as ff;
-use remothing_core::encode::AudioEncoder;
-use remothing_core::platform::AUDIO_RATE;
+use remothing_core::encode::{AudioDecoder, AudioEncoder};
+use remothing_core::platform::{AUDIO_CHANNELS, AUDIO_RATE};
 
 /// Transparent for music with either codec at two channels.
 const BITRATE: usize = 128_000;
@@ -127,5 +127,55 @@ impl AudioEncoder for FfmpegAudio {
         }
         out.extend_from_slice(self.packet.data().unwrap_or_default());
         Ok(true)
+    }
+}
+
+pub(crate) struct FfmpegOpusDecoder {
+    dec: ff::decoder::Audio,
+    frame: ff::frame::Audio,
+}
+
+// SAFETY: as for the encoder; used by the microphone thread only.
+unsafe impl Send for FfmpegOpusDecoder {}
+
+impl FfmpegOpusDecoder {
+    pub(crate) fn open(channels: usize) -> Result<Self> {
+        let codec = ff::decoder::find(ff::codec::Id::OPUS).ok_or_else(|| anyhow!("no Opus decoder in this FFmpeg build"))?;
+        let mut ctx = ff::codec::context::Context::new_with_codec(codec);
+        // SAFETY: plain fields of a context that is not opened yet. Bare
+        // Opus packets carry no header, so the decoder is told what to expect.
+        unsafe {
+            (*ctx.as_mut_ptr()).sample_rate = AUDIO_RATE as i32;
+            ff::ffi::av_channel_layout_default(&raw mut (*ctx.as_mut_ptr()).ch_layout, channels as i32);
+        }
+        let dec = ctx.decoder().open_as(codec).context("open the Opus decoder")?.audio()?;
+        Ok(Self { dec, frame: ff::frame::Audio::empty() })
+    }
+}
+
+impl AudioDecoder for FfmpegOpusDecoder {
+    fn decode(&mut self, packet: &[u8], out: &mut Vec<i16>) -> Result<()> {
+        self.dec.send_packet(&ff::Packet::borrow(packet))?;
+        while self.dec.receive_frame(&mut self.frame).is_ok() {
+            let samples = self.frame.samples();
+            // One channel goes to both sides.
+            let right = usize::from(self.frame.channels()).min(AUDIO_CHANNELS) - 1;
+            match self.frame.format() {
+                Sample::F32(Type::Planar) => {
+                    let (left, right) = (self.frame.plane::<f32>(0), self.frame.plane::<f32>(right));
+                    for (l, r) in left.iter().zip(right).take(samples) {
+                        out.extend([l, r].map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
+                    }
+                }
+                Sample::I16(Type::Packed) if right == 0 => {
+                    out.extend(self.frame.plane::<i16>(0).iter().take(samples).flat_map(|&s| [s, s]));
+                }
+                Sample::I16(Type::Packed) => {
+                    out.extend(self.frame.plane::<(i16, i16)>(0).iter().take(samples).flat_map(|&(l, r)| [l, r]));
+                }
+                other => bail!("the Opus decoder gave samples as {other:?}"),
+            }
+        }
+        Ok(())
     }
 }
