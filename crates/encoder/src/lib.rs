@@ -84,7 +84,8 @@ impl FfmpegEncoders {
     /// status and fallback choices reflect what this machine can actually run.
     pub fn new() -> Result<Self> {
         ff::init()?;
-        ff::util::log::set_level(ff::util::log::Level::Error);
+        // Missing vendor runtimes are expected while probing; the reason is kept per backend.
+        ff::util::log::set_level(ff::util::log::Level::Quiet);
         let mut available = Vec::new();
         let mut unavailable = Vec::new();
         for b in ALL {
@@ -96,6 +97,7 @@ impl FfmpegEncoders {
                 Err(e) => unavailable.push((b.name().to_string(), format!("{e:#}"))),
             }
         }
+        ff::util::log::set_level(ff::util::log::Level::Error);
         Ok(Self { available, unavailable, overrides: Vec::new() })
     }
 
