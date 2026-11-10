@@ -1,0 +1,141 @@
+//! Linux providers: simulated displays (Xvfb + shared memory + XDamage) and
+//! real X11 displays (RandR outputs, XShm + XDamage); XTest input, XFixes
+//! cursor. The encoder provider is injected by the binary.
+//! Wayland sessions are not supported (would need PipeWire/portal or KMS).
+#![cfg(target_os = "linux")]
+
+mod cursor;
+mod input;
+mod monitor;
+mod x11;
+mod xfb;
+mod xvfb;
+mod xvfb_session;
+
+use std::sync::Arc;
+
+use anyhow::{bail, Context, Result};
+use remothing_core::encode::EncoderProvider;
+use remothing_core::platform::{
+    DisplayInfo, DisplayProvider, OpenedDisplay, Platform, SystemMonitor, VirtualDisplays,
+};
+
+use crate::input::XTestInput;
+use crate::monitor::LinuxMonitor;
+use crate::xvfb::XvfbManager;
+use crate::xvfb_session::XvfbSession;
+
+/// `[platform]` options of the config file.
+#[derive(Default)]
+pub struct LinuxOptions {
+    /// Existing X servers to expose as real displays (default: `$DISPLAY`).
+    pub x11_displays: Vec<String>,
+    /// Command started inside every new simulated display (`sh -c`).
+    pub session_command: Option<String>,
+    /// Simulated display created at startup, e.g. (1920, 1080).
+    pub virtual_on_start: Option<(u32, u32)>,
+}
+
+impl LinuxOptions {
+    pub fn from_table(t: &toml::Table) -> Result<Self> {
+        let mut o = Self::default();
+        match t.get("x11_displays") {
+            Some(v) => {
+                let list = v.as_array().context("platform.x11_displays must be a list")?;
+                for d in list {
+                    o.x11_displays.push(d.as_str().context("platform.x11_displays entries are strings")?.into());
+                }
+            }
+            None => o.x11_displays.extend(std::env::var("DISPLAY").ok().filter(|d| !d.is_empty())),
+        }
+        o.session_command = t.get("session_command").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(Into::into);
+        if let Some(size) = t.get("virtual_on_start").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            let (w, h) = size.split_once('x').context("platform.virtual_on_start must be WIDTHxHEIGHT")?;
+            o.virtual_on_start = Some((w.parse()?, h.parse()?));
+        }
+        Ok(o)
+    }
+}
+
+pub struct LinuxDisplays {
+    xvfb: XvfbManager,
+    x11_displays: Vec<String>,
+}
+
+impl DisplayProvider for LinuxDisplays {
+    fn provider_name(&self) -> String {
+        "xvfb (shm + xdamage) / x11 (xshm + xdamage)".into()
+    }
+
+    fn list(&self) -> Result<Vec<DisplayInfo>> {
+        let mut out: Vec<DisplayInfo> = Vec::new();
+        for d in &self.x11_displays {
+            match x11::list(d) {
+                Ok(list) => out.extend(list),
+                Err(e) => eprintln!("x11 display {d}: {e:#}"),
+            }
+        }
+        out.extend(self.xvfb.list().iter().map(|i| i.info()));
+        Ok(out)
+    }
+
+    fn open(&self, id: &str) -> Result<OpenedDisplay> {
+        if let Some(instance) = self.xvfb.get(id) {
+            let display = instance.display();
+            let capture = XvfbSession::open(&display, instance.shmid, instance.clone())?;
+            let input = Arc::new(XTestInput::new(&display, (0, 0))?);
+            return Ok(OpenedDisplay { info: instance.info(), capture: Box::new(capture), input });
+        }
+        if let Some(rest) = id.strip_prefix("x11:") {
+            // id = "x11:<display>:<output>"; the display itself may contain ':'.
+            let display = self.x11_displays.iter().find(|d| rest.starts_with(&format!("{d}:"))).context("unknown X display")?;
+            let info = x11::list(display)?.into_iter().find(|i| i.id == id).context("output no longer active")?;
+            let capture = x11::X11Session::open(display, &info)?;
+            let input = Arc::new(XTestInput::new(display, (info.x, info.y))?);
+            return Ok(OpenedDisplay { info, capture: Box::new(capture), input });
+        }
+        bail!("unknown display {id}")
+    }
+
+    fn virtual_displays(&self) -> Option<&dyn VirtualDisplays> {
+        Some(&self.xvfb)
+    }
+}
+
+pub struct LinuxPlatform {
+    displays: LinuxDisplays,
+    encoders: Box<dyn EncoderProvider>,
+    monitor: LinuxMonitor,
+}
+
+impl LinuxPlatform {
+    pub fn new(options: LinuxOptions, encoders: Box<dyn EncoderProvider>) -> Result<Self> {
+        let p = Self {
+            displays: LinuxDisplays { xvfb: XvfbManager::new(options.session_command), x11_displays: options.x11_displays },
+            encoders,
+            monitor: LinuxMonitor::new(),
+        };
+        if let Some((w, h)) = options.virtual_on_start {
+            p.displays.xvfb.create(w, h)?;
+        }
+        Ok(p)
+    }
+}
+
+impl Platform for LinuxPlatform {
+    fn name(&self) -> &'static str {
+        "linux"
+    }
+
+    fn displays(&self) -> &dyn DisplayProvider {
+        &self.displays
+    }
+
+    fn encoders(&self) -> &dyn EncoderProvider {
+        self.encoders.as_ref()
+    }
+
+    fn monitor(&self) -> &dyn SystemMonitor {
+        &self.monitor
+    }
+}

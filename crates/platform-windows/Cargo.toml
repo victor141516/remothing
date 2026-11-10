@@ -1,0 +1,11 @@
+[package]
+name = "remothing-platform-windows"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+gpu-interop.workspace = true
+remothing-core.workspace = true
+toml = "0.8"
+windows.workspace = true

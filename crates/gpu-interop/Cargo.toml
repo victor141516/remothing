@@ -1,0 +1,9 @@
+[package]
+name = "gpu-interop"
+version.workspace = true
+edition.workspace = true
+description = "GPU surface types shared by capture providers and encoders of the same platform"
+
+[target.'cfg(windows)'.dependencies]
+parking_lot = "0.12"
+windows.workspace = true

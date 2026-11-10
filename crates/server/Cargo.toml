@@ -1,0 +1,25 @@
+[package]
+name = "remothing"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "remothing"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+remothing-core.workspace = true
+remothing-encoder.workspace = true
+toml = "0.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+remothing-platform-linux = { path = "../platform-linux" }
+
+[target.'cfg(windows)'.dependencies]
+remothing-platform-windows = { path = "../platform-windows" }
+
+[features]
+# Statically linked FFmpeg (Windows release builds via vcpkg).
+static-ffmpeg = ["remothing-encoder/static"]

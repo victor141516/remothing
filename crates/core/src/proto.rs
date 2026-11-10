@@ -1,8 +1,14 @@
 //! Binary wire protocol. All integers little-endian. Mirrored in `client/src/proto.ts`.
+//! Identical on every platform.
+
+use crate::platform::CursorState;
 
 // Server -> client
+/// width u32, height u32, tile u32 (at offsets 4/8/12). Sent on connect and
+/// whenever the streamed display changes; the client resets its layers and decoder.
 pub const S_HELLO: u8 = 1;
 pub const S_FRAME: u8 = 2;
+/// w u16, h u16, xhot u16, yhot u16, pad u16, RGBA. w = h = 0 hides the cursor.
 pub const S_CURSOR: u8 = 3;
 pub const S_PONG: u8 = 4;
 
@@ -11,6 +17,8 @@ pub const C_PING: u8 = 1;
 pub const C_ACK: u8 = 2;
 /// Client decoder lost sync and needs an IDR frame.
 pub const C_KEYFRAME: u8 = 3;
+/// UTF-8 JSON with the client's measured stats (shown in the admin UI).
+pub const C_STATS: u8 = 4;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
 pub const C_WHEEL: u8 = 12;
@@ -57,14 +65,16 @@ pub fn pong(client_ts: f64) -> Vec<u8> {
     m
 }
 
-/// Cursor image as straight-alpha RGBA.
-pub fn cursor(w: u16, h: u16, xhot: u16, yhot: u16, rgba: &[u8]) -> Vec<u8> {
+pub fn cursor(state: &CursorState) -> Vec<u8> {
+    let (w, h, xhot, yhot, rgba): (u32, u32, u32, u32, &[u8]) = match state {
+        CursorState::Hidden => (0, 0, 0, 0, &[]),
+        CursorState::Visible(s) => (s.width, s.height, s.hot_x, s.hot_y, &s.rgba),
+    };
     let mut m = Vec::with_capacity(12 + rgba.len());
     m.extend_from_slice(&[S_CURSOR, 0]);
-    m.extend_from_slice(&w.to_le_bytes());
-    m.extend_from_slice(&h.to_le_bytes());
-    m.extend_from_slice(&xhot.to_le_bytes());
-    m.extend_from_slice(&yhot.to_le_bytes());
+    for v in [w, h, xhot, yhot] {
+        m.extend_from_slice(&(v as u16).to_le_bytes());
+    }
     m.extend_from_slice(&[0, 0]);
     m.extend_from_slice(rgba);
     m

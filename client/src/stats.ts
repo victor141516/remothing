@@ -116,6 +116,21 @@ export class Stats {
     };
   }
 
+  /** Recent p50/p99 (ms) of the main latencies, reported to the server for the admin UI. */
+  brief(): Record<string, [number, number] | null> {
+    const pair = (s: Series): [number, number] | null => {
+      const x = s.summary(OVERLAY_WINDOW);
+      return x.n ? [+x.p50.toFixed(2), +x.p99.toFixed(2)] : null;
+    };
+    return {
+      captureToDraw: pair(this.series.total),
+      appToDraw: pair(this.series.appToDraw),
+      inputRtt: pair(this.inputRtt),
+      network: pair(this.series.net),
+      decode: pair(this.series.decode),
+    };
+  }
+
   text(): string {
     const r = this.recent;
     const secs = (performance.now() - r.since) / 1000;

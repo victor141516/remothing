@@ -1,0 +1,21 @@
+[package]
+name = "remothing-encoder"
+version.workspace = true
+edition.workspace = true
+description = "FFmpeg-based H.264 EncoderProvider (NVENC, AMF, QuickSync, x264) with CUDA / D3D11 zero-copy input"
+
+[dependencies]
+anyhow.workspace = true
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
+remothing-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+gpu-interop.workspace = true
+windows.workspace = true
+
+[features]
+# Link FFmpeg statically (Windows release builds via vcpkg).
+static = ["ffmpeg-next/static"]

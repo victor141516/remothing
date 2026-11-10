@@ -8,6 +8,7 @@ export const S_PONG = 4;
 export const C_PING = 1;
 export const C_ACK = 2;
 export const C_KEYFRAME = 3;
+export const C_STATS = 4;
 export const C_MOVE = 10;
 export const C_BUTTON = 11;
 export const C_WHEEL = 12;

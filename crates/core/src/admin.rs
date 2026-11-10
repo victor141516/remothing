@@ -1,0 +1,230 @@
+//! Admin API (JSON) behind token/password login. Served on its own listener.
+
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
+
+use crate::app::App;
+use crate::config::{constant_time_eq, hash_password, random_token, verify_password};
+use crate::shared::Tuning;
+
+const COOKIE: &str = "rt_admin";
+
+pub fn router() -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
+        .route("/api/status", get(status))
+        .route("/api/displays", get(displays))
+        .route("/api/displays/select", post(select_display))
+        .route("/api/virtual", post(create_virtual))
+        .route("/api/virtual/{id}", delete(destroy_virtual))
+        .route("/api/settings", get(get_settings).put(put_settings))
+}
+
+type ApiResult = Result<Response, (StatusCode, String)>;
+
+fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, format!("{e:#}"))
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|c| c.trim().strip_prefix(&format!("{COOKIE}=")).map(str::to_string))
+}
+
+/// Accepts a login session cookie or `Authorization: Bearer <admin_token>`.
+fn check(app: &App, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    if let Some(s) = session_cookie(headers) {
+        if app.admin_sessions.lock().unwrap().contains(&s) {
+            return Ok(());
+        }
+    }
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let token = app.settings.read().unwrap().auth.admin_token.clone();
+    match bearer {
+        Some(b) if !token.is_empty() && constant_time_eq(b.as_bytes(), token.as_bytes()) => Ok(()),
+        _ => Err((StatusCode::UNAUTHORIZED, "login required".into())),
+    }
+}
+
+#[derive(Deserialize)]
+struct Login {
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    password: String,
+}
+
+async fn login(State(app): State<Arc<App>>, Json(l): Json<Login>) -> ApiResult {
+    let auth = app.settings.read().unwrap().auth.clone();
+    let ok = (!l.token.is_empty() && constant_time_eq(l.token.as_bytes(), auth.admin_token.as_bytes()))
+        || (!auth.admin_password.is_empty() && verify_password(&auth.admin_password, &l.password));
+    if !ok {
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
+    }
+    let session = random_token();
+    app.admin_sessions.lock().unwrap().insert(session.clone());
+    let secure = if app.tls_enabled { "; Secure" } else { "" };
+    let cookie = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/{secure}");
+    Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
+}
+
+async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    if let Some(s) = session_cookie(&headers) {
+        app.admin_sessions.lock().unwrap().remove(&s);
+    }
+    Ok(Json(json!({"ok": true})).into_response())
+}
+
+async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    check(&app, &headers)?;
+    let p = &app.platform;
+    let (gpus, cpu) = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || (app.platform.monitor().gpus(), app.telemetry.cpu_usage()))
+            .await
+            .map_err(bad)?
+    };
+    Ok(Json(json!({
+        "platform": p.name(),
+        "provider": p.displays().provider_name(),
+        "display": app.control.current(),
+        "encoders": p.encoders().backends(),
+        "encoder_preferred": app.settings.read().unwrap().encoder.preferred,
+        "gpus": gpus,
+        "cpu_percent": cpu,
+        "clients": app.telemetry.clients(),
+        "errors": app.telemetry.errors(),
+    }))
+    .into_response())
+}
+
+async fn displays(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    check(&app, &headers)?;
+    let d = app.platform.displays();
+    let list = d.list().map_err(bad)?;
+    Ok(Json(json!({
+        "displays": list,
+        "current": app.control.current().map(|c| c.id),
+        "can_create_virtual": d.virtual_displays().is_some(),
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct Select {
+    id: String,
+}
+
+async fn select_display(State(app): State<Arc<App>>, headers: HeaderMap, Json(s): Json<Select>) -> ApiResult {
+    check(&app, &headers)?;
+    if !app.platform.displays().list().map_err(bad)?.iter().any(|d| d.id == s.id) {
+        return Err(bad(format!("unknown display {}", s.id)));
+    }
+    app.control.select(&s.id);
+    app.update_settings(|st| st.server.display = s.id.clone()).map_err(bad)?;
+    Ok(Json(json!({"ok": true})).into_response())
+}
+
+#[derive(Deserialize)]
+struct Create {
+    width: u32,
+    height: u32,
+}
+
+async fn create_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Json(c): Json<Create>) -> ApiResult {
+    check(&app, &headers)?;
+    let v = app.platform.displays().virtual_displays().ok_or_else(|| bad("virtual displays unsupported here"))?;
+    if !(64..=7680).contains(&c.width) || !(64..=4320).contains(&c.height) {
+        return Err(bad("size out of range"));
+    }
+    let info = v.create(c.width, c.height).map_err(bad)?;
+    Ok(Json(info).into_response())
+}
+
+async fn destroy_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult {
+    check(&app, &headers)?;
+    let v = app.platform.displays().virtual_displays().ok_or_else(|| bad("virtual displays unsupported here"))?;
+    v.destroy(&id).map_err(bad)?;
+    Ok(Json(json!({"ok": true})).into_response())
+}
+
+async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    check(&app, &headers)?;
+    let s = app.settings.read().unwrap().clone();
+    Ok(Json(json!({
+        "tuning": s.tuning,
+        "codec": s.encoder.codec,
+        "codecs": ["h264"],
+        "encoder_preferred": s.encoder.preferred,
+        "encoders": app.platform.encoders().backends(),
+        "keyboard_layout": s.input.keyboard_layout,
+        "stream_token": s.auth.stream_token,
+        "admin_password_set": !s.auth.admin_password.is_empty(),
+        "tls": app.tls_enabled,
+        "config_path": app.config.path,
+    }))
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct SettingsPatch {
+    tuning: Option<Tuning>,
+    encoder_preferred: Option<String>,
+    keyboard_layout: Option<String>,
+    stream_token: Option<String>,
+    admin_password: Option<String>,
+}
+
+async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): Json<SettingsPatch>) -> ApiResult {
+    check(&app, &headers)?;
+    if let Some(t) = &p.tuning {
+        if t.bandwidth_mbps <= 0.0 || t.max_lossless_frame_kb == 0 {
+            return Err(bad("tuning values must be positive"));
+        }
+    }
+    if let Some(e) = &p.encoder_preferred {
+        if e != "auto" && !app.platform.encoders().backends().contains(&e.as_str()) {
+            return Err(bad(format!("unknown encoder {e}")));
+        }
+    }
+    let mut warnings = Vec::new();
+    if let Some(layout) = &p.keyboard_layout {
+        *app.keyboard_layout.write().unwrap() = layout.clone();
+        if let Some(input) = app.control.input() {
+            if let Err(e) = input.set_keyboard_layout(layout) {
+                warnings.push(format!("keyboard layout: {e:#}"));
+            }
+        }
+    }
+    // Tuning and encoder preference are picked up live by the client threads.
+    app.update_settings(|s| {
+        if let Some(t) = p.tuning {
+            s.tuning = t;
+        }
+        if let Some(e) = p.encoder_preferred {
+            s.encoder.preferred = e;
+        }
+        if let Some(l) = p.keyboard_layout {
+            s.input.keyboard_layout = l;
+        }
+        if let Some(t) = p.stream_token {
+            s.auth.stream_token = t;
+        }
+        if let Some(pw) = p.admin_password.filter(|pw| !pw.is_empty()) {
+            s.auth.admin_password = hash_password(&pw);
+        }
+    })
+    .map_err(bad)?;
+    Ok(Json(json!({"ok": true, "warnings": warnings})).into_response())
+}

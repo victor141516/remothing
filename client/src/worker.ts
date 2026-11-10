@@ -8,13 +8,15 @@
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_KEYFRAME, C_PING, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
+  C_ACK, C_KEYFRAME, C_PING, C_STATS, ENC_LZ4, ENC_RAW, FLAG_KEY, FLAG_VIDEO, FRAME_HEADER_LEN, RECT_HEADER_LEN,
   S_CURSOR, S_FRAME, S_HELLO, S_PONG, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { Recorder, type Batch } from './stats';
 
-export type ToWorker = { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean };
+export type ToWorker =
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean }
+  | { type: 'report'; json: string };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
@@ -253,5 +255,13 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
       }, 250);
       break;
+    case 'report': {
+      const body = new TextEncoder().encode(m.json);
+      const msg = new Uint8Array(1 + body.length);
+      msg[0] = C_STATS;
+      msg.set(body, 1);
+      send(msg);
+      break;
+    }
   }
 };

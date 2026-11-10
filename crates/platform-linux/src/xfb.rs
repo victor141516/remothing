@@ -59,6 +59,12 @@ impl XvfbFramebuffer {
         debug_assert!(y < self.height);
         unsafe { std::slice::from_raw_parts(self.pixels.add(y as usize * self.stride), self.width as usize * 4) }
     }
+
+    /// Whole framebuffer and its stride (same concurrency caveat as `row`).
+    pub fn pixels(&self) -> (&[u8], usize) {
+        // SAFETY: the segment holds `stride * height` pixel bytes (checked in attach).
+        (unsafe { std::slice::from_raw_parts(self.pixels, self.stride * self.height as usize) }, self.stride)
+    }
 }
 
 impl Drop for XvfbFramebuffer {

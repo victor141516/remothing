@@ -1,0 +1,11 @@
+[package]
+name = "remothing-platform-linux"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow.workspace = true
+libc.workspace = true
+remothing-core.workspace = true
+x11rb.workspace = true
+toml = "0.8"
