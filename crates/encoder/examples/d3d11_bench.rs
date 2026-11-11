@@ -28,6 +28,9 @@
 //!   stalls NVENC). Run something animated on that display meanwhile.
 //! - `--gpu-priority N`: IDXGIDevice::SetGPUThreadPriority of the device (-7..7)
 //! - `--no-check`: skip decoding (faster sweeps; no MAE)
+//! - `--scale F`: encode at F times the size (as motion mode does for a
+//!   small client: GPU video processor or CPU scaler); no MAE (the decoded
+//!   picture is smaller than the source)
 
 #[cfg(not(windows))]
 fn main() {
@@ -102,6 +105,7 @@ mod bench {
         dupl_poll: bool,
         gpu_priority: Option<i32>,
         check: bool,
+        scale: f64,
     }
 
     fn args() -> Result<Args> {
@@ -117,6 +121,7 @@ mod bench {
             dupl_poll: false,
             gpu_priority: None,
             check: true,
+            scale: 1.0,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -162,6 +167,7 @@ mod bench {
                 "--dupl-poll" => a.dupl_poll = true,
                 "--gpu-priority" => a.gpu_priority = Some(value()?.parse()?),
                 "--no-check" => a.check = false,
+                "--scale" => a.scale = value()?.parse()?,
                 _ => bail!("unknown argument {arg} (see the doc comment of examples/d3d11_bench.rs)"),
             }
         }
@@ -931,6 +937,7 @@ mod bench {
                 let req = EncoderRequest {
                     width: w,
                     height: h,
+                    output: (w, h),
                     preferred: Some(backend.into()),
                     surface: Some(gs.clone()),
                     max_bitrate: u64::MAX,
@@ -947,6 +954,7 @@ mod bench {
                         let req = EncoderRequest {
                             width: w,
                             height: h,
+                            output: ((w as f64 * args.scale) as u32 & !1, (h as f64 * args.scale) as u32 & !1),
                             preferred: Some(backend.into()),
                             surface: gpu_input.then(|| gs.clone()),
                             max_bitrate: u64::MAX,
@@ -965,7 +973,7 @@ mod bench {
                             capture_sim: args.capture_sim,
                             dupl: args.dupl.as_deref(),
                             dupl_poll: args.dupl_poll,
-                            check: args.check,
+                            check: args.check && args.scale == 1.0,
                         };
                         let row = run_case(&case, e.as_mut(), &mut src)?;
                         println!("{prefix}{row}");

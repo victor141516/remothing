@@ -16,7 +16,15 @@
   frame is dropped without the existing repair). QUIC's congestion control
   is off and our link model paces, as planned. Not tried: a proxy that
   ends WebTransport (arrangement 3), Safari, a real phone or Wi-Fi.
-- Left: steps 3 to 6.
+- Done: step 3, size and frame rate per client (`docs/ARCHITECTURE.md`,
+  "Motion mode"). As built, the frame-rate cap applies in both modes; the
+  size only in motion mode. Slow start makes a new client begin at its
+  window's size, so the larger-size hold is 0.5 s until the link is
+  proven. Not checked: the GPU-scaled picture on Windows by eye or by
+  decoding (only that it encodes, at what cost).
+- Left: steps 4 to 6. Found on the way, for step 6: on a 4 Mbit/s link
+  with a 3 s netem queue the estimate climbed from 10 to 140 Mbit/s after
+  frames moved to the data channel (new path, unproven, slow start).
 
 ## Goal
 

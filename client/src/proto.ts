@@ -68,6 +68,8 @@ export const PIECE_HEADER_LEN = 16;
 export const PIECE_PAYLOAD = 1100;
 /** Pieces of a frame that did not arrive: pad u8, count u16, seq u32, count x index u16 (0: all). */
 export const C_NACK = 20;
+/** pad u8, width u16, height u16 (picture in the window, device pixels), refresh Hz u16. */
+export const C_VIEW = 21;
 
 export const FRAME_HEADER_LEN = 48;
 /** Screen move entry after the FRAME header: src_x, src_y, dst_x, dst_y, w, h (u16 each). */

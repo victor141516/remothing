@@ -76,6 +76,8 @@ export class WtPath {
   private newest = -1;
   /** Shortest round trip seen on this path, ms. */
   rtt = 0;
+  /** Round trip of the last ping answered, ms: grows with the queue on the path. */
+  lastRtt = 0;
   /** Key of the server session this one belongs to. */
   private key = '';
 
@@ -194,6 +196,7 @@ export class WtPath {
       this.events.pong(v, received);
       const rtt = received - v.getFloat64(8, true);
       this.rtt = this.rtt ? Math.min(this.rtt, rtt) : rtt;
+      this.lastRtt = rtt;
       return;
     }
     if (d[0] !== S_PIECE || d.length < PIECE_HEADER_LEN) return;

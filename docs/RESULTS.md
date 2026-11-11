@@ -255,6 +255,24 @@ over the WebSocket (140 fps, 12 Mbit/s before and after the switch):
 | movement resumes for 1.5 s | every tile video again, mode still on |
 | movement stops for good | mode still on at 39 s, off at 42 s |
 
+Size and frame rate per client, same container (`full`), a client reporting
+its view over the WebSocket:
+
+| client | observed |
+|---|---|
+| 1920x1080 at 60 / 100 / 120 / 144 Hz, display capturing at 165 Hz | 60 / 100 / 120 / 144 video frames per second |
+| no report | 165 |
+| 800x450 at 144 Hz connecting in motion mode | 800x450 at once (slow start: cap 7 Mbit/s), full size within a second, 144 fps |
+| 640x360 at 165 Hz, link 12 Mbit/s | 640x360, then 960x540 once the cap reached 12 Mbit/s; 127 fps |
+| 800x450 browser window, link squeezed from LAN to 4 Mbit/s | 1920x1080 → 1280x720 → 960x540 as the cap fell |
+
+GPU scaling on Windows (`d3d11_bench --scale 0.5`, plasma, 3168x1440 →
+1584x720, RTX 4080 SUPER): encode with the video processor's scaling
+1.33 / 3.76 / 11.26 ms (p50 / p90 / p99), 7.8 KiB per frame; unscaled
+3.33 / 6.04 / 12.98 ms, 21.2 KiB. The system-memory path scaling on the
+CPU: 11.94 / 17.01 / 18.45 ms. The scaled picture was not checked by
+decoding (the bench compares only same-size pictures).
+
 ## WebTransport datagrams vs WebSocket
 
 Linux bench container, `rt-testapp` at 165 fps, the same link shaping on

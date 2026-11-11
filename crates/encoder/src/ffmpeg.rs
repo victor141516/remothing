@@ -14,13 +14,61 @@ use crate::Backend;
 /// Where the encoder reads its input from.
 pub(crate) enum Input {
     /// Persistent CUDA surface updated with changed regions (Linux, NVENC).
+    /// Scaled output goes through system memory first: the scaled picture
+    /// is uploaded whole.
     #[cfg(target_os = "linux")]
-    Cuda(crate::cuda::CudaSurface),
-    /// Persistent D3D11 texture updated GPU-side from the capture surface (Windows).
+    Cuda(crate::cuda::CudaSurface, Option<HostInput>),
+    /// Persistent D3D11 texture updated GPU-side from the capture surface,
+    /// scaled by the GPU's video processor when smaller (Windows).
     #[cfg(windows)]
     D3D11(crate::d3d11::D3D11Input),
-    /// System-memory BGRX copy; converted when the encoder needs YUV.
-    Host { bgrx: ff::frame::Video, convert: Option<(scaling::Context, ff::frame::Video)> },
+    Host(HostInput),
+}
+
+/// System-memory BGRX copy of the display, converted (pixel format, size)
+/// when the encoder or a smaller output needs it.
+pub(crate) struct HostInput {
+    bgrx: ff::frame::Video,
+    convert: Option<(scaling::Context, ff::frame::Video)>,
+}
+
+impl HostInput {
+    fn new((iw, ih): (u32, u32), (ow, oh): (u32, u32), wants: Pixel) -> Result<Self> {
+        let convert = if wants == Pixel::BGRZ && (iw, ih) == (ow, oh) {
+            None
+        } else {
+            // Same size: only the format changes, the nearest pixel is exact.
+            // Scaled: the fast bilinear filter, since the whole picture is
+            // scaled for every frame on the CPU.
+            let flags = if (iw, ih) == (ow, oh) { scaling::Flags::POINT } else { scaling::Flags::FAST_BILINEAR };
+            let sws = scaling::Context::get(Pixel::BGRZ, iw, ih, wants, ow, oh, flags)?;
+            Some((sws, ff::frame::Video::new(wants, ow, oh)))
+        };
+        Ok(Self { bgrx: ff::frame::Video::new(Pixel::BGRZ, iw, ih), convert })
+    }
+
+    fn load(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) {
+        let dst_stride = self.bgrx.stride(0);
+        let dst = self.bgrx.data_mut(0);
+        for r in rects {
+            let (xb, wb) = (r.x as usize * 4, r.w as usize * 4);
+            for row in r.y as usize..(r.y + r.h) as usize {
+                let s = (row - src_y0 as usize) * stride + xb;
+                dst[row * dst_stride + xb..row * dst_stride + xb + wb].copy_from_slice(&src[s..s + wb]);
+            }
+        }
+    }
+
+    /// The picture to encode.
+    fn frame(&mut self) -> Result<&mut ff::frame::Video> {
+        Ok(match &mut self.convert {
+            Some((sws, out)) => {
+                sws.run(&self.bgrx, out)?;
+                out
+            }
+            None => &mut self.bgrx,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,12 +133,13 @@ impl FfmpegEncoder {
     pub(crate) fn open(
         backend: Backend,
         kind: InputKind,
-        width: u32,
-        height: u32,
+        input: (u32, u32),
+        output: (u32, u32),
         surface: Option<&GpuSurface>,
         max_bitrate: u64,
         overrides: &[(String, String)],
     ) -> Result<Self> {
+        let (width, height) = output;
         let name = backend.ffmpeg_name();
         let codec = ff::encoder::find_by_name(name).ok_or_else(|| anyhow!("{name} not compiled into FFmpeg"))?;
         let mut enc = ff::codec::context::Context::new_with_codec(codec).encoder().video()?;
@@ -121,11 +170,12 @@ impl FfmpegEncoder {
                 let s = crate::cuda::CudaSurface::new(width, height)?;
                 enc.set_format(Pixel::CUDA);
                 unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = s.frames_ref() };
-                Input::Cuda(s)
+                let scaler = (input != output).then(|| HostInput::new(input, output, Pixel::BGRZ)).transpose()?;
+                Input::Cuda(s, scaler)
             }
             #[cfg(windows)]
             InputKind::D3D11 => {
-                let i = crate::d3d11::D3D11Input::new(surface.context("no capture surface")?, width, height)?;
+                let i = crate::d3d11::D3D11Input::new(surface.context("no capture surface")?, input, output)?;
                 enc.set_format(Pixel::D3D11);
                 unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = i.frames_ref() };
                 Input::D3D11(i)
@@ -133,21 +183,7 @@ impl FfmpegEncoder {
             InputKind::Host => {
                 let wants = backend.host_format();
                 enc.set_format(wants);
-                let convert = if wants == Pixel::BGRZ {
-                    None
-                } else {
-                    let sws = scaling::Context::get(
-                        Pixel::BGRZ,
-                        width,
-                        height,
-                        wants,
-                        width,
-                        height,
-                        scaling::Flags::POINT,
-                    )?;
-                    Some((sws, ff::frame::Video::new(wants, width, height)))
-                };
-                Input::Host { bgrx: ff::frame::Video::new(Pixel::BGRZ, width, height), convert }
+                Input::Host(HostInput::new(input, output, wants)?)
             }
         };
         let _ = surface;
@@ -231,22 +267,19 @@ impl VideoEncoder for FfmpegEncoder {
 
     fn load_cpu(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) -> Result<()> {
         match &mut self.input {
-            #[cfg(target_os = "linux")]
-            Input::Cuda(s) => rects.iter().try_for_each(|r| s.upload(src, stride, src_y0, *r)),
-            #[cfg(windows)]
-            Input::D3D11(_) => Err(anyhow!("D3D11 encoder input is fed from the capture surface")),
-            Input::Host { bgrx, .. } => {
-                let dst_stride = bgrx.stride(0);
-                let dst = bgrx.data_mut(0);
-                for r in rects {
-                    let (xb, wb) = (r.x as usize * 4, r.w as usize * 4);
-                    for row in r.y as usize..(r.y + r.h) as usize {
-                        let s = (row - src_y0 as usize) * stride + xb;
-                        dst[row * dst_stride + xb..row * dst_stride + xb + wb].copy_from_slice(&src[s..s + wb]);
-                    }
-                }
+            Input::Host(h) => {
+                h.load(src, stride, src_y0, rects);
                 Ok(())
             }
+            #[cfg(target_os = "linux")]
+            Input::Cuda(_, Some(h)) => {
+                h.load(src, stride, src_y0, rects);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            Input::Cuda(s, None) => rects.iter().try_for_each(|r| s.upload(src, stride, src_y0, *r)),
+            #[cfg(windows)]
+            Input::D3D11(_) => Err(anyhow!("D3D11 encoder input is fed from the capture surface")),
         }
     }
 
@@ -271,14 +304,17 @@ impl VideoEncoder for FfmpegEncoder {
         self.pts = (self.started.elapsed().as_micros() as i64).max(self.pts + 1);
         let frame = match &mut self.input {
             #[cfg(target_os = "linux")]
-            Input::Cuda(s) => &mut s.frame,
-            #[cfg(windows)]
-            Input::D3D11(i) => i.frame(),
-            Input::Host { bgrx, convert: Some((sws, yuv)) } => {
-                sws.run(bgrx, yuv)?;
-                yuv
+            Input::Cuda(s, None) => &mut s.frame,
+            #[cfg(target_os = "linux")]
+            Input::Cuda(s, Some(h)) => {
+                let f = h.frame()?;
+                let whole = Rect::new(0, 0, f.width(), f.height());
+                s.upload(f.data(0), f.stride(0), 0, whole)?;
+                &mut s.frame
             }
-            Input::Host { bgrx, convert: None } => bgrx,
+            #[cfg(windows)]
+            Input::D3D11(i) => i.frame()?,
+            Input::Host(h) => h.frame()?,
         };
         frame.set_pts(Some(self.pts));
         frame.set_kind(if force_key { ff::picture::Type::I } else { ff::picture::Type::None });

@@ -112,6 +112,27 @@ pixels that is thrown away a moment later.
   5 s: the video tiles are re-sent losslessly, paced by the link as any
   refinement. A change before it is complete stops it (the tiles not yet
   sent stay video); tiles that are exact and do not change stay exact.
+- **Size per client**: the client reports how it shows the picture
+  (`C_VIEW`: its size in the window in device pixels, 3 s after the window
+  last changed, and its refresh rate, from 60 animation frames). In motion
+  mode the encoder encodes the largest of that size, the display's, and
+  ¾, ⅔ and ½ of the display that fits the video cap at 0.1 bit per pixel
+  and refresh (`video_size`, a first guess); never below the client's
+  size. Every change is a new encoder and a keyframe, so a larger size
+  waits until the link has had room for 10 s (0.5 s while slow start is
+  still raising the estimate), a smaller one comes at once, and leaving
+  the mode goes straight back to the display's size (tiles need it). The
+  client samples the smaller picture to the screen (bilinear). Scaling:
+  Windows' D3D11 input keeps a full-size copy of the changed regions that
+  the GPU video processor scales into the encoder texture before each
+  frame; the system-memory and CUDA inputs scale on the CPU (swscale,
+  fast bilinear), the CUDA one then uploads the whole scaled picture.
+- **Frame rate per client**: video frames go at most once per client
+  refresh, in every mode: a grid of slots moves one refresh per frame, a
+  capture up to half a refresh early for its slot goes at once (a short
+  wait costs a thread wake-up that often comes milliseconds late), and
+  after a gap up to two frames catch up. `?bench` reports no view: it
+  measures the pipeline at the display's size and the capture rate.
 - Clients without a video encoder are not affected: lossless is all they
   have. FRAME carries the mode as a flag, for the overlay and the event
   log.

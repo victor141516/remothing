@@ -18,7 +18,7 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  C_STATS, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO,
+  C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO,
   FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_SIGNAL, now,
@@ -53,7 +53,9 @@ export type ToWorker =
   | { type: 'mic'; json: string }
   | { type: 'micdata'; buf: ArrayBuffer }
   /** An input message, for the WebTransport path. */
-  | { type: 'input'; buf: ArrayBuffer };
+  | { type: 'input'; buf: ArrayBuffer }
+  /** How the picture is shown: its size in the window (device pixels) and the refresh rate. */
+  | { type: 'view'; width: number; height: number; hz: number };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
@@ -247,6 +249,8 @@ function sendVisible(): void {
 
 /** The page wants the session's sound (asked again on every connection). */
 let audioOn = false;
+/** The last C_VIEW (sent again on every connection). */
+let viewMessage: Uint8Array | null = null;
 function sendAudio(): void {
   send(new Uint8Array([C_AUDIO, audioOn ? 1 : 0]));
 }
@@ -400,8 +404,10 @@ function watchGap(): void {
   if (useWt) {
     // Its gaps are the WebTransport path's own business (asked for again,
     // or given up); a path that stops answering is dead.
+    // A queue on the path delays the answers too, without the path being
+    // dead: the limit follows the last round trip.
     const silent = wtPingSince ? t - wtPingSince : 0;
-    if (silent > Math.max(DC_STALL_MS, 4 * wt.rtt)) wt.close(`no answer for ${silent.toFixed(0)} ms`);
+    if (silent > Math.max(DC_STALL_MS, 4 * wt.rtt, 3 * wt.lastRtt)) wt.close(`no answer for ${silent.toFixed(0)} ms`);
     return;
   }
   if (!gapSince || (useDc && dcOpen) || t - gapSince < (udpDead ? 0 : LOSS_WAIT_MS)) return;
@@ -702,6 +708,7 @@ function connect(url: string): void {
     for (let i = 0; i < 20; i++) setTimeout(ping, i * 25);
     if (!visible) sendVisible();
     if (audioOn) sendAudio();
+    if (viewMessage) send(viewMessage);
   };
   ws.onmessage = (ev) => {
     const received = now();
@@ -853,6 +860,17 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'mic':
       sendText(C_MIC_INFO, m.json);
       break;
+    case 'view': {
+      const v = new Uint8Array(8);
+      const d = new DataView(v.buffer);
+      v[0] = C_VIEW;
+      d.setUint16(2, Math.min(m.width, 0xffff), true);
+      d.setUint16(4, Math.min(m.height, 0xffff), true);
+      d.setUint16(6, m.hz, true);
+      viewMessage = v;
+      send(v);
+      break;
+    }
     case 'micdata':
       send(new Uint8Array(m.buf));
       break;

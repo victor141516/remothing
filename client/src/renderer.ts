@@ -16,12 +16,15 @@ uniform highp sampler2D u_video;
 uniform highp sampler2D u_mask;
 uniform int u_height;
 uniform int u_tile;
+uniform vec2 u_size;
 out vec4 o;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   p.y = u_height - 1 - p.y;
   if (texelFetch(u_mask, p / u_tile, 0).r > 0.5) {
-    o = vec4(texelFetch(u_video, p, 0).rgb, 1.0);
+    // The video may be encoded smaller than the screen (motion mode):
+    // sampled at this pixel's centre, which at the same size is the texel itself.
+    o = vec4(texture(u_video, (vec2(p) + 0.5) / u_size).rgb, 1.0);
   } else {
     o = vec4(texelFetch(u_screen, p, 0).bgr, 1.0);
   }
@@ -49,6 +52,9 @@ export class Renderer {
   /** Tiles shown from the video layer, of `tiles` (for the stats overlay). */
   videoTiles = 0;
   tiles = 0;
+  /** Size of the video texture: the encoded size of the last picture. */
+  private videoWidth = 0;
+  private videoHeight = 0;
   private tilesX = 0;
   private tilesY = 0;
   width = 0;
@@ -98,8 +104,9 @@ export class Renderer {
     this.mask = new Uint8Array(this.tilesX * this.tilesY);
     this.tiles = this.mask.length;
     this.videoTiles = 0;
-    const [screen, video, mask, scratch] = [texture(gl, 0), texture(gl, 1), texture(gl, 2), texture(gl, 3)];
-    this.textures = [screen, video, mask, scratch];
+    // The video texture (unit 1) is made by `allocVideo` below.
+    const [screen, mask, scratch] = [texture(gl, 0), texture(gl, 2), texture(gl, 3)];
+    this.textures = [screen, gl.createTexture()!, mask, scratch];
     gl.activeTexture(gl.TEXTURE3);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
     this.fbScreen = gl.createFramebuffer();
@@ -111,13 +118,13 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    this.allocVideo(width, height);
     gl.activeTexture(gl.TEXTURE2);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, this.tilesX, this.tilesY);
     this.uploadMask();
     gl.viewport(0, 0, width, height);
     gl.uniform1i(gl.getUniformLocation(this.prog, 'u_height'), height);
+    gl.uniform2f(gl.getUniformLocation(this.prog, 'u_size'), width, height);
     gl.uniform1i(gl.getUniformLocation(this.prog, 'u_tile'), tile);
   }
 
@@ -141,8 +148,24 @@ export class Renderer {
 
   uploadVideo(frame: VideoFrame): void {
     const gl = this.gl;
+    if (frame.displayWidth !== this.videoWidth || frame.displayHeight !== this.videoHeight) {
+      this.allocVideo(frame.displayWidth, frame.displayHeight);
+    }
     gl.activeTexture(gl.TEXTURE1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+  }
+
+  /** A video texture of the encoded size (immutable storage: a new one per size). */
+  private allocVideo(width: number, height: number): void {
+    const gl = this.gl;
+    gl.deleteTexture(this.textures[1]);
+    const t = texture(gl, 1);
+    this.textures[1] = t;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    this.videoWidth = width;
+    this.videoHeight = height;
   }
 
   /** Tile index with bit 15 set = show from video. */

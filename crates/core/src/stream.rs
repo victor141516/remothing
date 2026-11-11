@@ -65,6 +65,16 @@ const CAP_DEADBAND: (f64, f64) = (0.67, 1.5);
 const CAP_COLLAPSE: f64 = 0.33;
 const CAP_JUMP: f64 = 2.5;
 const CAP_JUMP_HOLD_US: u64 = 500_000;
+/// In motion mode the picture is encoded smaller for a client that shows it
+/// smaller (see `video_size`). Every size change is a new encoder and a
+/// keyframe: larger only after the link has had room this long.
+const SIZE_UP_US: u64 = 10_000_000;
+/// Bits per pixel and frame a size is planned with: decent H.264 of moving
+/// content; a size is afforded when it fits the video cap at the client's
+/// refresh rate (60 when unknown). A first guess, to be tuned.
+const BITS_PER_PIXEL: f64 = 0.1;
+/// Sizes between the client's and the display's, as fractions of the display.
+const SIZE_STEPS: [f64; 4] = [1.0, 0.75, 2.0 / 3.0, 0.5];
 /// During slow start the cap is this many times the video share: frame
 /// pacing keeps the bytes within the share (fewer, better pictures), and
 /// video that fills it is what lets the estimate grow; capped at the share
@@ -188,6 +198,17 @@ struct ClientLink {
     /// Input that came over this connection (the data channel, or the
     /// stream socket itself).
     held: Mutex<Held>,
+    /// How the client shows the picture (C_VIEW).
+    view: Mutex<View>,
+}
+
+/// The picture's size in the client's window, in device pixels, and the
+/// client's refresh rate (0: not reported).
+#[derive(Clone, Copy, Default)]
+struct View {
+    width: u32,
+    height: u32,
+    hz: u32,
 }
 
 async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
@@ -207,6 +228,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         path: AtomicU8::new(PATH_WS),
         stop: AtomicBool::new(false),
         held: Mutex::new(Held::default()),
+        view: Mutex::new(View::default()),
     });
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<PeerEvent>();
@@ -440,6 +462,12 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
                         if let Ok(v) = serde_json::from_slice(&b[1..]) {
                             app.telemetry.client_report(link.id, v);
                         }
+                    }
+                    (Some(proto::C_VIEW), 8..) => {
+                        let view = View { width: u16_at(&b, 2) as u32, height: u16_at(&b, 4) as u32, hz: u16_at(&b, 6) as u32 };
+                        app.telemetry.event(link.id, &format!("view {}x{} at {} Hz", view.width, view.height, view.hz));
+                        *link.view.lock().unwrap() = view;
+                        waker.unpark();
                     }
                     (Some(proto::C_HELLO_ACK), _) => {
                         link.hello_acked.store(true, Ordering::Release);
@@ -759,6 +787,10 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let mut video_cap = VideoCap::default();
     let mut path = PATH_WS;
     let mut motion = false;
+    // Size the encoder encodes (the display's unless scaled for the
+    // client), and since when a larger one has been affordable.
+    let mut encoded = (0, 0);
+    let mut room_since = 0;
     // Estimate on the WebSocket path when frames moved to the data channel
     // (0: not there, or already found slower).
     let mut ws_rate = 0.0;
@@ -810,7 +842,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 encoder_pref = s.encoder.preferred.clone();
                 drop(s);
                 video_cap.reset(video_rate(model, &codec.tuning));
-                create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
+                create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
                 shared.drop_video(link.id);
                 need_key = true;
             }
@@ -827,6 +859,35 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 e.set_max_bitrate(bps);
                 let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
                 app.telemetry.event(link.id, &text);
+            }
+        }
+        let view = *link.view.lock().unwrap();
+        // Frames the client cannot show are not encoded.
+        codec.min_video_us = if view.hz > 0 { 1_000_000 / view.hz as u64 } else { 0 };
+        if codec.encoder.is_some() && size != (0, 0) {
+            let in_motion = shared.motion();
+            let want = if in_motion { video_size(size, view, video_cap.bps) } else { size };
+            let area = |(w, h): (u32, u32)| w as u64 * h as u64;
+            let now = proto::now_us();
+            // Larger only once the link has had room for a while (shortly
+            // while slow start is still raising the estimate: it begins low
+            // for every new client); smaller at once, and the full size as
+            // soon as tiles need it again.
+            if in_motion && area(want) > area(encoded) {
+                room_since = if room_since == 0 { now } else { room_since };
+            } else {
+                room_since = 0;
+            }
+            let hold = if model.proven { SIZE_UP_US } else { CAP_JUMP_HOLD_US };
+            if want != encoded && (!in_motion || area(want) < area(encoded) || now - room_since >= hold) {
+                let text = format!("video {}x{} -> {}x{}", encoded.0, encoded.1, want.0, want.1);
+                app.telemetry.event(link.id, &text);
+                encoded = want;
+                room_since = 0;
+                create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
+                // The new encoder's input is blank: everything is copied in again.
+                shared.encoder_reset(link.id);
+                need_key = true;
             }
         }
         let mut wake_at_us = None;
@@ -870,9 +931,10 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 }
                 Ok(Pull::Reset { geometry: g, first_seq }) => {
                     size = (g.width, g.height);
+                    encoded = size;
                     encoder_pref = app.settings.read().unwrap().encoder.preferred.clone();
                     video_cap.reset(video_rate(model, &codec.tuning));
-                    create_encoder(app, link.id, &mut codec, size, &encoder_pref, video_cap.bps);
+                    create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
@@ -903,6 +965,25 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
             None => std::thread::park(),
         }
     }
+}
+
+/// Encoded size in motion mode: the largest of the client's own size, the
+/// display's, and the steps between them that the video cap affords at the
+/// client's refresh rate; never below the client's. Even (4:2:0 video).
+fn video_size(display: (u32, u32), view: View, cap_bps: u64) -> (u32, u32) {
+    if view.width == 0 || view.height == 0 {
+        return display;
+    }
+    let (dw, dh) = (display.0 as f64, display.1 as f64);
+    let least = (view.width as f64 / dw).max(view.height as f64 / dh).min(1.0);
+    let hz = if view.hz == 0 { 60.0 } else { view.hz as f64 };
+    let affords = |s: f64| dw * dh * s * s * hz * BITS_PER_PIXEL <= cap_bps as f64;
+    let scale = SIZE_STEPS.into_iter().filter(|&s| s > least).find(|&s| affords(s)).unwrap_or(least);
+    if scale >= 1.0 {
+        return display;
+    }
+    let even = |v: f64| ((v * scale).round() as u32 & !1).max(2);
+    (even(dw), even(dh))
 }
 
 /// Video bitrate cap following the link estimate, with hysteresis.
@@ -948,12 +1029,15 @@ fn video_rate(link: Link, tuning: &Tuning) -> f64 {
     }
 }
 
-fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, (width, height): (u32, u32), pref: &str, max_bitrate: u64) {
+/// A new encoder for `size` (the display's), encoding `output` (smaller in
+/// motion mode for a small client, see `video_size`).
+fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, size: (u32, u32), output: (u32, u32), pref: &str, max_bitrate: u64) {
     codec.encoder = None;
     app.shared.set_gpu_input(id, false);
     let req = EncoderRequest {
-        width,
-        height,
+        width: size.0,
+        height: size.1,
+        output,
         preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
         surface: app.shared.surface(),
         max_bitrate,
@@ -1018,5 +1102,35 @@ fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Optio
             let _ = out.send(proto::text(proto::S_DISPLAYS, &json!({ "displays": displays, "current": current }).to_string()));
         }
         Err(e) => app.telemetry.error("list displays", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DISPLAY: (u32, u32) = (3840, 2160);
+
+    fn view(width: u32, height: u32, hz: u32) -> View {
+        View { width, height, hz }
+    }
+
+    #[test]
+    fn size_is_the_displays_on_a_fast_link_and_never_below_the_clients() {
+        assert_eq!(video_size(DISPLAY, view(1920, 1080, 60), 200_000_000), DISPLAY);
+        // Nothing fits: the client's own size, whatever the link.
+        assert_eq!(video_size(DISPLAY, view(1920, 1080, 60), 1_000_000), (1920, 1080));
+        // No report: the display's.
+        assert_eq!(video_size(DISPLAY, View::default(), 1_000_000), DISPLAY);
+    }
+
+    #[test]
+    fn size_steps_up_as_far_as_the_cap_affords() {
+        // 3/4 of 4K at 60 Hz needs 28 Mbit/s, the whole 50.
+        assert_eq!(video_size(DISPLAY, view(1280, 720, 60), 30_000_000), (2880, 1620));
+        // At 144 Hz the same cap only affords half.
+        assert_eq!(video_size(DISPLAY, view(1280, 720, 144), 30_000_000), (1920, 1080));
+        // A window wider in proportion than the display decides by its width.
+        assert_eq!(video_size(DISPLAY, view(3000, 1000, 60), 1_000_000), (3000, 1688));
     }
 }

@@ -126,6 +126,12 @@ pub const C_MIC: u8 = 19;
 /// Pieces of a frame that did not arrive (WebTransport datagram): pad u8,
 /// count u16, seq u32, then count x index u16. The server sends them again.
 pub const C_NACK: u8 = 20;
+/// How the client shows the picture: pad u8, width u16, height u16 (its
+/// size in the window, device pixels; sent a moment after the window
+/// settles), refresh rate u16 (Hz, 0: unknown). In motion mode the video is
+/// encoded no larger than the link affords and never smaller than this, and
+/// never at more frames per second than the refresh rate.
+pub const C_VIEW: u8 = 21;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;

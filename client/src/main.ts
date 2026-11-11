@@ -146,9 +146,52 @@ function layout(): void {
   canvas.style.width = `${(width * fit) / dpr}px`;
   canvas.style.height = `${(height * fit) / dpr}px`;
   showPointer();
+  reportView(Math.round(width * fit), Math.round(height * fit));
 }
 window.addEventListener('resize', layout);
 window.visualViewport?.addEventListener('resize', layout);
+
+/** A window being resized passes through many sizes: the server hears of
+ * the size once it has settled this long (each change costs it an encoder
+ * restart and a keyframe in motion mode). */
+const VIEW_SETTLE_MS = 3000;
+let viewTimer = 0;
+let shownView = '';
+/** The display's refresh rate, from animation frames (0 until measured). */
+let refreshHz = 0;
+function reportView(width: number, height: number): void {
+  // `?bench` measures the pipeline at the display's size and the capture rate.
+  if (benchSeconds > 0) return;
+  clearTimeout(viewTimer);
+  const send = () => {
+    const key = `${width}x${height}@${refreshHz}`;
+    if (key === shownView) return;
+    shownView = key;
+    toWorker({ type: 'view', width, height, hz: refreshHz });
+  };
+  // The first report goes at once; later ones once the window settles.
+  viewTimer = setTimeout(send, shownView ? VIEW_SETTLE_MS : 0);
+}
+
+/** Median interval of 60 animation frames, rounded to the usual rates. */
+function measureRefresh(): void {
+  const stamps: number[] = [];
+  const step = (t: number) => {
+    stamps.push(t);
+    if (stamps.length <= 60) {
+      requestAnimationFrame(step);
+      return;
+    }
+    const gaps = stamps.slice(1).map((s, i) => s - stamps[i]).sort((a, b) => a - b);
+    refreshHz = Math.round(1000 / gaps[gaps.length >> 1]);
+    shownView = '';
+    layout();
+  };
+  requestAnimationFrame(step);
+}
+// A hidden tab gets no animation frames: measured once it is shown.
+if (document.hidden) document.addEventListener('visibilitychange', measureRefresh, { once: true });
+else measureRefresh();
 
 const pointer = document.getElementById('pointer') as HTMLCanvasElement;
 /** Hot spot of the remote cursor's shape; null while the remote side hides its cursor. */

@@ -6,8 +6,11 @@ use crate::geom::Rect;
 use crate::platform::GpuSurface;
 
 pub struct EncoderRequest {
+    /// Input size: the display's.
     pub width: u32,
     pub height: u32,
+    /// Encoded size; the input is scaled down to it when smaller (both even).
+    pub output: (u32, u32),
     /// Backend to try first ("nvenc", "amf", "qsv", "x264"); others follow as fallbacks.
     pub preferred: Option<String>,
     /// Capture surface, when the capture is GPU-based; enables zero-copy input.
