@@ -180,7 +180,8 @@ pub enum Button {
 pub trait InputProvider: Send + Sync {
     fn motion(&self, x: u32, y: u32) -> Result<()>;
     fn button(&self, button: Button, down: bool) -> Result<()>;
-    /// Wheel steps (notches); positive = down / right.
+    /// Scroll in wheel units (`proto::WHEEL_NOTCH` per notch, fractions of
+    /// one from trackpads and touch); positive = down / right.
     fn wheel(&self, dx: i32, dy: i32) -> Result<()>;
     /// Physical key as a Linux evdev code (wire format), mapped per platform.
     fn key(&self, evdev: u16, down: bool) -> Result<()>;

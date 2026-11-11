@@ -272,6 +272,19 @@ coordinates, evdev key codes on the wire).
   server only ever gets absolute positions. The browser shows no cursor
   for a finger, so the remote cursor's shape (`S_CURSOR`) is drawn over
   the picture at that position.
+- **Scrolling** (`C_WHEEL`) travels in wheel units, 120 per notch
+  (Windows' `WHEEL_DELTA`), so nothing has to guess the device: a mouse
+  wheel arrives in whole notches (Chromium reports 100 px each, Firefox
+  three lines), a trackpad in a few pixels per event, sent as fractions of
+  a notch, and macOS adds its own momentum after a flick as more such
+  events. Two fingers on a touch screen scroll a notch per 24 px; let go
+  faster than 0.3 px/ms, the scroll carries on and slows down by e every
+  325 ms (the browser makes no momentum for a gesture the page took), and
+  a new touch stops it. Windows passes the units to `SendInput` as they
+  are, as a precision touchpad does: programs that read them scroll that
+  finely, the others add them up to notches. X11 has only wheel buttons,
+  one click per notch (XTEST cannot send XInput2's smooth scrolling), so
+  Linux adds the units up and clicks per whole notch.
 - **Phone keyboard** (`textentry.ts`): a text field nobody sees takes the
   focus, which opens it. Phone keyboards edit the field instead of sending
   keys (composition, suggestions, swiped words), so each change is compared

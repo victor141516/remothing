@@ -37,7 +37,10 @@ export const C_EVENT = 8;
 export const C_CLIPBOARD = 9;
 export const C_MOVE = 10;
 export const C_BUTTON = 11;
+/** pad u8, dx i16, dy i16 in wheel units (positive = right / down). */
 export const C_WHEEL = 12;
+/** Wheel units per notch of a mouse wheel (see proto.rs C_WHEEL). */
+export const WHEEL_NOTCH = 120;
 /** down u8, evdev code u16: held on the remote side until released. */
 export const C_KEY = 13;
 /** Asks for the display list. */

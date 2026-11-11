@@ -81,9 +81,15 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   client holds is released if it disconnects.
 - On a phone or tablet the screen works as a trackpad: one finger moves the
   pointer, a tap clicks, a tap with two fingers is the right button, two
-  fingers dragged scroll, and a tap followed at once by another touch holds
-  the button for as long as that touch lasts (double click, or drag).
-  `Type` in the controls opens the device's own keyboard.
+  fingers dragged scroll (and keep sliding when let go quickly), and a tap
+  followed at once by another touch holds the button for as long as that
+  touch lasts (double click, or drag). `Type` in the controls opens the
+  device's own keyboard.
+- Scrolling keeps the device's steps: a mouse wheel scrolls by notches,
+  a trackpad (a Mac's included, with its momentum) or two fingers on a
+  touch screen scroll as finely as they move. Windows programs that read
+  fine scrolling (browsers, Office…) follow it; on Linux (X11) it adds up
+  to whole notches.
 - Games and full-screen video: when the whole screen has been moving for
   ten seconds the stream turns into plain video of everything that changes
   (motion mode; `&stats` and the admin UI show it). It sharpens to the

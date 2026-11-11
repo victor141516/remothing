@@ -24,6 +24,9 @@ use crate::desktop::{self, Followed};
 use crate::keymap::{self, KeyCode};
 use crate::uipi::ForegroundCheck;
 
+// Wheel units go to SendInput as they come (see `wheel`).
+const _: () = assert!(WHEEL_DELTA as i32 == remothing_core::proto::WHEEL_NOTCH);
+
 // Held-key bits for Ctrl+Alt+Delete detection.
 const LCTRL: u8 = 1;
 const RCTRL: u8 = 2;
@@ -268,13 +271,15 @@ impl InputProvider for SendInputProvider {
     }
 
     fn wheel(&self, dx: i32, dy: i32) -> Result<()> {
-        let notch = WHEEL_DELTA as i32;
+        // The wire's units are WHEEL_DELTA's: less than one notch is what a
+        // precision touchpad sends, and programs that read it scroll that
+        // finely (the others add it up to whole notches).
         // Windows: positive vertical = away from the user (up), positive horizontal = right.
         match (dx, dy) {
             (0, 0) => Ok(()),
-            (0, dy) => self.send(&[self.mouse(MOUSEEVENTF_WHEEL, -dy * notch)]),
-            (dx, 0) => self.send(&[self.mouse(MOUSEEVENTF_HWHEEL, dx * notch)]),
-            (dx, dy) => self.send(&[self.mouse(MOUSEEVENTF_WHEEL, -dy * notch), self.mouse(MOUSEEVENTF_HWHEEL, dx * notch)]),
+            (0, dy) => self.send(&[self.mouse(MOUSEEVENTF_WHEEL, -dy)]),
+            (dx, 0) => self.send(&[self.mouse(MOUSEEVENTF_HWHEEL, dx)]),
+            (dx, dy) => self.send(&[self.mouse(MOUSEEVENTF_WHEEL, -dy), self.mouse(MOUSEEVENTF_HWHEEL, dx)]),
         }
     }
 

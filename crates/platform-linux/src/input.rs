@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use remothing_core::platform::{Button, InputProvider};
+use remothing_core::proto::WHEEL_NOTCH;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt as _, Window};
 use x11rb::protocol::xtest::ConnectionExt as _;
@@ -16,6 +17,10 @@ pub struct XTestInput {
     /// Position of the captured area on the X screen (RandR output origin).
     origin: (i32, i32),
     spare: Mutex<SpareKeys>,
+    /// Wheel units not sent yet (less than a notch each way): the X core
+    /// protocol and XTEST only have wheel buttons, one click per notch, so
+    /// trackpad and touch scrolling arrive here in whole notches.
+    wheel_rest: Mutex<(i32, i32)>,
 }
 
 /// Keycodes the layout leaves without symbols, lent in turn to typed
@@ -54,7 +59,7 @@ impl XTestInput {
         let (conn, screen) = x11rb::connect(Some(display)).context("connect to X for input")?;
         let root = conn.setup().roots[screen].root;
         conn.xtest_get_version(2, 2)?.reply()?;
-        Ok(Self { conn, root, display: display.to_string(), origin, spare: Mutex::default() })
+        Ok(Self { conn, root, display: display.to_string(), origin, spare: Mutex::default(), wheel_rest: Mutex::default() })
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
@@ -104,9 +109,18 @@ impl InputProvider for XTestInput {
     }
 
     fn wheel(&self, dx: i32, dy: i32) -> Result<()> {
+        let (nx, ny) = {
+            let mut rest = self.wheel_rest.lock().unwrap();
+            rest.0 += dx;
+            rest.1 += dy;
+            let notches = (rest.0 / WHEEL_NOTCH, rest.1 / WHEEL_NOTCH);
+            rest.0 -= notches.0 * WHEEL_NOTCH;
+            rest.1 -= notches.1 * WHEEL_NOTCH;
+            notches
+        };
         // X wheel buttons: 4/5 vertical, 6/7 horizontal.
-        self.click(if dy < 0 { 4 } else { 5 }, dy.unsigned_abs())?;
-        self.click(if dx < 0 { 6 } else { 7 }, dx.unsigned_abs())
+        self.click(if ny < 0 { 4 } else { 5 }, ny.unsigned_abs())?;
+        self.click(if nx < 0 { 6 } else { 7 }, nx.unsigned_abs())
     }
 
     fn key(&self, evdev: u16, down: bool) -> Result<()> {

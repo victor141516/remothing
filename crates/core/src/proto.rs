@@ -101,7 +101,12 @@ pub const C_EVENT: u8 = 8;
 pub const C_CLIPBOARD: u8 = 9;
 pub const C_MOVE: u8 = 10;
 pub const C_BUTTON: u8 = 11;
+/// pad u8, dx i16, dy i16: scroll in wheel units, WHEEL_NOTCH per notch of a
+/// mouse wheel (positive = right / down). Trackpads and touch send fractions
+/// of a notch, as precision touchpads do on Windows.
 pub const C_WHEEL: u8 = 12;
+/// Wheel units per notch (Windows' WHEEL_DELTA).
+pub const WHEEL_NOTCH: i32 = 120;
 /// down u8, evdev code u16. A key stays down on the remote side until its
 /// release arrives or the connection that pressed it goes away, so holding
 /// it repeats there as on a local keyboard.

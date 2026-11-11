@@ -1,13 +1,26 @@
 import { EVDEV } from './keymap';
-import { C_BUTTON, C_KEY, C_MOVE, C_TEXT, C_WHEEL } from './proto';
+import { C_BUTTON, C_KEY, C_MOVE, C_TEXT, C_WHEEL, WHEEL_NOTCH } from './proto';
 
 // Browser MouseEvent.button -> X button.
 const BUTTONS = [1, 2, 3, 8, 9];
 const LEFT = 1;
 const RIGHT = 3;
+/** Pixel delta of one wheel notch, as Chromium on Windows reports it. A
+ * mouse wheel arrives in whole notches; a trackpad (and the OS's momentum
+ * after a flick on one) in a few pixels at a time, which go out as
+ * fractions of a notch: the remote side scrolls as finely. */
 const WHEEL_STEP_PX = 100;
+/** A notch scrolls three lines (`deltaMode` line, Firefox's mouse wheel). */
+const LINE_UNITS = WHEEL_NOTCH / 3;
 /** Two fingers dragged this far scroll one wheel step. */
 const TOUCH_WHEEL_STEP_PX = 24;
+/** A two-finger drag let go faster than this (px/ms) keeps scrolling, slowing
+ * down by e every FLING_DECAY_MS, as a phone's own pages do; below
+ * FLING_STOP it ends. Only the last FLING_WINDOW_MS of the drag count. */
+const FLING_MIN = 0.3;
+const FLING_STOP = 0.02;
+const FLING_DECAY_MS = 325;
+const FLING_WINDOW_MS = 100;
 /** A finger never rests perfectly still: fingers that travel less than this, all together, made a tap. */
 const TAP_SLOP_PX = 10;
 /** A touch this soon after a tap holds the left button: the second click of a double click, or a drag. */
@@ -16,9 +29,13 @@ const DOUBLE_TAP_MS = 300;
 export class Input {
   private keys = new Set<number>();
   private buttons = new Set<number>();
-  /** Wheel steps not sent yet (less than one). */
+  /** Wheel units (1/WHEEL_NOTCH of a notch) not sent yet (less than one). */
   private wheelX = 0;
   private wheelY = 0;
+  /** Recent two-finger scroll moves (finger pixels), for the fling. */
+  private scrollMoves: { t: number; dx: number; dy: number }[] = [];
+  /** The running fling's animation frame. */
+  private fling = 0;
   /** Fingers on the screen, with their last position. */
   private touches = new Map<number, { x: number; y: number }>();
   /** The touch gesture going on: most fingers down at once, and how far they travelled. */
@@ -126,6 +143,8 @@ export class Input {
 
   private touchDown(e: PointerEvent): void {
     if (this.touches.size === 0) {
+      cancelAnimationFrame(this.fling);
+      this.scrollMoves = [];
       this.fingers = 0;
       this.travel = 0;
       if (performance.now() - this.tappedAt < DOUBLE_TAP_MS && this.screenWidth > 0) {
@@ -162,7 +181,7 @@ export class Input {
     } else if (!this.dragging && this.touches.size === 2) {
       // Each finger reports its half of the drag. What is on the screen
       // follows the fingers, as when scrolling the phone's own pages.
-      this.scroll(-dx / 2 / TOUCH_WHEEL_STEP_PX, -dy / 2 / TOUCH_WHEEL_STEP_PX);
+      this.touchScroll(-dx / 2, -dy / 2);
     }
   }
 
@@ -181,6 +200,7 @@ export class Input {
       return;
     }
     const button = this.fingers === 1 ? LEFT : this.fingers === 2 ? RIGHT : undefined;
+    if (!tapped && this.fingers === 2) this.startFling();
     if (!tapped || button === undefined) return;
     // The click goes where the pointer is drawn, even if something else moved the remote one since.
     this.moveTo(Math.round(this.pointerX), Math.round(this.pointerY));
@@ -191,16 +211,52 @@ export class Input {
 
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
-    const scale = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 33 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1;
-    this.scroll((e.deltaX * scale) / WHEEL_STEP_PX, (e.deltaY * scale) / WHEEL_STEP_PX);
+    const units =
+      e.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? LINE_UNITS
+        : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? 4 * WHEEL_NOTCH
+          : WHEEL_NOTCH / WHEEL_STEP_PX;
+    this.scroll(e.deltaX * units, e.deltaY * units);
   }
 
-  /** Scrolls by wheel steps (fractions add up); positive = down / right. */
+  /** Scrolls by finger pixels of a two-finger drag. */
+  private touchScroll(dx: number, dy: number): void {
+    const t = performance.now();
+    this.scrollMoves.push({ t, dx, dy });
+    while (this.scrollMoves[0].t < t - FLING_WINDOW_MS) this.scrollMoves.shift();
+    this.scroll((dx * WHEEL_NOTCH) / TOUCH_WHEEL_STEP_PX, (dy * WHEEL_NOTCH) / TOUCH_WHEEL_STEP_PX);
+  }
+
+  /** Keeps a two-finger drag that was let go fast scrolling, slower and slower. */
+  private startFling(): void {
+    const now = performance.now();
+    const recent = this.scrollMoves.filter((m) => m.t >= now - FLING_WINDOW_MS);
+    this.scrollMoves = [];
+    if (recent.length < 2) return;
+    const span = Math.max(now - recent[0].t, 1);
+    let vx = recent.reduce((s, m) => s + m.dx, 0) / span;
+    let vy = recent.reduce((s, m) => s + m.dy, 0) / span;
+    if (Math.hypot(vx, vy) < FLING_MIN) return;
+    let last = now;
+    const step = (t: number): void => {
+      const dt = Math.max(t - last, 0);
+      last = t;
+      const keep = Math.exp(-dt / FLING_DECAY_MS);
+      this.scroll((vx * dt * WHEEL_NOTCH) / TOUCH_WHEEL_STEP_PX, (vy * dt * WHEEL_NOTCH) / TOUCH_WHEEL_STEP_PX);
+      vx *= keep;
+      vy *= keep;
+      if (Math.hypot(vx, vy) >= FLING_STOP) this.fling = requestAnimationFrame(step);
+    };
+    this.fling = requestAnimationFrame(step);
+  }
+
+  /** Scrolls by wheel units (fractions add up); positive = down / right. */
   private scroll(dx: number, dy: number): void {
     this.wheelX += dx;
     this.wheelY += dy;
-    const sx = Math.trunc(this.wheelX);
-    const sy = Math.trunc(this.wheelY);
+    const sx = Math.max(-32767, Math.min(32767, Math.trunc(this.wheelX)));
+    const sy = Math.max(-32767, Math.min(32767, Math.trunc(this.wheelY)));
     if (sx === 0 && sy === 0) return;
     this.wheelX -= sx;
     this.wheelY -= sy;
