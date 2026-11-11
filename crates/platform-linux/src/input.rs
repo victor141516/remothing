@@ -16,6 +16,7 @@ pub struct XTestInput {
     display: String,
     /// Position of the captured area on the X screen (RandR output origin).
     origin: (i32, i32),
+    size: (u32, u32),
     spare: Mutex<SpareKeys>,
     /// Wheel units not sent yet (less than a notch each way): the X core
     /// protocol and XTEST only have wheel buttons, one click per notch, so
@@ -55,11 +56,13 @@ fn keysym(c: char) -> Option<u32> {
 }
 
 impl XTestInput {
-    pub fn new(display: &str, origin: (i32, i32)) -> Result<Self> {
+    /// `origin` and `size`: the captured area on the X screen.
+    pub fn new(display: &str, origin: (i32, i32), size: (u32, u32)) -> Result<Self> {
         let (conn, screen) = x11rb::connect(Some(display)).context("connect to X for input")?;
         let root = conn.setup().roots[screen].root;
         conn.xtest_get_version(2, 2)?.reply()?;
-        Ok(Self { conn, root, display: display.to_string(), origin, spare: Mutex::default(), wheel_rest: Mutex::default() })
+        let (spare, wheel_rest) = (Mutex::default(), Mutex::default());
+        Ok(Self { conn, root, display: display.to_string(), origin, size, spare, wheel_rest })
     }
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
@@ -94,6 +97,20 @@ impl InputProvider for XTestInput {
     fn motion(&self, x: u32, y: u32) -> Result<()> {
         let (ox, oy) = self.origin;
         self.fake(xproto::MOTION_NOTIFY_EVENT, 0, (ox + x as i32) as i16, (oy + y as i32) as i16)
+    }
+
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
+        // XTEST motion with detail 1 is relative to where the pointer is.
+        let clamp = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        self.fake(xproto::MOTION_NOTIFY_EVENT, 1, clamp(dx), clamp(dy))?;
+        let p = self.conn.query_pointer(self.root)?.reply()?;
+        let (x, y) = (p.root_x as i32 - self.origin.0, p.root_y as i32 - self.origin.1);
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        if (0..w).contains(&x) && (0..h).contains(&y) {
+            return Ok(());
+        }
+        // Left the captured output (another RandR output): back on its edge.
+        self.motion(x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)
     }
 
     fn button(&self, button: Button, down: bool) -> Result<()> {

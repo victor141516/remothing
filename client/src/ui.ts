@@ -34,6 +34,8 @@ export interface UiActions {
   toggleSound(): void;
   /** Switches this device's microphone into the remote session, or out of it. */
   toggleMic(): void;
+  /** Turns mouse capture (games) on or off. */
+  toggleCapture(): void;
   /** The space left for the picture changed (the keyboard opened or closed). */
   layout(): void;
 }
@@ -49,6 +51,7 @@ export class Ui {
   private readonly fullscreenButton: HTMLButtonElement;
   private readonly soundButton: HTMLButtonElement;
   private readonly micButton: HTMLButtonElement;
+  private readonly captureButton: HTMLButtonElement;
   private readonly prompt = document.createElement('div');
   /** Answers the question on screen, if there is one. */
   private answer: ((yes: boolean) => void) | null = null;
@@ -105,12 +108,17 @@ export class Ui {
     this.micButton = this.button('Mic', '', actions.toggleMic);
     // Browsers only give the microphone to secure pages.
     this.micButton.hidden = navigator.mediaDevices?.getUserMedia === undefined;
+    this.captureButton = this.button('Capture', '', actions.toggleCapture);
+    // Only with a mouse or trackpad: a touch screen has no pointer to trap.
+    this.captureButton.hidden = !matchMedia('(any-pointer: fine)').matches;
+    this.capture(false, false);
     this.bar.append(
       this.fullscreenButton,
       this.displaySelect,
       clipboardButton,
       this.soundButton,
       this.micButton,
+      this.captureButton,
       typeButton,
       keyboardButton,
       this.button('Stats', 'Latency overlay', actions.toggleStats),
@@ -141,6 +149,15 @@ export class Ui {
   sound(playing: boolean, status: string): void {
     this.soundButton.classList.toggle('on', playing);
     this.soundButton.title = `Sound of the remote session: ${status}`;
+  }
+
+  /** Mouse capture: the mode, and whether the mouse is trapped right now. */
+  capture(mode: boolean, locked: boolean): void {
+    this.captureButton.classList.toggle('on', mode);
+    this.captureButton.textContent = mode && !locked ? 'Capture: click the picture' : 'Capture';
+    this.captureButton.title =
+      'Traps the mouse in the picture, for games (Ctrl+Alt+Shift+Z turns it on and off). ' +
+      'Esc frees the mouse in a window; a click on the picture traps it again.';
   }
 
   /** This device's microphone in the remote session (`Microphone.state`), and why. */

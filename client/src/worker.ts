@@ -17,10 +17,10 @@ import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
+  C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
   C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
-  RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
+  RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_SIGNAL, VIEW_HDR, now,
 } from './proto';
 import { Renderer } from './renderer';
@@ -57,12 +57,16 @@ export type ToWorker =
   | { type: 'input'; buf: ArrayBuffer }
   /** How the picture is shown: its size in the window (device pixels), the
    * refresh rate, and whether the page can show HDR where it is now. */
-  | { type: 'view'; width: number; height: number; hz: number; hdr: boolean };
+  | { type: 'view'; width: number; height: number; hz: number; hdr: boolean }
+  /** The mouse is trapped in the picture (or not any more). */
+  | { type: 'capture'; on: boolean };
 
 export type FromWorker =
   /** `hdr`: the picture is HDR (the page has to be switched to HDR). */
   | { type: 'hello'; width: number; height: number; hdr: boolean }
   | { type: 'cursor'; buf: ArrayBuffer }
+  /** Where the remote cursor's hot spot is (S_CURSOR_POS). */
+  | { type: 'cursorpos'; x: number; y: number }
   | { type: 'marker'; marker: number; at: number }
   | { type: 'stats'; batch: Batch; pipeline: string; pingRtt: number }
   | { type: 'signal'; json: string }
@@ -262,6 +266,8 @@ function sendVisible(): void {
 let audioOn = false;
 /** The last C_VIEW (sent again on every connection). */
 let viewMessage: Uint8Array | null = null;
+/** The mouse is trapped (told again on every connection). */
+let captureOn = false;
 function sendAudio(): void {
   send(new Uint8Array([C_AUDIO, audioOn ? 1 : 0]));
 }
@@ -776,6 +782,7 @@ function connect(url: string): void {
     if (!visible) sendVisible();
     if (audioOn) sendAudio();
     if (viewMessage) send(viewMessage);
+    if (captureOn) send(new Uint8Array([C_CAPTURE, 1]));
   };
   ws.onmessage = (ev) => {
     const received = now();
@@ -807,6 +814,9 @@ function connect(url: string): void {
       }
       case S_CURSOR:
         post({ type: 'cursor', buf }, [buf]);
+        break;
+      case S_CURSOR_POS:
+        post({ type: 'cursorpos', x: v.getUint16(2, true), y: v.getUint16(4, true) });
         break;
       case S_CLIPBOARD:
         post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 1)) });
@@ -943,6 +953,12 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       send(v);
       break;
     }
+    case 'capture':
+      if (m.on !== captureOn) {
+        captureOn = m.on;
+        send(new Uint8Array([C_CAPTURE, m.on ? 1 : 0]));
+      }
+      break;
     case 'micdata':
       send(new Uint8Array(m.buf));
       break;

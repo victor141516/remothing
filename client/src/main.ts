@@ -67,6 +67,12 @@ const input = new Input(
     }
   },
   showPointer,
+  () => {
+    // The server sends where its cursor is only while the mouse is trapped.
+    toWorker({ type: 'capture', on: input.locked });
+    ui.capture(input.capture, input.locked);
+    showPointer();
+  },
 );
 
 const stats = new Stats();
@@ -86,6 +92,7 @@ const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
   toggleStats: () => (statsEl.hidden = !statsEl.hidden),
   toggleSound: () => sound.toggle(),
   toggleMic: () => void mic.toggle(),
+  toggleCapture: () => input.setCapture(!input.capture),
   layout,
 });
 
@@ -232,10 +239,11 @@ const pointer = document.getElementById('pointer') as HTMLCanvasElement;
 /** Hot spot of the remote cursor's shape; null while the remote side hides its cursor. */
 let hotSpot: [number, number] | null = null;
 
-/** A finger has no cursor in the browser: with touch input the remote
- * cursor's shape is drawn over the picture, where the pointer is. */
+/** A finger has no cursor in the browser, and a trapped mouse shows none:
+ * then the remote cursor's shape is drawn over the picture, where the
+ * pointer is (for a trapped mouse, where the server says it is). */
 function showPointer(): void {
-  pointer.hidden = !input.touch || hotSpot === null || input.screenWidth === 0;
+  pointer.hidden = !(input.touch || input.locked) || hotSpot === null || input.screenWidth === 0;
   if (pointer.hidden || hotSpot === null) return;
   const r = canvas.getBoundingClientRect();
   const x = r.left + (input.pointerX * r.width) / input.screenWidth - hotSpot[0];
@@ -270,6 +278,13 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'cursor':
       setCursor(m.buf);
+      break;
+    case 'cursorpos':
+      if (input.locked) {
+        input.pointerX = m.x;
+        input.pointerY = m.y;
+        showPointer();
+      }
       break;
     case 'marker':
       prober.observed(m.marker, m.at);

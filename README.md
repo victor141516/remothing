@@ -91,6 +91,12 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   can draw HDR (Chromium-based browsers), the picture is sent in HDR
   instead; `&stats` shows `HDR`, and the admin status `hdr_max` (above 0
   while the picture is HDR).
+- Games that turn the camera with the mouse: `Capture` in the controls (or
+  Ctrl+Alt+Shift+Z, Ctrl+Option+Shift+Z on a Mac) traps the mouse in the
+  picture after a click on it, so it never leaves the window. Esc frees it
+  in a window (the browser insists), and a click traps it again; the same
+  shortcut or button turns capture off. A game that needs Esc: use
+  `Fullscreen` too, where Esc reaches the remote side.
 - Scrolling keeps the device's steps: a mouse wheel scrolls by notches,
   a trackpad (a Mac's included, with its momentum) or two fingers on a
   touch screen scroll as finely as they move. Windows programs that read

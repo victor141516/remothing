@@ -68,6 +68,9 @@ pub const S_MIC_INFO: u8 = 11;
 /// be rebuilt, and a run of up to `parity` lost in a row too.
 pub const S_PIECE: u8 = 12;
 pub const PIECE_HEADER_LEN: usize = 16;
+/// pad u8, x u16, y u16: where the remote cursor's hot spot is, display
+/// pixels. Only to a client that captured the mouse (C_CAPTURE), when it moves.
+pub const S_CURSOR_POS: u8 = 13;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
@@ -147,6 +150,12 @@ pub const C_NACK: u8 = 20;
 /// VIEW_HDR, the client can show an HDR picture where it is now.
 pub const C_VIEW: u8 = 21;
 pub const VIEW_HDR: u8 = 1;
+/// pad u8, dx i16, dy i16: move the pointer by that many mouse counts
+/// (the client captured the mouse; a game reads them as they are).
+pub const C_MOVE_REL: u8 = 22;
+/// on u8: the client has the mouse captured (1) or not (0); while it has,
+/// it gets S_CURSOR_POS.
+pub const C_CAPTURE: u8 = 23;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
@@ -282,6 +291,13 @@ pub fn cursor(state: &CursorState) -> Vec<u8> {
     }
     m.extend_from_slice(&[0, 0]);
     m.extend_from_slice(rgba);
+    m
+}
+
+pub fn cursor_pos(x: u32, y: u32) -> Vec<u8> {
+    let mut m = vec![S_CURSOR_POS, 0];
+    m.extend_from_slice(&(x.min(0xffff) as u16).to_le_bytes());
+    m.extend_from_slice(&(y.min(0xffff) as u16).to_le_bytes());
     m
 }
 

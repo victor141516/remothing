@@ -338,6 +338,23 @@ coordinates, evdev key codes on the wire).
   server only ever gets absolute positions. The browser shows no cursor
   for a finger, so the remote cursor's shape (`S_CURSOR`) is drawn over
   the picture at that position.
+- **Mouse capture** (games: the mouse turns the camera and the game keeps
+  its cursor in the middle): a `Capture` button or Ctrl+Alt+Shift+Z turns
+  the mode on; a click on the picture then traps the mouse with the
+  browser's Pointer Lock (raw counts where the browser offers
+  `unadjustedMovement`, without this computer's acceleration) and that
+  click is not sent. While trapped the client sends counts (`C_MOVE_REL`)
+  instead of positions: Windows injects them as a relative `SendInput`
+  (the remote pointer speed applies to the cursor, games reading raw
+  input get the counts), X11 as relative XTEST motion. A move that would
+  take the cursor off the streamed display puts it back on its edge. The
+  browser hides the local cursor, so the client says it captured
+  (`C_CAPTURE`) and gets the remote hot spot's position (`S_CURSOR_POS`,
+  from DXGI's pointer position, or QueryPointer on X11, asked only while a
+  client captures), where it draws the remote cursor's shape. Esc in a
+  window, Alt+Tab or another tab free the mouse (the browser decides); the
+  mode stays on and the next click traps it again. In fullscreen with the
+  keyboard lock Esc reaches the game.
 - **Scrolling** (`C_WHEEL`) travels in wheel units, 120 per notch
   (Windows' `WHEEL_DELTA`), so nothing has to guess the device: a mouse
   wheel arrives in whole notches (Chromium reports 100 px each, Firefox
@@ -601,6 +618,7 @@ flowchart LR
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional video access unit), CURSOR (RGBA + hotspot, 0×0 = hidden),
+CURSOR_POS (the cursor's hot spot, to a client that captured the mouse),
 PONG, SIGNAL (WebRTC and WebTransport JSON), CHUNK (data-channel piece of a
 FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), CLIPBOARD
 (text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
@@ -613,9 +631,10 @@ per undecodable frame), STATS (JSON for the admin UI), SIGNAL, HELLO_ACK,
 VISIBLE (a hidden tab gets no frames; changes accumulate into one frame for
 when it shows again), EVENT (text for the event log), CLIPBOARD, DISPLAYS,
 DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
-it, agree to install or restart), MIC (one packet), MOVE, BUTTON, WHEEL,
-KEY, TEXT, NACK (WebTransport pieces to send again), VIEW (picture size in
-the window and refresh rate).
+it, agree to install or restart), MIC (one packet), MOVE, MOVE_REL (mouse
+counts while captured), BUTTON, WHEEL, KEY, TEXT, NACK (WebTransport
+pieces to send again), VIEW (picture size in the window and refresh rate),
+CAPTURE (the mouse is captured or not).
 
 ## Admin
 

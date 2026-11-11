@@ -162,6 +162,10 @@ pub enum CursorState {
 pub trait CursorProvider {
     /// Cursor visibility/shape if it changed since the previous call.
     fn cursor_change(&mut self) -> Result<Option<CursorState>>;
+    /// Where the cursor's hot spot is (display pixels, clamped to the
+    /// display) if it moved since the previous call. Asked only while a
+    /// client has the mouse captured.
+    fn cursor_position(&mut self) -> Result<Option<(u32, u32)>>;
 }
 
 /// One open display capture. Driven from a single capture thread.
@@ -202,6 +206,10 @@ pub enum Button {
 /// Input injection into one display. Coordinates are display-relative pixels.
 pub trait InputProvider: Send + Sync {
     fn motion(&self, x: u32, y: u32) -> Result<()>;
+    /// Moves the pointer by `dx`, `dy` mouse counts, as a mouse does (a game
+    /// reads them as they are). The pointer stays on this display: a move
+    /// that would leave it ends on its edge.
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()>;
     fn button(&self, button: Button, down: bool) -> Result<()>;
     /// Scroll in wheel units (`proto::WHEEL_NOTCH` per notch, fractions of
     /// one from trackpads and touch); positive = down / right.

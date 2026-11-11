@@ -400,7 +400,11 @@ impl DxgiSession {
         capture_us: u64,
     ) -> Result<Option<(FrameInfo, bool)>> {
         if info.LastMouseUpdateTime != 0 {
-            self.cursor.set_visible(info.PointerPosition.Visible.as_bool());
+            let p = &info.PointerPosition;
+            self.cursor.set_visible(p.Visible.as_bool());
+            if p.Visible.as_bool() {
+                self.cursor.set_position(p.Position.x, p.Position.y);
+            }
         }
         if info.PointerShapeBufferSize > 0 {
             self.read_pointer_shape(dupl, info.PointerShapeBufferSize)?;
@@ -682,6 +686,10 @@ impl Drop for PollTimer {
 impl CursorProvider for DxgiSession {
     fn cursor_change(&mut self) -> Result<Option<CursorState>> {
         Ok(self.cursor.take_change())
+    }
+
+    fn cursor_position(&mut self) -> Result<Option<(u32, u32)>> {
+        Ok(self.cursor.take_position(self.width, self.height))
     }
 }
 

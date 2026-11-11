@@ -209,6 +209,12 @@ impl CaptureLoop {
             if let Some(state) = capture.cursor_change()? {
                 self.shared.set_cursor(proto::cursor(&state));
             }
+            // Asked only while a client captures the mouse (it costs a query on X11).
+            if self.shared.wants_cursor_pos() {
+                if let Some(pos) = capture.cursor_position()? {
+                    self.shared.set_cursor_pos(pos);
+                }
+            }
             let frame = capture.next_frame(FRAME_WAIT)?;
             let hints = gpu.then(|| self.shared.capture_hints(proto::now_us()));
             if let Some(h) = &hints {

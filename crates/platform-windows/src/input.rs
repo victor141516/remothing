@@ -14,8 +14,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
     MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
+use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SystemParametersInfoW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    GetCursorPos, GetSystemMetrics, SystemParametersInfoW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED, SYSTEM_PARAMETERS_INFO_ACTION,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, XBUTTON1, XBUTTON2,
 };
@@ -254,6 +255,25 @@ impl InputProvider for SendInputProvider {
         let py = self.y + y.min(self.height.saturating_sub(1)) as i32;
         let flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
         self.send(&[mouse_input(normalize(px - vx, cx), normalize(py - vy, cy), flags, 0)])
+    }
+
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
+        // Relative SendInput moves the cursor with the remote user's pointer
+        // speed and "enhance pointer precision" setting; programs reading
+        // raw input (games) get the counts as sent.
+        self.send(&[mouse_input(dx, dy, MOUSEEVENTF_MOVE, 0)])?;
+        let mut p = POINT::default();
+        // SAFETY: valid out pointer. Fails on a desktop this thread cannot
+        // read (secure desktop): nothing to keep then.
+        if unsafe { GetCursorPos(&mut p) }.is_err() {
+            return Ok(());
+        }
+        let (x, y) = (p.x - self.x, p.y - self.y);
+        if (0..self.width as i32).contains(&x) && (0..self.height as i32).contains(&y) {
+            return Ok(());
+        }
+        // Left the streamed display, where the client cannot see it: back on its edge.
+        self.motion(x.max(0) as u32, y.max(0) as u32)
     }
 
     fn button(&self, button: Button, down: bool) -> Result<()> {

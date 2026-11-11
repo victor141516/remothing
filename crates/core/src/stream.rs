@@ -482,6 +482,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         app.shared.set_client_hdr(link.id, hdr);
                         waker.unpark();
                     }
+                    (Some(proto::C_CAPTURE), 2..) => {
+                        let on = b[1] != 0;
+                        app.telemetry.event(link.id, if on { "mouse captured" } else { "mouse released" });
+                        app.shared.set_client_capture(link.id, on);
+                    }
                     (Some(proto::C_HELLO_ACK), _) => {
                         link.hello_acked.store(true, Ordering::Release);
                         waker.unpark();
@@ -874,6 +879,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 need_key = true;
             }
         }
+        if let Some(p) = shared.take_cursor_pos(link.id) {
+            if out.send(p).is_err() {
+                return;
+            }
+        }
         if let Some(c) = shared.take_cursor(link.id) {
             if out.send(c.to_vec()).is_err() {
                 return;
@@ -1264,6 +1274,7 @@ fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
     let Some(input) = app.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
+        (Some(proto::C_MOVE_REL), 6..) => input.motion_relative(u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32)?,
         (Some(proto::C_BUTTON), 3..) => {
             // Wire format uses X button numbers.
             let button = match b[1] {

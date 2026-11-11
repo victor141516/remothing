@@ -15,11 +15,14 @@ use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use crate::cursor::cursor_image;
+use crate::cursor::{cursor_image, pointer_position};
 use crate::xfb::XvfbFramebuffer;
 
 pub struct XvfbSession {
     conn: RustConnection,
+    root: x11rb::protocol::xproto::Window,
+    /// Where the pointer was last reported (`cursor_position`).
+    pointer: Option<(u32, u32)>,
     damage: damage::Damage,
     region: xfixes::Region,
     fb: XvfbFramebuffer,
@@ -42,7 +45,7 @@ impl XvfbSession {
         conn.xfixes_create_region(region, &[])?;
         conn.xfixes_select_cursor_input(root, xfixes::CursorNotifyMask::DISPLAY_CURSOR)?;
         conn.flush()?;
-        Ok(Self { conn, damage, region, fb, first: true, cursor_pending: true, _owner: owner })
+        Ok(Self { conn, root, pointer: None, damage, region, fb, first: true, cursor_pending: true, _owner: owner })
     }
 }
 
@@ -52,6 +55,11 @@ impl CursorProvider for XvfbSession {
             return Ok(None);
         }
         Ok(Some(CursorState::Visible(Arc::new(cursor_image(&self.conn)?))))
+    }
+
+    fn cursor_position(&mut self) -> Result<Option<(u32, u32)>> {
+        let size = (self.fb.width, self.fb.height);
+        pointer_position(&self.conn, self.root, (0, 0), size, &mut self.pointer)
     }
 }
 

@@ -99,16 +99,17 @@ impl DisplayProvider for LinuxDisplays {
         if let Some(instance) = self.xvfb.get(id) {
             let display = instance.display();
             let capture = XvfbSession::open(&display, instance.shmid, instance.clone())?;
-            let input = Arc::new(XTestInput::new(&display, (0, 0))?);
+            let info = instance.info();
+            let input = Arc::new(XTestInput::new(&display, (0, 0), (info.width, info.height))?);
             let clipboard = clipboard(&display);
-            return Ok(OpenedDisplay { info: instance.info(), capture: Box::new(capture), input, clipboard });
+            return Ok(OpenedDisplay { info, capture: Box::new(capture), input, clipboard });
         }
         if let Some(rest) = id.strip_prefix("x11:") {
             // id = "x11:<display>:<output>"; the display itself may contain ':'.
             let display = self.x11_displays.iter().find(|d| rest.starts_with(&format!("{d}:"))).context("unknown X display")?;
             let info = x11::list(display)?.into_iter().find(|i| i.id == id).context("output no longer active")?;
             let capture = x11::X11Session::open(display, &info)?;
-            let input = Arc::new(XTestInput::new(display, (info.x, info.y))?);
+            let input = Arc::new(XTestInput::new(display, (info.x, info.y), (info.width, info.height))?);
             return Ok(OpenedDisplay { info, capture: Box::new(capture), input, clipboard: clipboard(display) });
         }
         bail!("unknown display {id}")

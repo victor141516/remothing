@@ -81,12 +81,16 @@ pub fn convert(info: &DXGI_OUTDUPL_POINTER_SHAPE_INFO, buf: &[u8]) -> Option<Cur
     })
 }
 
-/// Pointer visibility and shape as last seen by the duplication, reported only on change.
+/// Pointer visibility, shape and position as last seen by the duplication,
+/// reported only on change.
 #[derive(Default)]
 pub struct CursorTracker {
     visible: bool,
     shape: Option<Arc<CursorShape>>,
     changed: bool,
+    /// Top-left corner of the shape on the output (DXGI reports that, not the hot spot).
+    position: Option<(i32, i32)>,
+    moved: bool,
 }
 
 impl CursorTracker {
@@ -102,6 +106,24 @@ impl CursorTracker {
             self.shape = Some(Arc::new(shape));
             self.changed = true;
         }
+    }
+
+    pub fn set_position(&mut self, x: i32, y: i32) {
+        if self.position != Some((x, y)) {
+            self.position = Some((x, y));
+            self.moved = true;
+        }
+    }
+
+    /// The hot spot's position, clamped to a `width` x `height` output, if it moved.
+    pub fn take_position(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let (x, y) = self.position?;
+        if !std::mem::take(&mut self.moved) {
+            return None;
+        }
+        let (hx, hy) = self.shape.as_ref().map_or((0, 0), |s| (s.hot_x as i32, s.hot_y as i32));
+        let clamp = |v: i32, max: u32| v.clamp(0, max.saturating_sub(1) as i32) as u32;
+        Some((clamp(x + hx, width), clamp(y + hy, height)))
     }
 
     pub fn take_change(&mut self) -> Option<CursorState> {

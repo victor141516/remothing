@@ -117,6 +117,9 @@ struct Inner {
     changed_us: u64,
     motion: MotionDetector,
     cursor: Option<Arc<Vec<u8>>>,
+    /// Where the cursor's hot spot was last seen (only kept up to date while
+    /// a client captures the mouse).
+    cursor_pos: Option<(u32, u32)>,
     clients: Vec<ClientState>,
 }
 
@@ -148,6 +151,9 @@ struct ClientState {
     oldest_us: u64,
     newest_us: u64,
     cursor_dirty: bool,
+    /// The client captured the mouse: it gets the cursor's position.
+    capture: bool,
+    cursor_pos_dirty: bool,
     seq: u32,
     waker: Thread,
 }
@@ -241,6 +247,7 @@ impl Shared {
                 changed_us: 0,
                 motion: MotionDetector::default(),
                 cursor: None,
+                cursor_pos: None,
                 clients: Vec::new(),
             }),
             next_id: AtomicU64::new(1),
@@ -301,6 +308,8 @@ impl Shared {
             oldest_us: 0,
             newest_us: 0,
             cursor_dirty,
+            capture: false,
+            cursor_pos_dirty: false,
             seq: 0,
             waker: waker.clone(),
         });
@@ -375,6 +384,43 @@ impl Shared {
             return None;
         }
         cursor
+    }
+
+    /// The client captured the mouse (or let it go): while it has, it gets
+    /// the cursor's position (`take_cursor_pos`), the current one at once.
+    pub fn set_client_capture(&self, id: u64, on: bool) {
+        let mut g = self.inner.lock().unwrap();
+        let known = g.cursor_pos.is_some();
+        if let Some(c) = g.clients.iter_mut().find(|c| c.id == id) {
+            c.capture = on;
+            c.cursor_pos_dirty = on && known;
+            c.waker.unpark();
+        }
+    }
+
+    /// Some client captured the mouse: the capture loop follows the cursor.
+    pub fn wants_cursor_pos(&self) -> bool {
+        self.inner.lock().unwrap().clients.iter().any(|c| c.capture)
+    }
+
+    pub fn set_cursor_pos(&self, pos: (u32, u32)) {
+        let mut g = self.inner.lock().unwrap();
+        if g.cursor_pos == Some(pos) {
+            return;
+        }
+        g.cursor_pos = Some(pos);
+        for c in g.clients.iter_mut().filter(|c| c.capture) {
+            c.cursor_pos_dirty = true;
+            c.waker.unpark();
+        }
+    }
+
+    /// S_CURSOR_POS for this client, when it captures the mouse and the cursor moved.
+    pub fn take_cursor_pos(&self, id: u64) -> Option<Vec<u8>> {
+        let mut g = self.inner.lock().unwrap();
+        let (x, y) = g.cursor_pos?;
+        let c = g.clients.iter_mut().find(|c| c.id == id)?;
+        std::mem::take(&mut c.cursor_pos_dirty).then(|| proto::cursor_pos(x, y))
     }
 
     /// The client's encoder was replaced (another encoded size): its input

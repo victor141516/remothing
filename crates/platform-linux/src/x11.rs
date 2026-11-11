@@ -18,7 +18,7 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
-use crate::cursor::cursor_image;
+use crate::cursor::{cursor_image, pointer_position};
 
 /// Lists the active outputs of `display` (whole screen when RandR has none).
 pub fn list(display: &str) -> Result<Vec<DisplayInfo>> {
@@ -119,6 +119,8 @@ pub struct X11Session {
     shm: ShmSegment,
     first: bool,
     cursor_pending: bool,
+    /// Where the pointer was last reported (`cursor_position`).
+    pointer: Option<(u32, u32)>,
 }
 
 impl X11Session {
@@ -149,6 +151,7 @@ impl X11Session {
             shm,
             first: true,
             cursor_pending: true,
+            pointer: None,
         })
     }
 }
@@ -159,6 +162,11 @@ impl CursorProvider for X11Session {
             return Ok(None);
         }
         Ok(Some(CursorState::Visible(Arc::new(cursor_image(&self.conn)?))))
+    }
+
+    fn cursor_position(&mut self) -> Result<Option<(u32, u32)>> {
+        let size = (self.area.w, self.area.h);
+        pointer_position(&self.conn, self.root, self.origin, size, &mut self.pointer)
     }
 }
 

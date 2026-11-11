@@ -1,5 +1,5 @@
 import { EVDEV } from './keymap';
-import { C_BUTTON, C_KEY, C_MOVE, C_TEXT, C_WHEEL, WHEEL_NOTCH } from './proto';
+import { C_BUTTON, C_KEY, C_MOVE, C_MOVE_REL, C_TEXT, C_WHEEL, WHEEL_NOTCH } from './proto';
 
 // Browser MouseEvent.button -> X button.
 const BUTTONS = [1, 2, 3, 8, 9];
@@ -52,12 +52,19 @@ export class Input {
   pointerY = 0;
   /** The pointer is driven by touch: the browser shows no cursor for it. */
   touch = false;
+  /** Capture mode (games): a click on the picture traps the mouse, which then moves the remote side by counts. */
+  capture = false;
+  /** Mouse counts not sent yet (less than one). */
+  private relX = 0;
+  private relY = 0;
 
-  /** `pointerChanged`: `touch` changed, or the pointer moved by touch. */
+  /** `pointerChanged`: `touch` changed, or the pointer moved by touch.
+   * `captureChanged`: the capture mode, or whether the mouse is trapped, changed. */
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly send: (msg: Uint8Array) => void,
     private readonly pointerChanged: () => void,
+    private readonly captureChanged: () => void,
   ) {
     // pointerrawupdate fires as soon as the OS delivers motion, not aligned to frames.
     const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
@@ -66,17 +73,27 @@ export class Input {
     canvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'touch') return;
       canvas.focus();
-      canvas.setPointerCapture(e.pointerId);
-      this.onMove(e);
-      this.button(e.button, true);
       e.preventDefault();
+      if (this.capture && !this.locked) {
+        // This click only traps the mouse; the remote side does not get it.
+        this.lock();
+        return;
+      }
+      if (!this.locked) {
+        canvas.setPointerCapture(e.pointerId);
+        this.onMove(e);
+      }
+      this.button(e.button, true);
     });
     canvas.addEventListener('pointerup', (e) => {
       if (e.pointerType === 'touch') return;
-      this.onMove(e);
+      if (!this.locked) this.onMove(e);
       this.button(e.button, false);
       e.preventDefault();
     });
+    // Lost (Esc in a window, Alt+Tab, another tab) or taken: the mode stays,
+    // the next click on the picture traps the mouse again.
+    document.addEventListener('pointerlockchange', () => this.captureChanged());
     // Touch works as on a trackpad, and so anywhere around the picture too
     // (a wide screen on an upright phone is a narrow strip): one finger
     // moves the pointer from where it is, a tap clicks, a tap with two
@@ -110,6 +127,29 @@ export class Input {
     this.screenHeight = height;
   }
 
+  /** The mouse is trapped in the picture (Pointer Lock). */
+  get locked(): boolean {
+    return document.pointerLockElement === this.canvas;
+  }
+
+  /** Turns capture mode on (trying to trap the mouse at once: a key press or
+   * button click counts as the user's gesture) or off. */
+  setCapture(on: boolean): void {
+    this.capture = on;
+    if (on) this.lock();
+    else if (this.locked) document.exitPointerLock();
+    this.captureChanged();
+  }
+
+  /** Raw movement (without this computer's pointer acceleration, what a game
+   * reads) where the browser offers it, else as the pointer moves. */
+  private lock(): void {
+    const canvas = this.canvas;
+    void Promise.resolve(canvas.requestPointerLock({ unadjustedMovement: true }))
+      .catch(() => canvas.requestPointerLock())
+      .catch(() => {});
+  }
+
   moveTo(x: number, y: number): void {
     const m = new Uint8Array(6);
     const v = new DataView(m.buffer);
@@ -121,6 +161,10 @@ export class Input {
 
   private onMove(e: PointerEvent): void {
     if (this.screenWidth === 0 || e.pointerType === 'touch') return;
+    if (this.locked) {
+      this.moveBy(e.movementX, e.movementY);
+      return;
+    }
     const r = this.canvas.getBoundingClientRect();
     const x = Math.round(((e.clientX - r.left) * this.screenWidth) / r.width);
     const y = Math.round(((e.clientY - r.top) * this.screenHeight) / r.height);
@@ -131,6 +175,23 @@ export class Input {
       this.touch = false;
       this.pointerChanged();
     }
+  }
+
+  /** Moves the remote pointer by mouse counts (fractions add up). */
+  private moveBy(dx: number, dy: number): void {
+    this.relX += dx;
+    this.relY += dy;
+    const sx = Math.max(-32767, Math.min(32767, Math.trunc(this.relX)));
+    const sy = Math.max(-32767, Math.min(32767, Math.trunc(this.relY)));
+    if (sx === 0 && sy === 0) return;
+    this.relX -= sx;
+    this.relY -= sy;
+    const m = new Uint8Array(6);
+    const v = new DataView(m.buffer);
+    m[0] = C_MOVE_REL;
+    v.setInt16(2, sx, true);
+    v.setInt16(4, sy, true);
+    this.send(m);
   }
 
   private button(browserButton: number, down: boolean): void {
@@ -272,6 +333,14 @@ export class Input {
     // Text typed into the control bar's fields is theirs.
     const t = e.target;
     if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t instanceof HTMLInputElement) return;
+    // Ctrl+Alt+Shift+Z (Ctrl+Option+Shift+Z on a Mac) turns capture mode on
+    // or off; its Z never reaches the remote side (the modifiers did, and
+    // are released there as usual).
+    if (e.code === 'KeyZ' && e.ctrlKey && e.altKey && e.shiftKey) {
+      e.preventDefault();
+      if (down && !e.repeat) this.setCapture(!this.capture);
+      return;
+    }
     const code = EVDEV[e.code];
     if (code === undefined) return;
     e.preventDefault();

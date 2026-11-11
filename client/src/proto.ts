@@ -3,6 +3,8 @@
 export const S_HELLO = 1;
 export const S_FRAME = 2;
 export const S_CURSOR = 3;
+/** pad u8, x u16, y u16: the remote cursor's hot spot, while this client captures the mouse. */
+export const S_CURSOR_POS = 13;
 export const S_PONG = 4;
 /** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
 export const S_SIGNAL = 5;
@@ -84,6 +86,10 @@ export const C_NACK = 20;
 export const C_VIEW = 21;
 /** C_VIEW flag: this page can show an HDR picture where it is now. */
 export const VIEW_HDR = 1;
+/** pad u8, dx i16, dy i16: mouse counts, while the mouse is captured. */
+export const C_MOVE_REL = 22;
+/** on u8: this client captured the mouse (it then gets S_CURSOR_POS). */
+export const C_CAPTURE = 23;
 
 export const FRAME_HEADER_LEN = 48;
 /** Screen move entry after the FRAME header: src_x, src_y, dst_x, dst_y, w, h (u16 each). */
