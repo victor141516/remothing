@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 use crate::geom::{MovedRect, Rect};
 use crate::pixels::Differ;
-use crate::platform::{CaptureSession, Clipboard, DisplayInfo, InputProvider, OpenedDisplay, Platform};
+use crate::platform::{CaptureSession, Clipboard, DisplayInfo, InputProvider, OpenedDisplay, Platform, ThreadRole};
 use crate::proto;
 use crate::shared::Shared;
 use crate::telemetry::Telemetry;
@@ -110,6 +110,8 @@ pub struct CaptureLoop {
 impl CaptureLoop {
     /// Runs forever. `initial` empty = primary display, else first listed.
     pub fn run(self, initial: String) {
+        // Every client waits for this thread.
+        self.platform.thread_priority(ThreadRole::Capture);
         let mut wanted = initial;
         loop {
             if let Some(id) = self.control.take_request() {

@@ -30,7 +30,7 @@ use crate::config::constant_time_eq;
 use crate::encode::EncoderRequest;
 use crate::mic;
 use crate::pacer::Pacer;
-use crate::platform::Button;
+use crate::platform::{Button, ThreadRole};
 use crate::proto;
 use crate::recovery::SentLog;
 use crate::rtc::PeerEvent;
@@ -241,6 +241,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     };
     let waker = producer.thread().clone();
     app.telemetry.client_connected(link.id, addr);
+    app.client_joined();
     app.telemetry.event(link.id, &format!("connected from {addr}"));
     app.shared.add_client(link.id, waker.clone());
     if let Some(hub) = &app.rtc {
@@ -560,6 +561,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
     }
     app.shared.remove_client(link.id);
     app.telemetry.client_disconnected(link.id);
+    app.client_left();
     app.telemetry.event(link.id, "disconnected");
 }
 
@@ -779,6 +781,7 @@ fn transport_name(path: u8) -> &'static str {
 
 /// Client thread: pulls frames whenever the link window allows, parks otherwise.
 fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
+    app.platform.thread_priority(ThreadRole::Stream);
     let shared = &app.shared;
     let mut codec = ClientCodec::new(app.settings.read().unwrap().tuning);
     let mut encoder_pref = String::new();

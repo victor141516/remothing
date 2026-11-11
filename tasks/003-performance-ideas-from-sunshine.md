@@ -40,6 +40,17 @@ study belongs here.
   codecs it decodes in hardware and the server picks among them, so every
   browser keeps at least H.264.
 
+## Progress
+
+- Done: candidates **1, 2 and 4** (`docs/ARCHITECTURE.md`, "Platform
+  notes"). Checked on a private Windows instance: high process class and
+  realtime GPU class (read back by the process itself) while a client was
+  connected, normal again 7 s after it left; timer and MMCSS calls
+  succeeded. Their effect under load was measured before ("Measured under
+  load", same settings set from outside) and not again. Linux: nice
+  values, which need CAP_SYS_NICE (not in the default container).
+- Left: 7, then 6.
+
 ## Source and method
 
 - Sunshine at commit `ec2676b` (2026-11-10), cloned to `.tools/ref/Sunshine`

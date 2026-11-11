@@ -14,6 +14,7 @@ mod input;
 mod keymap;
 mod microphone;
 mod monitor;
+mod scheduling;
 pub mod service;
 mod uipi;
 
@@ -23,7 +24,7 @@ use anyhow::{Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
     AudioSink, AudioSource, Clipboard, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform,
-    SystemMonitor,
+    SystemMonitor, ThreadRole,
 };
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -103,6 +104,14 @@ impl Platform for WindowsPlatform {
 
     fn monitor(&self) -> &dyn SystemMonitor {
         &self.monitor
+    }
+
+    fn thread_priority(&self, role: ThreadRole) {
+        scheduling::thread_priority(role);
+    }
+
+    fn streaming(&self, active: bool) -> Vec<String> {
+        scheduling::streaming(active)
     }
 
     fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>> {

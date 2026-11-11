@@ -16,13 +16,14 @@ mod xfb;
 mod xvfb;
 mod xvfb_session;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
     AudioSink, AudioSource, Clipboard, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform,
-    SystemMonitor, VirtualDisplays,
+    SystemMonitor, ThreadRole, VirtualDisplays,
 };
 
 use crate::audio::SoundServer;
@@ -157,6 +158,22 @@ impl Platform for LinuxPlatform {
 
     fn monitor(&self) -> &dyn SystemMonitor {
         &self.monitor
+    }
+
+    /// A lower nice value for the thread (task 003, candidate 1). Needs
+    /// CAP_SYS_NICE (root on a host; `--cap-add SYS_NICE` in a container);
+    /// without it the threads keep the default, said once in the log.
+    fn thread_priority(&self, role: ThreadRole) {
+        static REFUSED: AtomicBool = AtomicBool::new(false);
+        let nice = match role {
+            ThreadRole::Capture => -10,
+            ThreadRole::Stream => -5,
+        };
+        // SAFETY: plain system calls on the calling thread.
+        let ok = unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, nice) } == 0;
+        if !ok && !REFUSED.swap(true, Ordering::Relaxed) {
+            eprintln!("thread priority: {} (needs CAP_SYS_NICE); threads keep the default", std::io::Error::last_os_error());
+        }
     }
 
     fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>> {

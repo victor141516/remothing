@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -25,6 +25,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::sync::{mpsc as tmpsc, oneshot};
 
 use crate::config::WebRtcSettings;
+use crate::platform::{Platform, ThreadRole};
 
 /// Frames (server → client, reliable but unordered: no frame waits behind
 /// another's retransmission) and ACKs/pings (client → server). The browser
@@ -71,8 +72,9 @@ pub struct Hub {
 
 impl Hub {
     /// Binds the UDP sockets and starts the hub. `default_port` is used when
-    /// the settings leave the port at 0.
-    pub fn start(settings: &WebRtcSettings, default_port: u16) -> Result<Hub> {
+    /// the settings leave the port at 0; the hub's threads take the stream
+    /// priority from `platform`.
+    pub fn start(settings: &WebRtcSettings, default_port: u16, platform: Arc<dyn Platform>) -> Result<Hub> {
         let port = if settings.udp_port == 0 { default_port } else { settings.udp_port };
         let mut sockets = Vec::new();
         for ip in local_ipv4()? {
@@ -108,8 +110,9 @@ impl Hub {
 
         let (tx, rx) = mpsc::channel();
         for (index, socket) in sockets.iter().enumerate() {
-            let (socket, tx) = (socket.try_clone()?, tx.clone());
+            let (socket, tx, platform) = (socket.try_clone()?, tx.clone(), platform.clone());
             std::thread::Builder::new().name(format!("udp-{}", socket.local_addr()?)).spawn(move || {
+                platform.thread_priority(ThreadRole::Stream);
                 let mut buf = vec![0u8; 2048];
                 // Errors here are per packet (e.g. ICMP port unreachable on Windows).
                 loop {
@@ -125,7 +128,10 @@ impl Hub {
         let addrs: Vec<String> = sockets.iter().filter_map(|s| s.local_addr().ok()).map(|a| a.to_string()).collect();
         eprintln!("webrtc: udp on {}", addrs.join(", "));
         let mut hub = HubThread { rx, sockets, peers: HashMap::new(), stun, stun_pending: Vec::new(), next_stun: Instant::now(), mapped: Vec::new(), advertise };
-        std::thread::Builder::new().name("webrtc".into()).spawn(move || hub.run())?;
+        std::thread::Builder::new().name("webrtc".into()).spawn(move || {
+            platform.thread_priority(ThreadRole::Stream);
+            hub.run()
+        })?;
         let ice_servers = settings.stun_servers.iter().map(|s| format!("stun:{s}")).collect();
         Ok(Hub { tx, ice_servers })
     }

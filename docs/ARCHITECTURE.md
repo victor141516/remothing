@@ -502,6 +502,20 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
 
 ## Platform notes and limitations
 
+- **Scheduling** (`Platform::thread_priority`, `Platform::streaming`):
+  the capture thread asks for the highest priority, producers, network
+  runtime, WebRTC hub and sound above normal. On Windows, while at least
+  one client is connected, the process also gets the high priority class,
+  the realtime GPU scheduling class (whether or not hardware-accelerated
+  GPU scheduling is on; Sunshine reports NVIDIA driver freezes with it
+  under HAGS), a 1 ms system timer and the compositor scheduled as
+  multimedia (`DwmEnableMMCSS`); all reverted when the last client
+  leaves. Measured before it was built (task 003, "Measured under load"):
+  with every CPU busy the server stalled 70-140 ms many times a second
+  until its class was high; with the GPU busy encoding took three times as
+  long until its GPU class was realtime. The admin status lists what was
+  applied. On Linux the threads get a lower nice value, which needs
+  CAP_SYS_NICE.
 - **Linux / Wayland**: not supported. Capture of a Wayland session needs
   PipeWire + xdg-desktop-portal (interactive consent) or KMS/DRM access; only
   X11 servers (real or Xvfb) are handled. XWayland windows of a Wayland session

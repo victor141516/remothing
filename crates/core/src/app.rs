@@ -16,7 +16,7 @@ use crate::audio::AudioHub;
 use crate::capture::{CaptureLoop, DisplayControl};
 use crate::config::{ConfigFile, Settings};
 use crate::mic::MicHub;
-use crate::platform::Platform;
+use crate::platform::{Platform, ThreadRole};
 use crate::shared::Shared;
 use crate::stream;
 use crate::telemetry::Telemetry;
@@ -37,6 +37,15 @@ pub struct App {
     pub rtc: Option<crate::rtc::Hub>,
     /// WebTransport, when enabled and its UDP port could be bound.
     pub wt: Option<Arc<crate::wt::WtHub>>,
+    /// Clients connected, and what the OS was asked for while they stream.
+    pub streaming: Mutex<Streaming>,
+}
+
+#[derive(Default)]
+pub struct Streaming {
+    clients: usize,
+    /// One line per setting, for the admin status.
+    pub notes: Vec<String>,
 }
 
 impl App {
@@ -56,6 +65,26 @@ impl App {
         self.control.select(id);
         self.update_settings(|s| s.server.display = id.to_string())
     }
+
+    /// The first client in asks the OS to favour the stream (see `Platform::streaming`).
+    pub fn client_joined(&self) {
+        let mut s = self.streaming.lock().unwrap();
+        s.clients += 1;
+        if s.clients == 1 {
+            s.notes = self.platform.streaming(true);
+            eprintln!("scheduling while streaming: {}", s.notes.join("; "));
+        }
+    }
+
+    /// The last client out lets go of it.
+    pub fn client_left(&self) {
+        let mut s = self.streaming.lock().unwrap();
+        s.clients -= 1;
+        if s.clients == 0 {
+            s.notes = self.platform.streaming(false);
+            eprintln!("scheduling without clients: {}", s.notes.join("; "));
+        }
+    }
 }
 
 /// Runs the server until the process exits.
@@ -70,14 +99,22 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
     let admin_addr: SocketAddr = settings.server.admin_listen.parse().context("server.admin_listen")?;
     let rtc = match settings.webrtc.enabled {
         // Without it everything still works over the WebSocket.
-        true => crate::rtc::Hub::start(&settings.webrtc, stream_addr.port())
+        true => crate::rtc::Hub::start(&settings.webrtc, stream_addr.port(), platform.clone())
             .inspect_err(|e| telemetry.error("webrtc disabled", e))
             .ok(),
         false => None,
     };
     // One rustls backend for HTTPS and WebTransport.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
+    // Network threads carry every frame: above normal like the producers.
+    let runtime = {
+        let platform = platform.clone();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .on_thread_start(move || platform.thread_priority(ThreadRole::Stream))
+            .enable_all()
+            .build()?
+    };
     let wt = match settings.webtransport.enabled {
         // Without it frames take the data channel or the WebSocket.
         true => runtime
@@ -100,6 +137,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         tls_enabled: pems.is_some() && https_addr.is_none(),
         rtc,
         wt,
+        streaming: Mutex::default(),
     });
 
     let capture = CaptureLoop {

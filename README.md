@@ -107,7 +107,9 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   password). Its status page lists what happened to each client's stream
   (path switches, estimate cuts, lost frames, stutters the client saw with
   their server (wait, upload, encode)/network/client split): the place to
-  look after a hiccup.
+  look after a hiccup. It also lists what Windows was asked for while
+  clients are connected (high process class, realtime GPU scheduling, a
+  1 ms timer, the compositor as multimedia).
 
 Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides

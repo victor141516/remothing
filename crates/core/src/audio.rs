@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::sync::{broadcast, watch};
 
-use crate::platform::{Platform, AUDIO_CHANNELS, AUDIO_RATE};
+use crate::platform::{Platform, ThreadRole, AUDIO_CHANNELS, AUDIO_RATE};
 use crate::proto;
 use crate::telemetry::Telemetry;
 
@@ -76,7 +76,14 @@ impl AudioHub {
             state.running = true;
             self.info.send_replace(None);
             let hub = self.clone();
-            std::thread::Builder::new().name("audio".into()).spawn(move || hub.run()).expect("spawn audio thread");
+            std::thread::Builder::new()
+                .name("audio".into())
+                .spawn(move || {
+                    // A stalled sound thread is a dropout: the client plays only 60 ms ahead.
+                    hub.platform.thread_priority(ThreadRole::Stream);
+                    hub.run()
+                })
+                .expect("spawn audio thread");
         }
         Listener { hub: self.clone(), packets: self.packets.subscribe(), info: self.info.subscribe() }
     }

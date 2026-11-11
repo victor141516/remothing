@@ -11,6 +11,15 @@ use serde::Serialize;
 use crate::encode::EncoderProvider;
 use crate::geom::{MovedRect, Rect};
 
+/// What a thread does, for its scheduling priority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadRole {
+    /// The capture loop: everything waits for it.
+    Capture,
+    /// Frame building and encoding for one client, the network runtime,
+    /// the WebRTC hub, sound capture.
+    Stream,
+}
 /// Whole-platform entry point, one implementation per OS (`cfg(target_os)`).
 pub trait Platform: Send + Sync + 'static {
     /// "linux", "windows".
@@ -18,6 +27,16 @@ pub trait Platform: Send + Sync + 'static {
     fn displays(&self) -> &dyn DisplayProvider;
     fn encoders(&self) -> &dyn EncoderProvider;
     fn monitor(&self) -> &dyn SystemMonitor;
+    /// Asks the OS to favour the calling thread for its `role`. Best effort:
+    /// the stream works without it.
+    fn thread_priority(&self, _role: ThreadRole) {}
+    /// Clients are connected (`true`) or none is left (`false`): the OS is
+    /// asked to favour this process while it streams and to let go
+    /// afterwards. Best effort; returns what was done and what failed, for
+    /// the log and the admin status.
+    fn streaming(&self, _active: bool) -> Vec<String> {
+        Vec::new()
+    }
     /// Opens the capture of what the session plays. Every path tried goes
     /// to `tried` with its outcome, so the log tells why there is no sound.
     fn open_audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSource>>;
