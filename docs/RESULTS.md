@@ -314,6 +314,28 @@ Failure cases (`transport=auto`):
 | all UDP dropped from the start | WebTransport failed on every candidate within 3 s, frames on the WebSocket throughout: 185 fps, 9 / 18 |
 | all UDP dropped 5 s into the session | given up after 300 ms without a ping answer, 3 frames repaired with a keyframe, one frame 431 ms late, then WebSocket at full rate |
 
+## NVENC rate control trial (not adopted)
+
+Linux bench container, `rt-testapp` at 165 fps, `transport=auto`, 10 s
+runs; `total` = capture→draw p50 / p99 / max, encode p50 / p99. Current:
+capped VBR, VBV of two frames at 60 fps. Trial: what Sunshine uses, a VBV
+of one frame plus two-pass at quarter resolution (`multipass=qres`), then
+the one-frame VBV alone.
+
+| profile | scenario | current | one-frame VBV + qres | one-frame VBV only |
+|---|---|---|---|---|
+| 18M/40ms (3 runs) | full | 157-160 fps, 42-44 / 54-64 / 77-110 | 155-158 fps, 40-42 / 50-55 / 55-61 | 157-159 fps, 42-44 / 54-71 / 88-100 |
+| mobile 6M/50ms +-10, 0.5 % loss (3 runs) | full | 51-52 fps, 78-82 / 153-158 / 175-195 | 59-63 fps, 75-77 / 141-158 / 199-208 | 43-50 fps, 80-86 / 140-208 / 167-240 |
+| clean | full | 183 fps, 9 / 18 / 21, encode 2.3 / 4.5 | 157 fps, 14 / 21 / 24, encode 3.0 / 8.5 | 185 fps, 9 / 18 / 23, encode 2.3 / 4.5 |
+| 50M/20ms | scroll | 170 fps, 22 / 31 / 40 | 157 fps, 26 / 36 / 50 | 167 fps, 22 / 31 / 37 |
+| Wi-Fi 50M/10ms +-3, 2 % loss | full | 160 fps, 18 / 49 / 65 | 147 fps, 22 / 46 / 53 | not run |
+
+The one-frame VBV alone changes nothing (worse on the mobile profile). The
+two-pass gives tighter frames on slow links (worst frame at 18 Mbit/s from
+77-110 to 55-61 ms, +20 % frame rate on the mobile profile) but costs
+0.7 ms of encode at the median and 4 ms at p99, which the fast links pay in
+frame rate and latency. Kept the current settings.
+
 ## Sound
 
 A 3 s sine played by a program of the session, received in headless

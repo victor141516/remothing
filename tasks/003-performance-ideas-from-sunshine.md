@@ -49,7 +49,15 @@ study belongs here.
   succeeded. Their effect under load was measured before ("Measured under
   load", same settings set from outside) and not again. Linux: nice
   values, which need CAP_SYS_NICE (not in the default container).
-- Left: 7, then 6.
+- Candidate **7** tried (`docs/RESULTS.md`, "NVENC rate control trial"):
+  not adopted. The one-frame VBV alone changes nothing; two-pass at
+  quarter resolution tightens frames on slow links (worst frame at
+  18 Mbit/s 77-110 → 55-61 ms, mobile +20 % frame rate) but adds 0.7 ms
+  (p50) / 4 ms (p99) of encode, and the clean link lost 183 → 157 fps and
+  9 → 14 ms. Possible follow-up, for the user to decide: two-pass only
+  while the link estimate is low (the option is fixed per encoder, so
+  crossing the threshold means a new encoder and a keyframe).
+- Left: 6.
 
 ## Source and method
 
