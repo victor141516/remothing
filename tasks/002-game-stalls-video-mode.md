@@ -33,7 +33,7 @@
 - Step 5, read from a real match (ARC Raiders at 3840x2160, the MacBook at
   120 Hz, 2026-11-11; numbers in `docs/RESULTS.md`, "A game at 4K for a
   120 Hz client"):
-  - The scheduling of task 003 is on and right while a client is
+  - The scheduling of the Sunshine study is on and right while a client is
     connected: the server's GPU class reads realtime from outside, the
     game's normal.
   - Done: the steady `wait` (7-10 ms) was pacing. Frames were made for 60
@@ -181,9 +181,9 @@ Reasoned, not measured:
 
 ## Why Sunshine does not show it
 
-`tasks/003-performance-ideas-from-sunshine.md` has the full comparison, from
-its source (the candidate numbers below are its). The parts that match what
-was found here:
+The Sunshine study (task 003, finished and deleted; what came of it is in
+`docs/ARCHITECTURE.md` and `docs/RESULTS.md`, native NVENC in task 006)
+numbered the candidates below. The parts that match what was found here:
 
 - No retransmission: UDP with forward error correction, so a lost packet
   delays nothing (candidate 10). We use TCP, and the WebRTC data channel is
@@ -296,7 +296,7 @@ along, or give up and ask for a keyframe.
 | certificate | nothing new | a CA certificate, or a self-signed one pinned by hash and renewed every two weeks |
 | our pipeline | the browser shows the video (a `<video>` element), outside our decoder and compositor: fits motion mode, where the whole picture is video | stays ours: decoder, compositor, link model |
 | cost | medium: media in str0m, keyframes on request, bitrate from its feedback | very high: a third transport, plus error correction in the client |
-| main risk | the browser's own buffering adds delay; to be measured (cloud gaming in browsers uses this path) | each loss the redundancy cannot repair costs a keyframe until the encoder can invalidate references (task 003, candidate 5) |
+| main risk | the browser's own buffering adds delay; to be measured (cloud gaming in browsers uses this path) | each loss the redundancy cannot repair costs a keyframe until the encoder can invalidate references (task 006, native NVENC) |
 
 ### WebTransport datagrams
 
@@ -322,7 +322,7 @@ What has to be built:
   little redundancy rebuilds a single lost one; the client asks again for
   what is still missing (one round trip); a keyframe is the last resort.
   Dropping a frame without a keyframe needs an encoder that can
-  invalidate references (task 003, candidate 5).
+  invalidate references (task 006, native NVENC).
 - In the client's worker: putting frames together again and the
   redundancy decoding, in front of today's decoder.
 - Lossless data stays on a reliable channel (the WebSocket, or a reliable
@@ -439,7 +439,7 @@ sending rate is decided by our server, so the same idea is sound there.
    upload, encode (the client already has the three numbers per frame).
    The report is built in `client/src/worker.ts`. It tells whether the
    "almost all server" stalls are the GPU.
-5. **If it is the GPU**: candidates 1, 2 and 4 of task 003 (process and
+5. **If it is the GPU**: candidates 1, 2 and 4 of the Sunshine study (process and
    thread priority, GPU priority, MMCSS for the compositor). Small.
    GPU priority above normal may need the elevated or service process.
 6. **Estimate without bound** on short paths: reproduce on the current
@@ -452,8 +452,8 @@ sending rate is decided by our server, so the same idea is sound there.
   click into the live session.
 - For repeatable numbers: a GPU-bound load next to `rt-testapp --mode
   full` on a private instance, before and after steps 1 and 5, compared
-  with the profiles in `docs/RESULTS.md`. Task 003 holds the baseline
-  under load measured so far ("Measured under load").
+  with the profiles in `docs/RESULTS.md`, which holds the baseline under
+  load measured so far ("Host under load").
 - Loss: the Linux bench container with `netem loss` on UDP and on TCP
   separately (`tc` filters by protocol), 2 % Wi-Fi profile:
   late frames and worst capture-to-draw with the UDP video against the

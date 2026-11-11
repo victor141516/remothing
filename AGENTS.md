@@ -104,10 +104,17 @@ docker build --target desktop -t remothing-desktop .
 
 ## Local deployments (this machine)
 
-- Windows demo: config in `.tools/win-demo/`, restarted with
-  `powershell -NoProfile -ExecutionPolicy Bypass -File .tools/win-demo/restart.ps1`
-  (copies `target/release/remothing.exe`; do not pipe its output, it hangs).
+- Windows demo: the `remothing` service (LocalSystem, auto start), running
+  `.tools/win-demo/remothing.exe` with `.tools/win-demo/config.toml`; logs
+  `remothing-service.log` and `remothing-session.log` next to the config.
+  Update from an elevated shell (the user's UAC prompt; ask first):
+  `remothing.exe service stop`, copy `target/release/remothing.exe` over
+  `.tools/win-demo/remothing.exe`, `remothing.exe service start`.
   `remothing-stable.exe` there is the rollback.
+- `\\.\DISPLAY5` (3960x1800), when it exists, is Sunshine's virtual display
+  (SudoMaker IddCx driver), not a monitor: never change its settings. HDR
+  tests touch the GPU of the user's live session: only when the user says
+  nothing else is running.
 - Ubuntu desktop: container `rt-desktop` from image `remothing-desktop`,
   recreated after a rebuild with
   `powershell -NoProfile -ExecutionPolicy Bypass -File .tools/redeploy-desktop.ps1`,

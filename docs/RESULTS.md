@@ -287,6 +287,61 @@ GPU scaling on Windows (`d3d11_bench --scale 0.5`, plasma, 3168x1440 →
 CPU: 11.94 / 17.01 / 18.45 ms. The scaled picture was not checked by
 decoding (the bench compares only same-size pictures).
 
+## Host under load (CPU and GPU busy)
+
+2026-11-10, this PC (24 logical CPUs, RTX 4080 SUPER, HAGS off, a game
+client open: GPU 20-35 % busy before any test), server not elevated. CPU
+load: 48 processes spinning at normal priority (24 where noted). GPU load:
+a heavy fragment shader drawn into a 4096x4096 target in a headless
+browser, a few frames queued at a time as an uncapped game would (93-95 %
+utilization next to the encoder bench, 75-88 % next to the server).
+Priorities were set from outside the process (process class,
+`D3DKMTSetProcessSchedulingPriorityClass`); what the server now sets by
+itself (ARCHITECTURE, "Scheduling") was built from these numbers.
+
+Encoder alone (`d3d11_bench --size 3168x1440 --enc nvenc-gpu --fps 144`,
+1440 frames), encode ms p50 / p90 / p99:
+
+| condition | `box` | `plasma` (whole screen) |
+|---|---|---|
+| as is (two runs) | 2.8-3.1 / 3.8 / 5.0-5.2 | 4.0-4.1 / 5.0-5.2 / 6.2-6.5 |
+| CPU: 48 busy | 3.1 / 4.1 / 123 | 4.1 / 5.1 / 57.7 |
+| CPU: 48 busy, high process class | 3.1 / 4.0 / 5.6 | 4.1 / 5.2 / 6.5 |
+| GPU: 93-95 % busy (two runs) | 6.0-6.2 / 8.9-9.8 / 16.0-16.3 | 6.4-6.5 / 9.9-10.3 / 16.9-17.6 |
+| GPU busy, `SetGPUThreadPriority(7)` | 6.1-6.2 / 9.5-9.7 / 17.2-17.8 | 6.3-6.4 / 9.6 / 16.1-16.6 |
+| GPU busy, GPU class high | 6.2 / 9.8 / 17.7 | 6.6 / 10.3 / 17.2 |
+| GPU busy, GPU class realtime | 2.9 / 3.9 / 4.4 | 3.5 / 4.5 / 4.8 |
+| GPU busy, high process class (CPU) | 7.5 / 12.3 / 16.8 | 7.3 / 12.7 / 17.4 |
+
+Server alone on Windows (3168x1440, `rt-testapp` at 144 fps, a client that
+acknowledges every frame at once; 12 s per row), `capture→sent` ms p50 /
+p99 / max, stalls = gaps over 50 ms:
+
+| scenario | condition | fps | capture→sent | stalls |
+|---|---|---|---|---|
+| `full` | as is | 120 | 4.8 / 9.2 / 11 | 4 |
+| `full` | CPU: 48 busy | 87 | 4.8 / 11.6 / 132 | 18 |
+| `full` | CPU: 48 busy, high process class | 103 | 4.8 / 9.0 / 41 | 2 |
+| `full` | GPU busy | 94 | 5.0 / 17.9 / 32 | 2 |
+| `full` | GPU busy, GPU class realtime | 94 | 4.3 / 6.4 / 47 | 5 |
+| `box` | as is | 139 | 1.8 / 4.1 / 8 | 2 |
+| `box` | CPU: 48 busy | 100 | 1.8 / 71.9 / 142 | 49 |
+| `box` | CPU: 48 busy, high process class | 133 | 1.8 / 4.2 / 8 | 1 |
+| `box` | GPU busy | 117 | 2.0 / 13.5 / 49 | 2 |
+| `box` | GPU busy, GPU class realtime | 122 | 1.5 / 3.6 / 9 | 5 |
+
+Linux (Docker on WSL2, Xvfb 1920x1080 at 165 fps, load = 64 busy loops in
+another container): `full` fell from 165 to 88 fps (p99 55.7 ms), and the
+server's threads at nice −10 only brought 99 fps (p99 46.0 ms); the kernel
+shares CPU between containers before it looks at nice. A native Linux host
+was not tested.
+
+A busy CPU stalls the server for 70-140 ms, which the high process class
+removes; a busy GPU triples the encode p99, which only the realtime GPU
+scheduling class undoes (thread priority 7 and the high class do nothing).
+No sign that the GPU clocks down with an encoder open (encode 3.2-3.5 ms
+p50 from 5 to 144 fps).
+
 ## A game at 4K for a 120 Hz client
 
 Windows, RTX 4080 SUPER, HAGS off, 2026-11-11: ARC Raiders in the
@@ -331,7 +386,7 @@ A 3840x2160 copy takes the same (realtime 3.2 / 5.1 / 8.2, normal 5.1 /
 frame path that waits for the GPU (tile comparison, readback, encode) pays
 it. The realtime class halves the median and cuts the tail to a sixth; it
 does not bring back the idle values as it did next to the synthetic load
-of task 003. The same probe with an idle GPU was not run (the game stayed
+("Host under load"). The same probe with an idle GPU was not run (the game stayed
 open).
 
 ## WebTransport datagrams vs WebSocket

@@ -1,5 +1,5 @@
-//! Asks Windows to favour the server while it streams, as Sunshine does
-//! (task 003, candidates 1, 2 and 4). Measured on this PC: with every CPU
+//! Asks Windows to favour the server while it streams, as Sunshine does.
+//! Measured on this PC (docs/RESULTS.md, "Host under load"): with every CPU
 //! busy the server stalled 70-140 ms many times a second until its process
 //! class was high; with the GPU busy, encoding took three times as long
 //! until its GPU scheduling class was realtime (thread priorities and the

@@ -162,7 +162,7 @@ impl Platform for LinuxPlatform {
         &self.monitor
     }
 
-    /// A lower nice value for the thread (task 003, candidate 1). Needs
+    /// A lower nice value for the thread (ARCHITECTURE, "Scheduling"). Needs
     /// CAP_SYS_NICE (root on a host; `--cap-add SYS_NICE` in a container);
     /// without it the threads keep the default, said once in the log.
     fn thread_priority(&self, role: ThreadRole) {
