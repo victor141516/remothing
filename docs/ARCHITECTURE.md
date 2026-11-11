@@ -453,6 +453,13 @@ flowchart LR
   as an abandoned data channel. A new WebSocket connection starts afresh.
 - **Input** goes over one unidirectional stream (ordered, each message
   after its length).
+- **Why it failed**: the browser tells its page only "Opening handshake
+  failed", whatever the cause. The client's event lists every address
+  tried, grouped by error, with how long each took: milliseconds means
+  refused on the way or by the browser itself, the full timeout means no
+  answer. The server logs (error log, at most every 5 s) every attempt that
+  reaches it and fails: a handshake error, or a key no client session has.
+  An attempt the server never logged did not reach it.
 - An unreliable *data channel* with our own retransmission was tried
   before and dropped (SCTP shrinks its window for what it abandons); with
   QUIC the sending rate is ours to set, which is what makes the same idea

@@ -23,6 +23,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,7 @@ use wtransport::tls::{Certificate, CertificateChain, PrivateKey};
 use wtransport::{Connection, Endpoint, Identity, ServerConfig};
 
 use crate::config::{TlsSettings, WebTransportSettings};
+use crate::telemetry::Telemetry;
 
 /// Total validity of the generated certificate: browsers refuse a pinned one
 /// valid for two weeks or more. A day of it lies in the past, for clients
@@ -51,6 +53,9 @@ const DATAGRAM_BUFFER: usize = 16 << 20;
 /// A window this large also switches quinn's pacing off (it skips windows
 /// above `u32::MAX`).
 const UNLIMITED: u64 = 1 << 40;
+/// Failed connection attempts go to the error log at most this often (a
+/// port scan must not flood it).
+const FAILURE_LOG_EVERY: Duration = Duration::from_secs(5);
 
 /// What a client needs to reach the hub (S_SIGNAL `wt`).
 #[derive(Clone, Serialize)]
@@ -65,11 +70,19 @@ pub struct Offer {
 pub struct WtHub {
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Connection>>>,
     offer: watch::Sender<Offer>,
+    telemetry: Arc<Telemetry>,
+    /// When a failed attempt was last logged.
+    failure_logged: Mutex<Option<Instant>>,
 }
 
 impl WtHub {
     /// Binds the UDP port and starts accepting. Runs on the tokio runtime.
-    pub async fn start(settings: &WebTransportSettings, tls: &TlsSettings, listen_port: u16) -> Result<Arc<Self>> {
+    pub async fn start(
+        settings: &WebTransportSettings,
+        tls: &TlsSettings,
+        listen_port: u16,
+        telemetry: Arc<Telemetry>,
+    ) -> Result<Arc<Self>> {
         let port = match settings.port {
             0 => listen_port.checked_add(1).context("no port above server.listen for webtransport")?,
             p => p,
@@ -95,6 +108,8 @@ impl WtHub {
         let hub = Arc::new(Self {
             sessions: Mutex::default(),
             offer: watch::channel(Offer { hash, port, candidates }).0,
+            telemetry,
+            failure_logged: Mutex::default(),
         });
         tokio::spawn(hub.clone().run(endpoint, port, !ca_signed));
         Ok(hub)
@@ -114,6 +129,17 @@ impl WtHub {
         self.sessions.lock().unwrap().remove(key);
     }
 
+    /// Why an attempt failed, for the error log: the browser only tells
+    /// its page "Opening handshake failed", whatever the cause.
+    fn failed(&self, from: SocketAddr, why: impl std::fmt::Display) {
+        let mut last = self.failure_logged.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < FAILURE_LOG_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+        self.telemetry.error("webtransport", format!("attempt from {from} failed: {why}"));
+    }
+
     async fn run(self: Arc<Self>, endpoint: Endpoint<Server>, port: u16, renew: bool) {
         let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + RENEW, RENEW);
         loop {
@@ -121,8 +147,11 @@ impl WtHub {
                 incoming = endpoint.accept() => {
                     let hub = self.clone();
                     tokio::spawn(async move {
-                        // A failed handshake (a stale hash, a scan) has nobody to tell.
-                        let Ok(request) = incoming.await else { return };
+                        let from = incoming.remote_address();
+                        let request = match incoming.await {
+                            Ok(request) => request,
+                            Err(e) => return hub.failed(from, format!("handshake: {e}")),
+                        };
                         let key = request
                             .path()
                             .split_once('?')
@@ -131,12 +160,16 @@ impl WtHub {
                             .to_string();
                         let session = hub.sessions.lock().unwrap().get(&key).cloned();
                         match session {
-                            Some(session) => {
-                                if let Ok(connection) = request.accept().await {
+                            Some(session) => match request.accept().await {
+                                Ok(connection) => {
                                     let _ = session.send(connection);
                                 }
+                                Err(e) => hub.failed(from, format!("accept: {e}")),
+                            },
+                            None => {
+                                hub.failed(from, "no client session has this key (its WebSocket closed, or the server restarted)");
+                                request.not_found().await
                             }
-                            None => request.not_found().await,
                         }
                     });
                 }

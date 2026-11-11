@@ -106,7 +106,11 @@ export class WtPath {
         urls.add(`https://${hostPort}/wt?k=${encodeURIComponent(offer.key)}`);
       }
     }
-    const failures: string[] = [];
+    // Grouped by error, each host with how long it took: a failure within
+    // milliseconds was refused on the way (or by this browser), one at the
+    // timeout never got an answer.
+    const failures = new Map<string, string[]>();
+    const started = performance.now();
     const attempts = [...urls].map(async (url) => {
       const pinned = hash && !offer.candidates.some((c) => c.startsWith('https://') && url.startsWith(c));
       const t = new WebTransport(url, {
@@ -121,7 +125,10 @@ export class WtPath {
         return { t, url };
       } catch (e) {
         clearTimeout(timer);
-        failures.push(`${new URL(url).host}: ${e instanceof Error ? e.message : String(e)}`);
+        const why = e instanceof Error ? e.message : String(e);
+        const hosts = failures.get(why) ?? [];
+        hosts.push(`${new URL(url).host} ${(performance.now() - started).toFixed(0)} ms`);
+        failures.set(why, hosts);
         throw e;
       }
     });
@@ -129,7 +136,7 @@ export class WtPath {
     try {
       won = await Promise.any(attempts);
     } catch {
-      throw new Error(failures.join('; '));
+      throw new Error([...failures].map(([why, hosts]) => `${why} (${hosts.join(', ')})`).join('; '));
     }
     // Later winners are not needed.
     for (const a of attempts) {

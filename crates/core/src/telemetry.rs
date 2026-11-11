@@ -12,8 +12,9 @@ use crate::shared::Link;
 
 const MAX_ERRORS: usize = 100;
 const MAX_EVENTS: usize = 200;
-/// Longest client-supplied event text kept.
-const MAX_EVENT_LEN: usize = 200;
+/// Longest client-supplied event text kept (a WebTransport failure lists
+/// every address tried).
+const MAX_EVENT_LEN: usize = 500;
 
 #[derive(Clone, Serialize)]
 pub struct ErrorEntry {

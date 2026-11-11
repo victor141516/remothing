@@ -118,7 +118,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
     let wt = match settings.webtransport.enabled {
         // Without it frames take the data channel or the WebSocket.
         true => runtime
-            .block_on(crate::wt::WtHub::start(&settings.webtransport, &settings.tls, stream_addr.port()))
+            .block_on(crate::wt::WtHub::start(&settings.webtransport, &settings.tls, stream_addr.port(), telemetry.clone()))
             .inspect_err(|e| telemetry.error("webtransport disabled", e))
             .ok(),
         false => None,
