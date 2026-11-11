@@ -9,6 +9,11 @@
 #   127.0.0.1 for a browser on the Docker host. Publish it with -p 8080:8080/udp.
 # WEBTRANSPORT_ADVERTISE: the same for WebTransport ("host:port" of the
 #   published UDP port 8081, e.g. -p 8081:8081/udp and 127.0.0.1:8081).
+# TLS_LISTEN: an extra HTTPS listener with a self-signed certificate (e.g.
+#   0.0.0.0:8443), for browsers that reach the server directly from another
+#   machine: they decode video only in a secure context. The certificate is
+#   kept in /etc/remothing/tls; mount a volume there to keep it (and the
+#   browser's exception) across container rebuilds.
 set -euo pipefail
 
 CONFIG=/etc/remothing/config.toml
@@ -27,6 +32,11 @@ if [ ! -f "$CONFIG" ]; then
     echo "advertise = [$(echo "${WEBRTC_ADVERTISE:-127.0.0.1}" | sed 's/[^,][^,]*/"&"/g')]"
     echo '[webtransport]'
     echo "advertise = [$(echo "${WEBTRANSPORT_ADVERTISE:-}" | sed 's/[^,][^,]*/"&"/g')]"
+    if [ -n "${TLS_LISTEN:-}" ]; then
+      echo '[tls]'
+      echo 'self_signed = true'
+      echo "listen = \"${TLS_LISTEN}\""
+    fi
   } > "$CONFIG"
 fi
 

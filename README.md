@@ -36,11 +36,18 @@ Optional Docker deployment (simulated display + NVENC when started with `--gpus 
 docker build -t remothing .                                  # slim: openbox + xterm
 docker build --target desktop -t remothing-desktop .         # full XFCE desktop + Firefox
 docker run --gpus all --shm-size=1g --cap-add SYS_NICE \
-  -p 8080:8080 -p 8080:8080/udp -p 8081:8081 -p 8081:8081/udp \
+  -p 8080:8080 -p 8443:8443 -p 8080:8080/udp -p 8081:8081 -p 8081:8081/udp \
+  -v remothing-tls:/etc/remothing/tls \
   -e WIDTH=2560 -e HEIGHT=1440 -e KB_LAYOUT=es -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret \
   -e WEBRTC_ADVERTISE=192.168.1.10 -e WEBTRANSPORT_ADVERTISE=192.168.1.10:8081 \
+  -e TLS_LISTEN=0.0.0.0:8443 \
   remothing-desktop   # host addresses browsers reach the UDP ports at
 ```
+
+`TLS_LISTEN` adds an HTTPS listener with a self-signed certificate
+(`[tls]` below): needed when browsers on other machines reach the container
+directly, without an HTTPS proxy. The volume keeps the certificate, and so
+the browsers' exception, across container rebuilds.
 
 `--cap-add SYS_NICE` is needed in a container for the server to raise the
 priority of its capture and streaming threads; without it they run at the
