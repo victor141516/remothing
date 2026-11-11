@@ -26,9 +26,14 @@
   encode, out). Reading it from a real game session is the user's part:
   it says whether the "almost all server" stalls are the link window or
   the GPU.
-- Left: steps 5 and 6. Found on the way, for step 6: on a 4 Mbit/s link
-  with a 3 s netem queue the estimate climbed from 10 to 140 Mbit/s after
-  frames moved to the data channel (new path, unproven, slow start).
+- Done: step 6, the estimate is bounded (`docs/ARCHITECTURE.md`, "Link
+  model"; `docs/RESULTS.md`, "Estimate without bound"). The 4 Mbit/s
+  squeeze after a path switch was not reproduced on the fixed build (the
+  estimate is no longer raised by waits that are not the estimate's).
+- Left: step 5, which depends on step 4's report from a real game: if the
+  late frames show `wait` it is the link, if `upload`/`encode` it is the
+  GPU and candidates 1, 2 and 4 of task 003 apply. Waiting for the user to
+  play a match on the deployed build and for the event log.
 
 ## Goal
 

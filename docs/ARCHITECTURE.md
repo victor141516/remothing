@@ -149,9 +149,16 @@ only the network is modelled; a slow client still holds frames back):
   Proportional control toward 12 ms of queue (±4 %/RTT, accelerating after a
   deep cut); an emergency cut to the measured delivery rate beyond 30 ms.
   Growth needs content that waited for the estimate (byte window full or
-  pacing deferred something); frames waiting on a client that has not drawn
-  the previous ones do not count (on short paths that made it grow without
-  bound).
+  pacing deferred something) and used at least a quarter of it, or content
+  that used half of it; frames waiting on a client that has not drawn the
+  previous ones do not count (on short paths that made it grow without
+  bound), and neither does content held back by the configured bandwidth
+  or the client's refresh rate: with light content no queue ever shows,
+  so the estimate grew a few percent per window for good (3.2 million
+  Mbit/s on a 4 ms Wi-Fi path, sending unpaced). A delivery rate is
+  measured over at least a base round trip and 1 ms, so frames handed over
+  together (a TCP stall released, loopback) give no sample of hundreds of
+  Gbit/s.
 - **Content below the estimate** (most desktop use) weakens the queue
   signal: the queue is not caused by the estimate, and a window holds one
   or two ACKs whose minimum delay is mostly jitter. So, with content under

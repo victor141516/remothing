@@ -634,7 +634,11 @@ impl Shared {
         if video_deferred {
             wake(video_due);
         }
-        codec.paced = video_deferred || refine_deferred;
+        // Only what the estimate held back tells the link model there was
+        // more to send: not the configured bandwidth, not the client's
+        // refresh rate.
+        let estimate_bound = link.rate < tuning.bandwidth_mbps * 1e6 / 8.0;
+        codec.paced = estimate_bound && ((video_deferred && now < codec.next_video_us) || refine_deferred);
         let has_lossless = c.send.iter().any(|&s| s);
         if !has_lossless && !video_dirty && switches.is_empty() && c.copies.is_empty() {
             // Deferred video keeps the pending changes' age for latency stats.

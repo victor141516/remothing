@@ -55,6 +55,11 @@ const BUSY_SHARE: f64 = 0.5;
 const MIN_RATE: f64 = 1e6 / 8.0;
 /// One sample can at most double the estimate (guards against ACK bunching).
 const MAX_GROWTH: f64 = 2.0;
+/// A delivery rate is measured over at least this, and at least one base
+/// round trip: frames handed over together (a TCP stall released, a burst
+/// of ACKs, loopback) otherwise give intervals of microseconds and samples
+/// of hundreds of Gbit/s, which the doubling bound only slows down.
+const MIN_SAMPLE_US: u64 = 1_000;
 /// Largest change per judging window of the proportional controller. Far
 /// below the rate of the last cut (a deep cut, a path change), growth with
 /// an empty queue accelerates by ACCEL_PER_WINDOW per window up to MAX_ACCEL
@@ -321,7 +326,7 @@ impl Pacer {
         }
         let base = self.base_rtt.0;
 
-        let interval = f.sent_us.saturating_sub(f.first_sent_us).max(now.saturating_sub(f.delivered_us));
+        let interval = f.sent_us.saturating_sub(f.first_sent_us).max(now.saturating_sub(f.delivered_us)).max(base.max(MIN_SAMPLE_US));
         let mut sample = if interval > 0 { (self.delivered - f.delivered) as f64 * 1e6 / interval as f64 } else { 0.0 };
         let excess = rtt - base;
         if f.alone && excess >= JITTER_US.max(base / 4) {
@@ -382,7 +387,11 @@ impl Pacer {
         // tests it: a queue is its own, an empty one means there is room.
         // Below that the queue is not (only) ours, and with few ACKs per
         // window its minimum is mostly jitter.
-        let pushing = self.judge_limited || used >= BUSY_SHARE;
+        // Waiting alone is not enough: content held back by something else
+        // (the configured bandwidth, the client's refresh rate, a burst
+        // between light frames) says nothing about the link while it uses
+        // little of the estimate.
+        let pushing = (self.judge_limited && used >= SPARSE_SHARE) || used >= BUSY_SHARE;
         if over && (pushing || now.saturating_sub(self.over_since_us) >= PERSIST_US) {
             // Below the best delivery rate seen, so the queue drains; at most
             // 30 %: an app-limited best can be far below the link.
@@ -671,5 +680,20 @@ mod tests {
         }
         // Skipped updates coalesce on the server instead of queueing at the client.
         assert!(during_stall <= 3, "sent {during_stall} frames to a stalled client");
+    }
+
+    /// Content held back by something else than the estimate (the
+    /// configured bandwidth, the client's refresh rate) is still reported
+    /// as limited now and then; with light content the queue never shows, so
+    /// the estimate grew a few percent per window for good. Seen on a 4 ms
+    /// path as an estimate of 3.2 million Mbit/s, sending unpaced.
+    #[test]
+    fn light_content_flagged_limited_does_not_inflate_the_estimate() {
+        // 100 Mbit/s, 4 ms; 3 KB at 60 fps (0.36 Mbit/s), every frame flagged.
+        let rate = 100e6 / 8.0;
+        let mut p = Pacer::default();
+        let mut link = Link::new(rate, 4_000, 0);
+        run(&mut p, &mut link, 60, true, |_| (3_000, 16_667));
+        assert!(p.rate() < 2.0 * rate, "estimate {} Mbit/s on a 100 Mbit/s link", p.rate() * 8.0 / 1e6);
     }
 }

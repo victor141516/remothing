@@ -243,6 +243,20 @@ container and profiles as above, 10 s runs, capture→draw p50 / p99:
 Doubling the estimate every window without the bound to what was delivered
 reached 270 Mbit/s on the 18 Mbit/s link before the first late ACK.
 
+## Estimate without bound
+
+The Windows demo once reported 3.2 million Mbit/s on a 4 ms Wi-Fi path:
+waiting for the configured bandwidth counted as waiting for the estimate,
+and light content never showed a queue. The pacer simulator
+(`light_content_flagged_limited_does_not_inflate_the_estimate`: 3 KB at
+60 fps on a 100 Mbit/s, 4 ms link, every frame flagged) reached 9.9e15
+Mbit/s in 60 s before the fix and stays under the link after it. Bench
+container, LAN, `box` at 60 fps for 30 s: 478 Mbit/s before, 1288 with
+the first fix alone (samples over microseconds), 232 with the sample
+interval floor. Mobile `box` (6M/50ms +-10, 0.5 % loss, three runs each,
+WebSocket): 114 fps, 53 / 190 before today's changes; 103 fps, 62 / 200
+after (runs spread 85-157 fps either way).
+
 ## Motion mode
 
 Linux bench container, `rt-testapp --mode full` at 165 fps, one client
