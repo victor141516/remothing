@@ -215,8 +215,12 @@ let wtPingSince = 0;
 const gaveUp = new Map<number, boolean>();
 /** The tab is shown; the server sends nothing to a hidden one. */
 let visible = true;
-/** Late frames since the last report: count, and the worst one's times. */
-let late = { n: 0, total: 0, server: 0, net: 0, client: 0 };
+/** Late frames since the last report: count, and the worst one's times.
+ * Server time splits into waiting until the frame was built (the link
+ * window, pacing, a busy producer), encoder upload, encoding, and the rest
+ * until it was sent (lossless compression, the send queue). */
+const NO_LATE = { n: 0, total: 0, server: 0, wait: 0, upload: 0, encode: 0, out: 0, net: 0, client: 0 };
+let late = { ...NO_LATE };
 /** Frames drawn before this are not judged: the first ones of a display, or
  * after a hidden tab, carry old changes without being late. */
 let lateFrom = 0;
@@ -687,7 +691,20 @@ function apply(f: Frame): void {
   if (total > LATE_MS && now() >= lateFrom && syncSamples.length >= 5) {
     late.n++;
     if (total > late.total) {
-      late = { n: late.n, total, server: f.sent - f.oldest, net: f.received + offset - f.sent, client: drawn - f.received };
+      const pulled = Number(v.getBigUint64(32, true)) / 1000;
+      const upload = f.picture ? v.getUint16(46, true) / 100 : 0;
+      const encode = f.picture ? v.getUint32(40, true) / 1000 : 0;
+      late = {
+        n: late.n,
+        total,
+        server: f.sent - f.oldest,
+        wait: pulled - f.oldest,
+        upload,
+        encode,
+        out: f.sent - pulled - upload - encode,
+        net: f.received + offset - f.sent,
+        client: drawn - f.received,
+      };
     }
   }
 }
@@ -696,8 +713,9 @@ function reportLate(): void {
   if (!late.n) return;
   const ms = (x: number) => x.toFixed(0);
   const frames = late.n === 1 ? '1 frame' : `${late.n} frames`;
-  sendText(C_EVENT, `${frames} late, worst ${ms(late.total)} ms (server ${ms(late.server)}, network ${ms(late.net)}, client ${ms(late.client)})`);
-  late = { n: 0, total: 0, server: 0, net: 0, client: 0 };
+  const server = `server ${ms(late.server)}: wait ${ms(late.wait)}, upload ${ms(late.upload)}, encode ${ms(late.encode)}, out ${ms(late.out)}`;
+  sendText(C_EVENT, `${frames} late, worst ${ms(late.total)} ms (${server}; network ${ms(late.net)}, client ${ms(late.client)})`);
+  late = { ...NO_LATE };
 }
 
 function connect(url: string): void {

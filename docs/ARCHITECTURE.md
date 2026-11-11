@@ -460,7 +460,8 @@ flowchart LR
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
-PONG, SIGNAL (WebRTC JSON), CHUNK (data-channel piece of a FRAME), CLIPBOARD
+PONG, SIGNAL (WebRTC and WebTransport JSON), CHUNK (data-channel piece of a
+FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), CLIPBOARD
 (text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
 there is no sound), AUDIO (one encoded packet), MIC_INFO (JSON: the
 microphone is free, taken, playing, needs something installed, needs a
@@ -472,7 +473,8 @@ VISIBLE (a hidden tab gets no frames; changes accumulate into one frame for
 when it shows again), EVENT (text for the event log), CLIPBOARD, DISPLAYS,
 DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
 it, agree to install or restart), MIC (one packet), MOVE, BUTTON, WHEEL,
-KEY, TEXT.
+KEY, TEXT, NACK (WebTransport pieces to send again), VIEW (picture size in
+the window and refresh rate).
 
 ## Admin
 
@@ -482,7 +484,10 @@ token/password login (cookie session or `Authorization: Bearer`), status
 fps/Mbit/s and client-reported latencies, recent errors, and per-client
 events: path switches, estimate cuts, video cap changes, lost frames,
 keyframe requests, and the stutters the client saw — frames drawn more than
-200 ms after their change, with the server/network/client split), display selection
+200 ms after their change, with the split of the worst one: on the server
+waiting until the frame was built (link window, pacing), encoder upload,
+encoding and the rest until sent; network; client), mode and size
+changes, the view each client reports, display selection
 (hot switch), simulated display create/destroy (Linux), live settings
 (bandwidth budget, lossless limit, encoder preference, keyboard layout, stream
 token, admin password). Settings persist in the TOML config file.

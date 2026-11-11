@@ -106,7 +106,8 @@ as root, else `~/.config/remothing/config.toml`; Windows:
 - Admin UI: `http://127.0.0.1:8081/` (login with the admin token or
   password). Its status page lists what happened to each client's stream
   (path switches, estimate cuts, lost frames, stutters the client saw with
-  their server/network/client split): the place to look after a hiccup.
+  their server (wait, upload, encode)/network/client split): the place to
+  look after a hiccup.
 
 Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
