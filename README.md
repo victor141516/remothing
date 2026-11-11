@@ -35,10 +35,18 @@ Optional Docker deployment (simulated display + NVENC when started with `--gpus 
 ```sh
 docker build -t remothing .                                  # slim: openbox + xterm
 docker build --target desktop -t remothing-desktop .         # full XFCE desktop + Firefox
-docker run --gpus all --shm-size=1g -p 8080:8080 -p 8080:8080/udp -p 8081:8081 \
+docker run --gpus all --shm-size=1g --cap-add SYS_NICE \
+  -p 8080:8080 -p 8080:8080/udp -p 8081:8081 -p 8081:8081/udp \
   -e WIDTH=2560 -e HEIGHT=1440 -e KB_LAYOUT=es -e ADMIN_TOKEN=change-me -e STREAM_TOKEN=s3cret \
-  -e WEBRTC_ADVERTISE=192.168.1.10 remothing-desktop   # host addresses browsers reach the UDP port at
+  -e WEBRTC_ADVERTISE=192.168.1.10 -e WEBTRANSPORT_ADVERTISE=192.168.1.10:8081 \
+  remothing-desktop   # host addresses browsers reach the UDP ports at
 ```
+
+`--cap-add SYS_NICE` is needed in a container for the server to raise the
+priority of its capture and streaming threads; without it they run at the
+default priority (the log says so once) and the stream still works, with
+less protection when other programs load the CPU. Outside a container the
+same needs root or CAP_SYS_NICE on the binary (`setcap cap_sys_nice+ep`).
 
 ### Windows
 

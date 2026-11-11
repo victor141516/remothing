@@ -84,9 +84,18 @@ docker build --target desktop -t remothing-desktop .
 - Latency and link behaviour: container with `-e MODE=bench -e
   "BENCH_ARGS=--mode box|scroll|full --fps 165" --cap-add NET_ADMIN`, link
   shaped with `tc qdisc ... netem` inside it, client opened with
-  `?bench=10`; the report is in `window.__bench.result`. Profiles and
-  reference numbers are in `docs/RESULTS.md`: compare against them, and add
-  the new numbers there.
+  `?bench=10`; the report is in `window.__bench.result`. For WebTransport
+  also publish `-p 127.0.0.1:18092:8081/udp -e
+  WEBTRANSPORT_ADVERTISE=127.0.0.1:18092` (the host port the browser
+  reaches). `?bench` sends no view, so there is no motion-mode scaling;
+  `?codec=h264|hevc|av1` compares codecs. Profiles and reference numbers
+  are in `docs/RESULTS.md`: compare against them, and add the new numbers
+  there.
+- Picture quality: record the scene losslessly with `ffmpeg -f x11grab`
+  in a throwaway container (`apt-get install ffmpeg`) and compare encodes
+  with PSNR/SSIM. On Windows `examples/d3d11_bench --codec C --dump DIR`
+  writes the encoded stream (there is no AV1 software decoder in the
+  Windows FFmpeg; decode the dump with dav1d in a container).
 - The admin API (`/api/status`, Bearer admin token) lists per-client events,
   errors and the sound status: the first place to look after a hiccup.
 - Unit tests exist where logic can be judged without a machine
@@ -100,11 +109,16 @@ docker build --target desktop -t remothing-desktop .
   (copies `target/release/remothing.exe`; do not pipe its output, it hangs).
   `remothing-stable.exe` there is the rollback.
 - Ubuntu desktop: container `rt-desktop` from image `remothing-desktop`,
-  recreated after a rebuild with the tokens in `.tools/desktop-tokens.txt`:
-  `docker run -d --name rt-desktop --gpus all --shm-size=1g -p 8080:8080
-  -p 8080:8080/udp -p 127.0.0.1:8081:8081 -e WIDTH=2560 -e HEIGHT=1440
-  -e KB_LAYOUT=es -e ADMIN_TOKEN=... -e STREAM_TOKEN=...
-  -e WEBRTC_ADVERTISE=100.100.74.85,127.0.0.1 remothing-desktop`.
+  recreated after a rebuild with
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .tools/redeploy-desktop.ps1`,
+  which keeps the tokens and settings of the running container
+  (`.tools/desktop-tokens.txt` has only the stream token) and runs it with
+  `--gpus all --shm-size=1g --cap-add SYS_NICE -p 8080:8080 -p 8080:8080/udp
+  -p 127.0.0.1:8081:8081 -p 8081:8081/udp` (WebTransport on UDP 8081,
+  advertised as `100.100.74.85:8081,127.0.0.1:8081`).
+- The router (Zyxel, 192.168.1.1) forwards UDP 9080 (WebRTC) and UDP 9081
+  (WebTransport) to the Windows demo; the Windows firewall's private
+  profile is off.
 - Redeploy both after a finished change and tell the user to reload tabs.
 
 ## Conventions

@@ -550,8 +550,10 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
   with every CPU busy the server stalled 70-140 ms many times a second
   until its class was high; with the GPU busy encoding took three times as
   long until its GPU class was realtime. The admin status lists what was
-  applied. On Linux the threads get a lower nice value, which needs
-  CAP_SYS_NICE.
+  applied. On Linux the threads get a lower nice value (capture -10, the
+  rest -5), which needs CAP_SYS_NICE: in Docker `--cap-add SYS_NICE`,
+  natively root or `setcap cap_sys_nice+ep`. Without it the log says so
+  once and the threads keep the default priority.
 - **Linux / Wayland**: not supported. Capture of a Wayland session needs
   PipeWire + xdg-desktop-portal (interactive consent) or KMS/DRM access; only
   X11 servers (real or Xvfb) are handled. XWayland windows of a Wayland session
