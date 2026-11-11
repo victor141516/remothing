@@ -287,6 +287,53 @@ GPU scaling on Windows (`d3d11_bench --scale 0.5`, plasma, 3168x1440 →
 CPU: 11.94 / 17.01 / 18.45 ms. The scaled picture was not checked by
 decoding (the bench compares only same-size pictures).
 
+## A game at 4K for a 120 Hz client
+
+Windows, RTX 4080 SUPER, HAGS off, 2026-11-11: ARC Raiders in the
+foreground on the 3840x2160 display (165 Hz), GPU 94-99 % busy, the server
+in the realtime GPU class (read back from outside; the game's is normal).
+A private instance beside the demo, so two servers encoded the display. The
+client is a script on the same machine over the WebSocket: it reports a
+3840x2160 view at 120 Hz and holds each video frame for 1 ms + 0.026 ms
+per KB before the ACK, which is what the user's laptop reported as decode
+time in this game (about 3 ms with 90 KB frames, 8.4 ms with 290 KB). AV1,
+video cap 140 Mbit/s, motion mode on, 10 s per run, builds alternating:
+
+| build | fps | Mbit/s | frame KB | srv wait | encode | server | client | capture→ACK |
+|---|---|---|---|---|---|---|---|---|
+| before | 59 | 133 | 279 / 363 | 9.6 / 18.7 | 6.3 / 12.3 | 14.9 / 26.5 | 9.1 / 14.5 | 25.0 / 42.8 |
+| cap for the client's 120 frames | 71 | 81 | 141 / 161 | 0.2 / 10.7 | 9.3 / 13.6 | 10.6 / 16.4 | 5.9 / 7.0 | 16.3 / 21.8 |
+| before | 62 | 79 | 251 / 369 | 7.4 / 18.6 | 6.6 / 17.8 | 13.4 / 30.8 | 8.0 / 15.3 | 20.3 / 41.5 |
+| cap for the client's 120 frames | 66 | 70 | 141 / 203 | 0.2 / 13.3 | 8.4 / 14.5 | 11.4 / 19.2 | 5.9 / 7.2 | 17.2 / 25.3 |
+
+Before, NVENC made every frame as large as a sixtieth of the cap allows
+(291 KB) and pacing let 60 of them through a second: the wait is frames
+waiting for their turn. The scenes differ between runs (the user was
+playing), so only what repeats in both pairs counts. Not measured: the
+laptop itself.
+
+What is left on the server is the GPU. Encode takes 6-9 ms here and
+2.7-3.0 ms with the same game in the background (GPU 35-54 % busy, desktop
+content, so not the same pictures). How long the GPU takes to get to a
+small job next to the game, by the job's GPU scheduling class: a 256x256
+texture copy, flushed and waited for with a fence, 300 times per run
+(p50 / p90 / p99 ms, range over the runs):
+
+| class | runs | p50 | p90 | p99 |
+|---|---|---|---|---|
+| normal | 3 | 5.5-11.0 | 10.5-33.7 | 30-134 |
+| high | 1 | 4.4 | 8.6 | 23.5 |
+| realtime | 4 | 3.0-4.7 | 4.4-12.0 | 7.8-20.2 |
+| realtime, `SetGPUThreadPriority(7)` | 1 | 2.9 | 4.3 | 7.8 |
+
+A 3840x2160 copy takes the same (realtime 3.2 / 5.1 / 8.2, normal 5.1 /
+10.4 / 26.2): it is the wait for the GPU, not the work. Every step of the
+frame path that waits for the GPU (tile comparison, readback, encode) pays
+it. The realtime class halves the median and cuts the tail to a sixth; it
+does not bring back the idle values as it did next to the synthetic load
+of task 003. The same probe with an idle GPU was not run (the game stayed
+open).
+
 ## WebTransport datagrams vs WebSocket
 
 Linux bench container, `rt-testapp` at 165 fps, the same link shaping on

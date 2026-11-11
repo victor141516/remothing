@@ -127,7 +127,10 @@ export class Stats {
       captureToDraw: pair(this.series.total),
       appToDraw: pair(this.series.appToDraw),
       inputRtt: pair(this.inputRtt),
+      wait: pair(this.series.serverWait),
+      encode: pair(this.series.encode),
       network: pair(this.series.net),
+      client: pair(this.series.client),
       decode: pair(this.series.decode),
     };
   }

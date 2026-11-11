@@ -276,7 +276,10 @@ const LATENCIES: [string, string][] = [
   ['captureToDraw', 'capture→draw'],
   ['appToDraw', 'app→draw'],
   ['inputRtt', 'input rtt'],
+  ['wait', 'server wait'],
+  ['encode', 'encode'],
   ['network', 'network'],
+  ['client', 'client'],
   ['decode', 'decode'],
 ];
 

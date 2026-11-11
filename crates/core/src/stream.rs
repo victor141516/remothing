@@ -798,6 +798,8 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     let mut size = (0, 0);
     let mut need_key = true;
     let mut video_cap = VideoCap::default();
+    // Refresh rate of the display streamed (0: not known).
+    let mut display_hz = 0;
     let mut path = PATH_WS;
     let mut motion = false;
     // Size the encoder encodes (the display's unless scaled for the
@@ -851,6 +853,8 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 return;
             }
         }
+        let view = *link.view.lock().unwrap();
+        let fps = video_fps(view, display_hz);
         {
             let s = app.settings.read().unwrap();
             codec.tuning = s.tuning;
@@ -859,9 +863,9 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 // Changed at runtime: rebuild the encoder.
                 encoder_conf = conf;
                 drop(s);
-                video_cap.reset(video_rate(model, &codec.tuning));
+                video_cap.reset(video_rate(model, &codec.tuning), fps);
                 let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                 pending = None;
                 shared.drop_video(link.id);
                 need_key = true;
@@ -872,17 +876,14 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 return;
             }
         }
-        let before = video_cap.bps;
-        let cap = match codec.encoder.as_ref() {
-            Some(_) => video_cap.update(video_rate(model, &codec.tuning), proto::now_us()),
-            None => None,
-        };
-        if let Some(bps) = cap {
-            let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
+        let before = (video_cap.bps, video_cap.fps);
+        if codec.encoder.is_some() && video_cap.update(video_rate(model, &codec.tuning), fps, proto::now_us()) {
+            let (from, to) = (before.0 as f64 / 1e6, video_cap.bps as f64 / 1e6);
+            let text = format!("video cap {from:.1} Mbit/s for {} frames a second -> {to:.1} for {fps}", before.1);
             app.telemetry.event(link.id, &text);
             if let Some(e) = codec.encoder.as_mut() {
                 // A keyframe with NVENC (FFmpeg resets the encoder).
-                e.set_max_bitrate(bps);
+                e.set_max_bitrate(video_cap.bps, fps);
             }
         }
         // Two-pass needs another encoder: opened beside the current one,
@@ -894,16 +895,16 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 let state = if want { "on" } else { "off" };
                 let text = format!("two-pass {state} (video cap {:.1} Mbit/s, round trip {} ms)", video_cap.bps as f64 / 1e6, rtt_us / 1000);
                 app.telemetry.event(link.id, &text);
-                let req = encoder_request(app, current, size, encoded, &encoder_conf.0, video_cap.bps, want);
+                let req = encoder_request(app, current, size, encoded, &encoder_conf.0, &video_cap, want);
                 pending = Some(PendingEncoder::open(app, req));
             }
         }
-        if let Some((ready, bitrate)) = pending.as_ref().and_then(|p| p.ready().map(|r| (r, p.bitrate))) {
+        if let Some((ready, cap)) = pending.as_ref().and_then(|p| p.ready().map(|r| (r, p.cap))) {
             pending = None;
             match ready {
                 Ok(mut e) => {
-                    if bitrate != video_cap.bps {
-                        e.set_max_bitrate(video_cap.bps);
+                    if cap != (video_cap.bps, video_cap.fps) {
+                        e.set_max_bitrate(video_cap.bps, video_cap.fps);
                     }
                     install_encoder(app, link.id, &mut codec, e);
                     // The new encoder's input is blank: everything is copied in again.
@@ -916,7 +917,6 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 }
             }
         }
-        let view = *link.view.lock().unwrap();
         // Frames the client cannot show are not encoded.
         codec.min_video_us = if view.hz > 0 { 1_000_000 / view.hz as u64 } else { 0 };
         if codec.encoder.is_some() && size != (0, 0) {
@@ -941,7 +941,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 room_since = 0;
                 pending = None;
                 let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                 // The new encoder's input is blank: everything is copied in again.
                 shared.encoder_reset(link.id);
                 need_key = true;
@@ -992,10 +992,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     let s = app.settings.read().unwrap();
                     encoder_conf = (s.encoder.preferred.clone(), s.encoder.codec.clone());
                     drop(s);
-                    video_cap.reset(video_rate(model, &codec.tuning));
+                    display_hz = app.control.current().map_or(0, |d| d.refresh_hz.round() as u32);
+                    video_cap.reset(video_rate(model, &codec.tuning), video_fps(view, display_hz));
                     pending = None;
                     let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
+                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
@@ -1047,10 +1048,24 @@ fn video_size(display: (u32, u32), view: View, cap_bps: u64) -> (u32, u32) {
     (even(dw), even(dh))
 }
 
-/// Video bitrate cap following the link estimate, with hysteresis.
+/// Video frames a second there can be: what the client shows (60 when it
+/// has not said), within what the display shows.
+fn video_fps(view: View, display_hz: u32) -> u32 {
+    let hz = if view.hz == 0 { 60 } else { view.hz };
+    if display_hz == 0 {
+        hz
+    } else {
+        hz.min(display_hz)
+    }
+}
+
+/// Video bitrate cap following the link estimate, with hysteresis. It is
+/// for `fps` frames a second: a frame takes at most its share, so that
+/// many fit the cap (see `VideoEncoder::set_max_bitrate`).
 #[derive(Default)]
 struct VideoCap {
     bps: u64,
+    fps: u32,
     changed_us: u64,
 }
 
@@ -1059,23 +1074,26 @@ impl VideoCap {
         (rate * 8.0 * VIDEO_SHARE) as u64
     }
 
-    fn reset(&mut self, rate: f64) {
+    fn reset(&mut self, rate: f64, fps: u32) {
         self.bps = Self::target(rate);
+        self.fps = fps;
         self.changed_us = proto::now_us();
     }
 
-    /// New cap when the target moved out of the dead band (or collapsed).
-    fn update(&mut self, rate: f64, now: u64) -> Option<u64> {
+    /// Moves the cap when the target left the dead band (or collapsed).
+    /// True when the encoder has to be told: the cap moved, or the frame
+    /// rate it is for changed (the client's window went to another screen).
+    fn update(&mut self, rate: f64, fps: u32, now: u64) -> bool {
         let target = Self::target(rate);
         let ratio = target as f64 / self.bps.max(1) as f64;
         let shifted = ratio < CAP_DEADBAND.0 || ratio > CAP_DEADBAND.1;
         let hold = if ratio >= CAP_JUMP { CAP_JUMP_HOLD_US } else { CAP_HOLD_US };
-        if ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= hold) {
+        let moved = ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= hold);
+        if moved {
             self.bps = target;
             self.changed_us = now;
-            return Some(target);
         }
-        None
+        std::mem::replace(&mut self.fps, fps) != fps || moved
     }
 }
 
@@ -1144,7 +1162,7 @@ fn create_encoder(
     size: (u32, u32),
     output: (u32, u32),
     conf: &(String, String),
-    max_bitrate: u64,
+    cap: &VideoCap,
     two_pass: bool,
 ) {
     let id = link.id;
@@ -1153,7 +1171,7 @@ fn create_encoder(
     let encoders = app.platform.encoders();
     let (pref, setting) = conf;
     let chosen = pick_codec(setting, &link.codecs, &encoders.codecs());
-    let mut req = encoder_request(app, chosen, size, output, pref, max_bitrate, two_pass);
+    let mut req = encoder_request(app, chosen, size, output, pref, cap, two_pass);
     let mut created = encoders.create(&req);
     if let Err(e) = &created {
         if req.codec != Codec::H264 {
@@ -1177,7 +1195,7 @@ fn encoder_request(
     size: (u32, u32),
     output: (u32, u32),
     pref: &str,
-    max_bitrate: u64,
+    cap: &VideoCap,
     two_pass: bool,
 ) -> EncoderRequest {
     EncoderRequest {
@@ -1187,7 +1205,8 @@ fn encoder_request(
         output,
         preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
         surface: app.shared.surface(),
-        max_bitrate,
+        max_bitrate: cap.bps,
+        fps: cap.fps,
         two_pass,
     }
 }
@@ -1203,15 +1222,15 @@ fn install_encoder(app: &App, id: u64, codec: &mut ClientCodec, e: Box<dyn Video
 /// current encoder keeps encoding until this one is ready.
 struct PendingEncoder {
     rx: std::sync::mpsc::Receiver<Result<Box<dyn VideoEncoder>>>,
-    /// The cap it was opened with.
-    bitrate: u64,
+    /// The cap it was opened with, and the frame rate that was for.
+    cap: (u64, u32),
 }
 
 impl PendingEncoder {
     /// Opens an encoder for `req`; the calling (producer) thread is woken
     /// when it is ready.
     fn open(app: &App, req: EncoderRequest) -> Self {
-        let bitrate = req.max_bitrate;
+        let cap = (req.max_bitrate, req.fps);
         let (tx, rx) = std::sync::mpsc::channel();
         let (platform, producer) = (app.platform.clone(), std::thread::current());
         std::thread::Builder::new()
@@ -1221,7 +1240,7 @@ impl PendingEncoder {
                 producer.unpark();
             })
             .expect("spawn encoder thread");
-        Self { rx, bitrate }
+        Self { rx, cap }
     }
 
     /// The opened encoder (or why not) once ready.

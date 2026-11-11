@@ -79,9 +79,19 @@ flowchart LR
      "Video codecs" for which codec and how each avoids output reordering).
      Video frames are paced to 70 % of the link and the encoder's bitrate
      cap follows the same share (NVENC VBR / x264 CRF with VBV, QP floor 20,
-     60 on AV1's scale);
-     cap changes cost an IDR with NVENC, so they need a clear shift and hold
-     3 s unless the link collapses.
+     60 on AV1's scale). The cap is for the frame rate the client shows
+     (its refresh rate, at most the display's; 60 until it says): a frame
+     may take cap / rate, so that many fit the share. NVENC's rate control
+     counts frames, not time, and assumes 60 a second, so the cap it gets
+     is scaled by 60 / rate (`rate_control_bitrate`); x264 follows the
+     timestamps and takes it as it is. Unscaled, heavy content at a
+     120 Hz client came as frames twice the size the share has room for,
+     and pacing sent half of them, each one waiting for its turn (a game
+     at 4K: 280 KB frames, 60 a second, 7-10 ms of waiting; RESULTS,
+     "A game at 4K for a 120 Hz client").
+     Cap changes cost an IDR with NVENC, so they need a clear shift and hold
+     3 s unless the link collapses; a change of the client's frame rate is
+     applied at once.
 6. **Client** (`worker.ts`): frames are applied in order and atomically —
    moves, then lossless rects to one texture, decoded VideoFrame to another;
    a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing,

@@ -92,10 +92,6 @@ impl InputKind {
     }
 }
 
-/// Frame rate NVENC's rate control assumes (it ignores timestamps): the
-/// per-frame budget is cap / RC_FPS. Faster capture just costs more bits; the
-/// link window then lowers the frame rate instead of the quality.
-const RC_FPS: i32 = 60;
 /// Bitrate cap range: below the floor pictures fall apart; the ceiling sits
 /// within H.264 High level 5.2 and above what QP 20 needs for screen content.
 const MIN_BITRATE: u64 = 500_000;
@@ -113,11 +109,23 @@ fn min_qp(codec: Codec) -> i32 {
     }
 }
 
-fn clamp_bitrate(bps: u64) -> u64 {
+/// Frame rate NVENC's rate control assumes (it ignores timestamps): a frame
+/// gets a sixtieth of the cap it is given, however fast frames come.
+const RC_FPS: i32 = 60;
+
+/// The cap as the backend's rate control takes it, for frames coming at up
+/// to `fps` a second. NVENC gets it scaled, so that a frame's share is
+/// `bps / fps`; x264 follows the timestamps and takes it as it is.
+pub(crate) fn rate_control_bitrate(backend: Backend, bps: u64, fps: u32) -> u64 {
+    let bps = match backend {
+        Backend::Nvenc => (bps / fps.max(1) as u64).saturating_mul(RC_FPS as u64),
+        _ => bps,
+    };
     bps.clamp(MIN_BITRATE, MAX_BITRATE)
 }
 
-/// VBV buffer: two frames at RC_FPS, so no single frame exceeds ~33 ms of link time.
+/// VBV buffer: two frames at RC_FPS (two frames for NVENC, 33 ms for x264),
+/// so no single frame takes much more of the link than its share.
 fn vbv_size(bps: u64) -> i32 {
     (bps * 2 / RC_FPS as u64).min(i32::MAX as u64) as i32
 }
@@ -158,7 +166,7 @@ impl FfmpegEncoder {
         input: (u32, u32),
         output: (u32, u32),
         surface: Option<&GpuSurface>,
-        max_bitrate: u64,
+        bitrate: u64,
         two_pass: bool,
         overrides: &[(String, String)],
     ) -> Result<Self> {
@@ -177,7 +185,6 @@ impl FfmpegEncoder {
         enc.set_colorspace(ff::color::Space::BT709);
         enc.set_color_range(ff::color::Range::MPEG);
         enc.set_flags(ff::codec::Flags::LOW_DELAY);
-        let bitrate = clamp_bitrate(max_bitrate);
         if backend.caps_bitrate() {
             enc.set_max_bit_rate(bitrate as usize);
             // SAFETY: plain field of the not-yet-opened codec context.
@@ -389,11 +396,11 @@ impl VideoEncoder for FfmpegEncoder {
         Ok(out)
     }
 
-    fn set_max_bitrate(&mut self, bits_per_sec: u64) -> bool {
+    fn set_max_bitrate(&mut self, bits_per_sec: u64, fps: u32) -> bool {
         if !self.backend.caps_bitrate() {
             return false;
         }
-        let bitrate = clamp_bitrate(bits_per_sec);
+        let bitrate = rate_control_bitrate(self.backend, bits_per_sec, fps);
         if bitrate != self.bitrate {
             self.bitrate = bitrate;
             // The wrappers pick changed rates up on the next frame (x264

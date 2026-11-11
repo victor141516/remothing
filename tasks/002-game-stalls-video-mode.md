@@ -30,10 +30,30 @@
   model"; `docs/RESULTS.md`, "Estimate without bound"). The 4 Mbit/s
   squeeze after a path switch was not reproduced on the fixed build (the
   estimate is no longer raised by waits that are not the estimate's).
-- Left: step 5, which depends on step 4's report from a real game: if the
-  late frames show `wait` it is the link, if `upload`/`encode` it is the
-  GPU and candidates 1, 2 and 4 of task 003 apply. Waiting for the user to
-  play a match on the deployed build and for the event log.
+- Step 5, read from a real match (ARC Raiders at 3840x2160, the MacBook at
+  120 Hz, 2026-11-11; numbers in `docs/RESULTS.md`, "A game at 4K for a
+  120 Hz client"):
+  - The scheduling of task 003 is on and right while a client is
+    connected: the server's GPU class reads realtime from outside, the
+    game's normal.
+  - Done: the steady `wait` (7-10 ms) was pacing. Frames were made for 60
+    a second and came at up to 120, each twice the size its share of the
+    link has room for; the encoder's cap is now for the client's frame
+    rate. This also halves what the client decodes per frame.
+  - Left: the GPU. Next to the game every wait for the GPU costs 3-5 ms
+    (median) even in the realtime class, and encode takes 6-9 ms instead
+    of 3. Not tried: fewer waits per frame (the encoder is handed BGRA and
+    converts it in a step of its own), HAGS on, the game's frame rate
+    capped so the GPU keeps some room.
+  - Left: the stalls of 150-600 ms (`wait` or `encode` of one frame) are
+    still in the event log, a few a minute. Not explained. Video memory
+    was at 14.5 of 16.4 GB during the match; whether that is it was not
+    looked into.
+  - Not built: a limit on frame size for a client that needs longer per
+    frame than frames are apart. Measured with a script as client (10 ms
+    per frame at 120 Hz): capture to draw 25 ms instead of 4, since every
+    frame waits at the server for the one before to be drawn. The MacBook
+    was not in that state in the match (frames came 15-25 ms apart).
 
 ## Goal
 

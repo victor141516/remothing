@@ -176,7 +176,8 @@ impl EncoderProvider for FfmpegEncoders {
             let opts = self.overrides.iter().find(|(b, c, _)| (*b, *c) == (backend, req.codec)).map_or(&[][..], |(_, _, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {
                 let (input, surface) = ((req.width, req.height), req.surface.as_ref());
-                let (bitrate, two_pass) = (req.max_bitrate, req.two_pass);
+                let bitrate = ffmpeg::rate_control_bitrate(backend, req.max_bitrate, req.fps);
+                let two_pass = req.two_pass;
                 match FfmpegEncoder::open(backend, req.codec, kind, input, req.output, surface, bitrate, two_pass, opts) {
                     Ok(mut e) => {
                         if !skipped.is_empty() {
