@@ -969,6 +969,7 @@ mod bench {
                     preferred: Some(backend.into()),
                     surface: Some(gs.clone()),
                     max_bitrate: u64::MAX,
+                    two_pass: false,
                 };
                 let e = provider.create(&req)?;
                 println!("{w}x{h} prefer {backend}: opened {:?}, fallback: {:?}", e.name(), e.fallback_reason());
@@ -987,6 +988,8 @@ mod bench {
                             preferred: Some(backend.into()),
                             surface: gpu_input.then(|| gs.clone()),
                             max_bitrate: u64::MAX,
+                            // Swept with `--set multipass=qres` instead.
+                            two_pass: false,
                         };
                         let mut e = provider.create(&req)?;
                         let prefix = format!("| {} | {label} | {w}x{h} | {} ", e.name(), scene.name());

@@ -53,6 +53,10 @@ pub struct EncoderRequest {
     pub surface: Option<GpuSurface>,
     /// Initial bitrate cap, bits/s (see [`VideoEncoder::set_max_bitrate`]).
     pub max_bitrate: u64,
+    /// Two passes per frame (a quick one at reduced size to plan the real
+    /// one), where the encoder offers it: steadier frame sizes for a little
+    /// more encode time.
+    pub two_pass: bool,
 }
 
 pub struct Encoded {
@@ -100,6 +104,9 @@ pub trait VideoEncoder: Send {
     /// quality stays at the encoder's fixed level whenever the cap allows.
     /// Returns false for backends that keep a fixed-quality mode.
     fn set_max_bitrate(&mut self, bits_per_sec: u64) -> bool;
+    /// Whether it encodes in two passes: None for encoders without that
+    /// setting, so asking for the other one would change nothing.
+    fn two_pass(&self) -> Option<bool>;
 }
 
 pub trait AudioEncoder: Send {

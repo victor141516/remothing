@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::app::App;
 use crate::config::constant_time_eq;
-use crate::encode::{Codec, EncoderRequest};
+use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
 use crate::pacer::Pacer;
 use crate::platform::{Button, ThreadRole};
@@ -803,6 +803,10 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     // Size the encoder encodes (the display's unless scaled for the
     // client), and since when a larger one has been affordable.
     let mut encoded = (0, 0);
+    // A replacement encoder opening (two-pass switched), and when a failed
+    // one may be tried again.
+    let mut pending: Option<PendingEncoder> = None;
+    let mut two_pass_retry_us = 0;
     let mut room_since = 0;
     // Estimate on the WebSocket path when frames moved to the data channel
     // (0: not there, or already found slower).
@@ -856,7 +860,9 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 encoder_conf = conf;
                 drop(s);
                 video_cap.reset(video_rate(model, &codec.tuning));
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
+                let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
+                pending = None;
                 shared.drop_video(link.id);
                 need_key = true;
             }
@@ -866,13 +872,48 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 return;
             }
         }
-        if let Some(e) = codec.encoder.as_mut() {
-            let before = video_cap.bps;
-            if let Some(bps) = video_cap.update(video_rate(model, &codec.tuning), proto::now_us()) {
+        let before = video_cap.bps;
+        let cap = match codec.encoder.as_ref() {
+            Some(_) => video_cap.update(video_rate(model, &codec.tuning), proto::now_us()),
+            None => None,
+        };
+        if let Some(bps) = cap {
+            let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
+            app.telemetry.event(link.id, &text);
+            if let Some(e) = codec.encoder.as_mut() {
                 // A keyframe with NVENC (FFmpeg resets the encoder).
                 e.set_max_bitrate(bps);
-                let text = format!("video cap {:.1} -> {:.1} Mbit/s", before as f64 / 1e6, bps as f64 / 1e6);
+            }
+        }
+        // Two-pass needs another encoder: opened beside the current one,
+        // which keeps encoding meanwhile.
+        let two_pass = codec.encoder.as_ref().and_then(|e| e.two_pass().map(|on| (on, e.codec())));
+        if let Some((on, current)) = two_pass.filter(|_| pending.is_none() && proto::now_us() >= two_pass_retry_us) {
+            let want = wants_two_pass(on, video_cap.bps, rtt_us);
+            if want != on {
+                let state = if want { "on" } else { "off" };
+                let text = format!("two-pass {state} (video cap {:.1} Mbit/s, round trip {} ms)", video_cap.bps as f64 / 1e6, rtt_us / 1000);
                 app.telemetry.event(link.id, &text);
+                let req = encoder_request(app, current, size, encoded, &encoder_conf.0, video_cap.bps, want);
+                pending = Some(PendingEncoder::open(app, req));
+            }
+        }
+        if let Some((ready, bitrate)) = pending.as_ref().and_then(|p| p.ready().map(|r| (r, p.bitrate))) {
+            pending = None;
+            match ready {
+                Ok(mut e) => {
+                    if bitrate != video_cap.bps {
+                        e.set_max_bitrate(video_cap.bps);
+                    }
+                    install_encoder(app, link.id, &mut codec, e);
+                    // The new encoder's input is blank: everything is copied in again.
+                    shared.encoder_reset(link.id);
+                    need_key = true;
+                }
+                Err(err) => {
+                    two_pass_retry_us = proto::now_us() + TWO_PASS_RETRY_US;
+                    app.telemetry.event(link.id, &format!("encoder for two-pass failed, keeping the current one: {err:#}"));
+                }
             }
         }
         let view = *link.view.lock().unwrap();
@@ -898,7 +939,9 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 app.telemetry.event(link.id, &text);
                 encoded = want;
                 room_since = 0;
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
+                pending = None;
+                let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
                 // The new encoder's input is blank: everything is copied in again.
                 shared.encoder_reset(link.id);
                 need_key = true;
@@ -950,7 +993,9 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     encoder_conf = (s.encoder.preferred.clone(), s.encoder.codec.clone());
                     drop(s);
                     video_cap.reset(video_rate(model, &codec.tuning));
-                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
+                    pending = None;
+                    let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
+                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps, two_pass);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
@@ -1061,10 +1106,37 @@ fn pick_codec(setting: &str, decodable: &[Codec], encodable: &[Codec]) -> Codec 
     }
 }
 
+/// Two-pass encoding (where the encoder offers it: H.264 on NVENC) pays on
+/// slow or distant links and costs frame rate on fast near ones (measured,
+/// docs/RESULTS.md "Two-pass on slow links"): on when the video cap is
+/// below TWO_PASS_CAP.0 or the round trip at least TWO_PASS_RTT_US.0, off
+/// again only past the other end of each band, so a link near a threshold
+/// does not flip between encoders. A slow link is not always seen by the
+/// cap: video using less than the link leaves the estimate above it, as
+/// on an 18 Mbit/s path with 80 ms of round trip.
+const TWO_PASS_CAP: (u64, u64) = (20_000_000, 30_000_000);
+const TWO_PASS_RTT_US: (u64, u64) = (50_000, 35_000);
+/// A failed attempt to open the other encoder is not repeated sooner.
+const TWO_PASS_RETRY_US: u64 = 30_000_000;
+
+fn wants_two_pass(on: bool, cap_bps: u64, rtt_us: u64) -> bool {
+    match on {
+        false => cap_bps < TWO_PASS_CAP.0 || rtt_us >= TWO_PASS_RTT_US.0,
+        true => cap_bps < TWO_PASS_CAP.1 || rtt_us >= TWO_PASS_RTT_US.1,
+    }
+}
+
+/// What `wants_two_pass` says for the next encoder of a client, from the
+/// current one's setting.
+fn next_two_pass(codec: &ClientCodec, cap_bps: u64, rtt_us: u64) -> bool {
+    wants_two_pass(codec.encoder.as_ref().and_then(|e| e.two_pass()).unwrap_or(false), cap_bps, rtt_us)
+}
+
 /// A new encoder for `size` (the display's), encoding `output` (smaller in
 /// motion mode for a small client, see `video_size`), with the backend
 /// preference and codec of `conf`. H.264 when the chosen codec cannot be
 /// opened.
+#[allow(clippy::too_many_arguments)]
 fn create_encoder(
     app: &App,
     link: &ClientLink,
@@ -1073,21 +1145,15 @@ fn create_encoder(
     output: (u32, u32),
     conf: &(String, String),
     max_bitrate: u64,
+    two_pass: bool,
 ) {
     let id = link.id;
     codec.encoder = None;
     app.shared.set_gpu_input(id, false);
     let encoders = app.platform.encoders();
     let (pref, setting) = conf;
-    let mut req = EncoderRequest {
-        codec: pick_codec(setting, &link.codecs, &encoders.codecs()),
-        width: size.0,
-        height: size.1,
-        output,
-        preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
-        surface: app.shared.surface(),
-        max_bitrate,
-    };
+    let chosen = pick_codec(setting, &link.codecs, &encoders.codecs());
+    let mut req = encoder_request(app, chosen, size, output, pref, max_bitrate, two_pass);
     let mut created = encoders.create(&req);
     if let Err(e) = &created {
         if req.codec != Codec::H264 {
@@ -1097,14 +1163,73 @@ fn create_encoder(
         }
     }
     match created {
-        Ok(e) => {
-            app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
-            app.shared.set_gpu_input(id, e.gpu_input());
-            codec.encoder = Some(e);
-        }
+        Ok(e) => install_encoder(app, id, codec, e),
         Err(e) => {
             app.telemetry.client_encoder(id, None, Some(format!("{e:#}")));
             app.telemetry.error("video encoder unavailable, lossless only", e);
+        }
+    }
+}
+
+fn encoder_request(
+    app: &App,
+    codec: Codec,
+    size: (u32, u32),
+    output: (u32, u32),
+    pref: &str,
+    max_bitrate: u64,
+    two_pass: bool,
+) -> EncoderRequest {
+    EncoderRequest {
+        codec,
+        width: size.0,
+        height: size.1,
+        output,
+        preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
+        surface: app.shared.surface(),
+        max_bitrate,
+        two_pass,
+    }
+}
+
+fn install_encoder(app: &App, id: u64, codec: &mut ClientCodec, e: Box<dyn VideoEncoder>) {
+    app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
+    app.shared.set_gpu_input(id, e.gpu_input());
+    codec.encoder = Some(e);
+}
+
+/// An encoder opening on its own thread: NVENC takes about 250 ms to open,
+/// which the producer would otherwise spend not sending anything. The
+/// current encoder keeps encoding until this one is ready.
+struct PendingEncoder {
+    rx: std::sync::mpsc::Receiver<Result<Box<dyn VideoEncoder>>>,
+    /// The cap it was opened with.
+    bitrate: u64,
+}
+
+impl PendingEncoder {
+    /// Opens an encoder for `req`; the calling (producer) thread is woken
+    /// when it is ready.
+    fn open(app: &App, req: EncoderRequest) -> Self {
+        let bitrate = req.max_bitrate;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (platform, producer) = (app.platform.clone(), std::thread::current());
+        std::thread::Builder::new()
+            .name("encoder-open".into())
+            .spawn(move || {
+                let _ = tx.send(platform.encoders().create(&req));
+                producer.unpark();
+            })
+            .expect("spawn encoder thread");
+        Self { rx, bitrate }
+    }
+
+    /// The opened encoder (or why not) once ready.
+    fn ready(&self) -> Option<Result<Box<dyn VideoEncoder>>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(anyhow::anyhow!("encoder thread ended"))),
         }
     }
 }
@@ -1200,5 +1325,20 @@ mod tests {
         assert_eq!(pick_codec("h264", &client, &server), H264);
         assert_eq!(pick_codec("av1", &client, &server), H264);
         assert_eq!(pick_codec("hevc", &[H264, Hevc, Av1], &[H264, Av1]), H264);
+    }
+
+    #[test]
+    fn two_pass_follows_slow_or_distant_links_with_hysteresis() {
+        const MBIT: u64 = 1_000_000;
+        // Fast and near: off; slow or distant: on.
+        assert!(!wants_two_pass(false, 100 * MBIT, 1_000));
+        assert!(wants_two_pass(false, 10 * MBIT, 1_000));
+        assert!(wants_two_pass(false, 100 * MBIT, 80_000));
+        // Between the ends of a band the current setting stays.
+        assert!(!wants_two_pass(false, 25 * MBIT, 40_000));
+        assert!(wants_two_pass(true, 25 * MBIT, 1_000));
+        assert!(wants_two_pass(true, 100 * MBIT, 40_000));
+        // Past both far ends it goes off.
+        assert!(!wants_two_pass(true, 31 * MBIT, 30_000));
     }
 }

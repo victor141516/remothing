@@ -122,6 +122,18 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
 - **Split-frame encoding** (HEVC, AV1; FFmpeg 7.1 or later, so Windows
   here, not the Ubuntu 24.04 container's 6.1): forced on, the GPU's NVENC
   units take a strip each; the driver's own choice splits only at 4K.
+- **Two-pass** (H.264 on NVENC only, `multipass=qres`): a quick pass at a
+  quarter of the size plans each frame, so sizes come out even. It costs
+  0.6 ms of encode at the median (4 ms at p99), which on a fast near link
+  is 10-20 % of the frame rate; on slow or distant links the even sizes
+  win (docs/RESULTS.md, "Two-pass on slow links"). On while the video cap
+  is below 20 Mbit/s or the round trip is 50 ms or more; off once the cap
+  is above 30 Mbit/s and the round trip below 35 ms (`wants_two_pass`).
+  The cap alone misses slow links that video does not fill (the estimate
+  stays above them). Switching needs another encoder, and opening one
+  takes NVENC about 250 ms: it opens on its own thread while the current
+  one keeps encoding, then takes over with a keyframe. HEVC and AV1 gained
+  nothing measurable from it.
 
 ## Motion mode
 

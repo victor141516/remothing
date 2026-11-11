@@ -314,7 +314,7 @@ Failure cases (`transport=auto`):
 | all UDP dropped from the start | WebTransport failed on every candidate within 3 s, frames on the WebSocket throughout: 185 fps, 9 / 18 |
 | all UDP dropped 5 s into the session | given up after 300 ms without a ping answer, 3 frames repaired with a keyframe, one frame 431 ms late, then WebSocket at full rate |
 
-## NVENC rate control trial (not adopted)
+## NVENC rate control trial (one-frame VBV not adopted; two-pass, see below)
 
 Linux bench container, `rt-testapp` at 165 fps, `transport=auto`, 10 s
 runs; `total` = capture→draw p50 / p99 / max, encode p50 / p99. Current:
@@ -334,7 +334,53 @@ The one-frame VBV alone changes nothing (worse on the mobile profile). The
 two-pass gives tighter frames on slow links (worst frame at 18 Mbit/s from
 77-110 to 55-61 ms, +20 % frame rate on the mobile profile) but costs
 0.7 ms of encode at the median and 4 ms at p99, which the fast links pay in
-frame rate and latency. Kept the current settings.
+frame rate and latency. Kept the one-frame VBV out; two-pass became
+automatic, next section.
+
+## Two-pass on slow links
+
+Same container and harness, 10 s runs, `total` = capture→draw p50 / p99 /
+max. First two-pass (`multipass=qres`) always on, per codec, against the
+current single pass (2 runs each; H.264 on slow links 3 more):
+
+| profile | scenario | codec | single pass | two-pass always |
+|---|---|---|---|---|
+| clean | full | H.264 | 179 fps, 11 / 22-23 / 28-29 | 144-154 fps, 14-16 / 23-34 / 28-50 |
+| clean | full | HEVC | 163 fps, 9-11 / 20-24 / 27-42 | 149-156 fps, 13-14 / 23-26 / 28-37 |
+| clean | full | AV1 | 176-179 fps, 11-12 / 22-24 / 28-29 | 148 fps, 15-16 / 28 / 31-35 |
+| 18M/40ms | full | H.264 (5 runs) | 151-158 fps, 42-45 / 57-67 / 78-112 | 144-155 fps, 41-43 / 52-62 / 56-78 |
+| 18M/40ms | full | HEVC | 148-150 fps, 46 / 60-71 / 74-123 | 146-150 fps, 44-45 / 57-69 / 68-137 |
+| 18M/40ms | full | AV1 | 170 fps, 32-33 / 46-47 / 56-63 | 161-163 fps, 35 / 43-44 / 48-49 |
+| mobile 6M/50ms +-10, 0.5 % loss | full | H.264 (5 runs) | 52-56 fps, 74-79 / 129-295 / 170-357 | 56-64 fps, 72-84 / 139-174 / 168-207 |
+| mobile 6M/50ms +-10, 0.5 % loss | full | HEVC | 51 fps, 80-81 / 136-200 | 54-57 fps, 78-79 / 174-187 |
+| mobile 6M/50ms +-10, 0.5 % loss | full | AV1 | 79-82 fps, 68-69 / 153-161 | 82-97 fps, 67-68 / 155-165 |
+| 10M/30ms | full | H.264 (3 runs) | 75 fps, 68-71 / 133-147 | 73-75 fps, 67-72 / 131-139 |
+| 10M/30ms | scroll | H.264 (3 runs) | 122-153 fps, 40-52 / 109-151 / 180-222 | 132-140 fps, 41-42 / 94-102 / 128-159 |
+| 50M/20ms | scroll | H.264 | 153-165 fps, 23 / 38-81 / 89-140 | 148-158 fps, 26 / 37-42 / 43-60 |
+
+Encode time with two-pass: 2.6-3.4 ms p50, 8-9 ms p99 (single pass 1.9-2.5
+/ 4.1-4.7). For H.264 the even frame sizes pay on slow or distant links;
+for HEVC and AV1 the differences stay within the spread between runs, so
+they keep a single pass. On a fast near link every codec loses 10-20 % of
+its frame rate.
+
+The 18 Mbit/s link is not filled by this video (13 Mbit/s): the link
+model never finds its ceiling (estimate 44 Mbit/s after 60 s), so the
+video cap stays above 30 Mbit/s. Hence two-pass follows the round trip
+as well as the cap. Opening the other NVENC encoder takes about 250 ms
+(a gap of 254 ms in frames when it was opened on the client's thread),
+so it opens beside the current one.
+
+Automatic (H.264, on below 20 Mbit/s of cap or from 50 ms of round trip,
+3 runs; 50M/20ms 2 runs), against the single pass above:
+
+| profile | scenario | automatic | used |
+|---|---|---|---|
+| clean | full | 182-185 fps, 10-11 / 19-22 / 23-28 | two-pass for the first second (slow start), then single |
+| 18M/40ms | full | 153-158 fps, 41 / 52-55 / 56-62 | two-pass (80 ms round trip) |
+| mobile 6M/50ms +-10, 0.5 % loss | full | 60-80 fps, 67-72 / 156-179 / 183-268 | two-pass |
+| 10M/30ms | scroll | 155-159 fps, 36 / 89-97 / 121-169 | two-pass |
+| 50M/20ms | scroll | 164-165 fps, 23 / 33-35 / 40-44 | single after slow start |
 
 ## Video codecs
 

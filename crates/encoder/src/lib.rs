@@ -115,7 +115,7 @@ impl FfmpegEncoders {
                 if ff::encoder::find_by_name(name).is_none() {
                     continue;
                 }
-                match FfmpegEncoder::open(b, codec, InputKind::Host, (256, 256), (256, 256), None, 1_000_000, &[]) {
+                match FfmpegEncoder::open(b, codec, InputKind::Host, (256, 256), (256, 256), None, 1_000_000, false, &[]) {
                     Ok(_) => available.push((b, codec)),
                     Err(e) => unavailable.push((format!("{} {}", b.name(), codec.name()), format!("{e:#}"))),
                 }
@@ -176,7 +176,8 @@ impl EncoderProvider for FfmpegEncoders {
             let opts = self.overrides.iter().find(|(b, c, _)| (*b, *c) == (backend, req.codec)).map_or(&[][..], |(_, _, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {
                 let (input, surface) = ((req.width, req.height), req.surface.as_ref());
-                match FfmpegEncoder::open(backend, req.codec, kind, input, req.output, surface, req.max_bitrate, opts) {
+                let (bitrate, two_pass) = (req.max_bitrate, req.two_pass);
+                match FfmpegEncoder::open(backend, req.codec, kind, input, req.output, surface, bitrate, two_pass, opts) {
                     Ok(mut e) => {
                         if !skipped.is_empty() {
                             e.fallback = Some(skipped.join("; "));

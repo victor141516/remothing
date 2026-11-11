@@ -122,6 +122,14 @@ fn vbv_size(bps: u64) -> i32 {
     (bps * 2 / RC_FPS as u64).min(i32::MAX as u64) as i32
 }
 
+/// Two-pass at quarter resolution (NVENC `multipass=qres`) when the core
+/// asks for it: only for H.264 on NVENC, where it measurably helped on slow
+/// and distant links (docs/RESULTS.md, "Two-pass on slow links"); HEVC and
+/// AV1 gained nothing measurable.
+fn offers_two_pass(backend: Backend, codec: Codec) -> bool {
+    backend == Backend::Nvenc && codec == Codec::H264
+}
+
 pub(crate) struct FfmpegEncoder {
     enc: ff::encoder::video::Encoder,
     input: Input,
@@ -131,6 +139,8 @@ pub(crate) struct FfmpegEncoder {
     bitrate: u64,
     backend: Backend,
     codec: Codec,
+    /// Runs two-pass (see `offers_two_pass`).
+    two_pass: bool,
     kind: InputKind,
     pub(crate) fallback: Option<String>,
 }
@@ -149,6 +159,7 @@ impl FfmpegEncoder {
         output: (u32, u32),
         surface: Option<&GpuSurface>,
         max_bitrate: u64,
+        two_pass: bool,
         overrides: &[(String, String)],
     ) -> Result<Self> {
         let (width, height) = output;
@@ -227,6 +238,9 @@ impl FfmpegEncoder {
                 // SAFETY: plain field of the not-yet-opened codec context.
                 unsafe { (*enc.as_mut_ptr()).qmin = min_qp(codec) };
                 opts.set("forced-idr", "1");
+                if two_pass && offers_two_pass(backend, codec) {
+                    opts.set("multipass", "qres");
+                }
                 // Split-frame encoding (HEVC and AV1; FFmpeg 7.1 or later):
                 // the GPU's encoders take a strip each. Measured
                 // (d3d11_bench, RTX 4080 S, 1080p to 4K): the driver's "auto"
@@ -273,6 +287,7 @@ impl FfmpegEncoder {
             bitrate,
             backend,
             codec,
+            two_pass: two_pass && offers_two_pass(backend, codec),
             kind,
             fallback: None,
         })
@@ -281,7 +296,12 @@ impl FfmpegEncoder {
 
 impl VideoEncoder for FfmpegEncoder {
     fn name(&self) -> String {
-        format!("{} {} ({})", self.backend.name(), self.codec.name(), self.kind.label())
+        let pass = if self.two_pass { " two-pass" } else { "" };
+        format!("{} {}{pass} ({})", self.backend.name(), self.codec.name(), self.kind.label())
+    }
+
+    fn two_pass(&self) -> Option<bool> {
+        offers_two_pass(self.backend, self.codec).then_some(self.two_pass)
     }
 
     fn codec(&self) -> Codec {
