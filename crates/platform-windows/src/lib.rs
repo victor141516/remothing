@@ -10,6 +10,7 @@ mod cursor;
 mod desktop;
 mod dxgi;
 mod gpu_diff;
+mod hdr;
 mod input;
 mod keymap;
 mod microphone;
@@ -46,9 +47,9 @@ impl DisplayProvider for WindowsDisplays {
         Ok(dxgi::outputs()?.into_iter().map(|o| o.info).collect())
     }
 
-    fn open(&self, id: &str) -> Result<OpenedDisplay> {
+    fn open(&self, id: &str, hdr: bool) -> Result<OpenedDisplay> {
         let out = dxgi::outputs()?.into_iter().find(|o| o.info.id == id).with_context(|| format!("display {id} not found"))?;
-        let capture = DxgiSession::open(&out)?;
+        let capture = DxgiSession::open(&out, hdr)?;
         let input = SendInputProvider::new(&out.info);
         // Streaming works without it (e.g. no access to the window station).
         let clipboard = WindowClipboard::new()

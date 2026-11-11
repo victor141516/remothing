@@ -113,11 +113,14 @@ impl CaptureLoop {
         // Every client waits for this thread.
         self.platform.thread_priority(ThreadRole::Capture);
         let mut wanted = initial;
+        // The picture every client can show (see `Shared::hdr_wanted`).
+        let mut hdr = false;
         loop {
             if let Some(id) = self.control.take_request() {
                 wanted = id;
             }
-            let opened = match self.open(&wanted) {
+            hdr = self.shared.hdr_wanted().unwrap_or(hdr);
+            let opened = match self.open(&wanted, hdr) {
                 Ok(o) => o,
                 Err(e) => {
                     self.telemetry.error("capture: open display", e);
@@ -126,14 +129,14 @@ impl CaptureLoop {
                 }
             };
             wanted = opened.info.id.clone();
-            if let Err(e) = self.stream(opened) {
+            if let Err(e) = self.stream(opened, hdr) {
                 self.telemetry.error("capture", e);
                 std::thread::sleep(REOPEN_DELAY);
             }
         }
     }
 
-    fn open(&self, wanted: &str) -> Result<OpenedDisplay> {
+    fn open(&self, wanted: &str, hdr: bool) -> Result<OpenedDisplay> {
         let displays = self.platform.displays();
         let list = displays.list().context("list displays")?;
         let id = list
@@ -143,22 +146,28 @@ impl CaptureLoop {
             .or(list.first())
             .map(|d| d.id.clone())
             .context("no display available")?;
-        displays.open(&id).with_context(|| format!("open display {id}"))
+        displays.open(&id, hdr).with_context(|| format!("open display {id}"))
     }
 
-    /// Streams one display until a switch is requested (Ok) or the session fails (Err).
-    fn stream(&self, opened: OpenedDisplay) -> Result<()> {
+    /// Streams one display until a switch is requested, or the clients now
+    /// want the other picture of an HDR display (Ok), or the session fails (Err).
+    fn stream(&self, opened: OpenedDisplay, hdr: bool) -> Result<()> {
         let OpenedDisplay { info, mut capture, input, clipboard } = opened;
         let layout = self.keyboard_layout.read().unwrap().clone();
         if let Err(e) = input.set_keyboard_layout(&layout) {
             eprintln!("keyboard layout {layout}: {e:#}");
         }
         let (width, height) = capture.size();
-        eprintln!("streaming display {} ({}x{})", info.id, width, height);
+        let picture = capture.picture();
+        let kind = match (picture.hdr_max > 0.0, picture.hdr_display) {
+            (true, _) => format!(", HDR picture up to {:.2}x SDR white", picture.hdr_max),
+            (false, true) => ", HDR display converted to SDR".to_string(),
+            (false, false) => String::new(),
+        };
+        eprintln!("streaming display {} ({}x{}{kind})", info.id, width, height);
         // GPU-based sessions can skip CPU readback of tiles shown only from video.
         let gpu = capture.gpu_surface().is_some();
-        let pixels = self.shared.reconfigure(width, height, capture.gpu_surface());
-        *self.control.input.write().unwrap() = Some(input);
+        let pixels = self.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
         *self.control.current.write().unwrap() = Some(info);
         if let Some(c) = &clipboard {
             let control = self.control.clone();
@@ -189,6 +198,12 @@ impl CaptureLoop {
             Ok(())
         };
         while !self.control.has_request() {
+            // Another picture: the clients' wish changed for an HDR display,
+            // or the session found the display's own picture changed.
+            let wish = self.shared.hdr_wanted().unwrap_or(hdr);
+            if (wish != hdr && picture.hdr_display) || capture.picture() != picture {
+                return Ok(());
+            }
             self.shared.tick(proto::now_us());
             if let Some(state) = capture.cursor_change()? {
                 self.shared.set_cursor(proto::cursor(&state));

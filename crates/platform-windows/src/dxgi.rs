@@ -3,6 +3,8 @@
 //! Each session owns a D3D11 device on the output's adapter and a persistent
 //! BGRA texture (the `D3D11Frame` shared with encoders) kept equal to the
 //! desktop image by copying only the changed areas of every acquired frame.
+//! On an HDR display the image arrives in float and is converted into it
+//! (`hdr`), and for an HDR picture also into a 10-bit image for the tiles.
 //! The DXGI dirty areas are narrowed to the tiles that really changed on the
 //! GPU (`gpu_diff`) before they are reported.
 
@@ -14,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use gpu_interop::d3d11::D3D11Frame;
 use remothing_core::geom::{MovedRect, Rect};
 use remothing_core::platform::{
-    CaptureSession, CursorProvider, CursorState, DisplayInfo, DisplayKind, FrameInfo, GpuSurface,
+    CaptureSession, CursorProvider, CursorState, DisplayInfo, DisplayKind, FrameInfo, GpuSurface, Picture,
 };
 use remothing_core::proto;
 use windows::core::{Interface, PCWSTR};
@@ -27,13 +29,14 @@ use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED, HANDLE, HMODULE, R
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_MODE_ROTATION_IDENTITY,
-    DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R10G10B10A2_UNORM,
+    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication,
@@ -50,11 +53,15 @@ use windows::Win32::System::Threading::{
 use crate::cursor::{self, CursorTracker};
 use crate::desktop;
 use crate::gpu_diff::{GpuDiff, GpuFence};
+use crate::hdr::{self, Converter, HdrState};
 
 /// Minimum delay between re-duplication attempts while the desktop is not capturable.
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 /// Delay between non-blocking AcquireNextFrame polls (see `next_frame`).
 const POLL_INTERVAL: Duration = Duration::from_micros(250);
+/// How often an HDR display's brightness levels are read again (the SDR
+/// content brightness slider; Windows sends no event for it).
+const LEVEL_CHECK: Duration = Duration::from_secs(1);
 
 /// One attached output of one adapter.
 pub struct Output {
@@ -220,7 +227,9 @@ fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> windows::core::Res
     // SAFETY: COM calls on live objects.
     unsafe {
         if let Ok(output5) = output.cast::<IDXGIOutput5>() {
-            match output5.DuplicateOutput1(device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]) {
+            // DXGI picks the one nearest the desktop's: float on an HDR
+            // desktop (converted by `hdr`), BGRA otherwise.
+            match output5.DuplicateOutput1(device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM]) {
                 Ok(d) => return Ok(d),
                 Err(e) if e.code() == E_ACCESSDENIED || e.code() == DXGI_ERROR_SESSION_DISCONNECTED => return Err(e),
                 // Older drivers/OS paths: fall back to the desktop's own format.
@@ -231,9 +240,35 @@ fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> windows::core::Res
     }
 }
 
+/// The float copy of an HDR desktop and its conversion.
+struct HdrPass {
+    linear: ID3D11Texture2D,
+    converter: Converter,
+    /// Levels the conversion uses, and when to read them again.
+    state: HdrState,
+    next_check: Instant,
+}
+
+impl HdrPass {
+    /// `targets`: the SDR picture, or the HDR tiles and video pictures.
+    fn new(device: &ID3D11Device, targets: &[&ID3D11Texture2D], size: (u32, u32), state: HdrState) -> Result<Self> {
+        let srv = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        let linear = create_texture(device, size.0, size.1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_USAGE_DEFAULT.0, srv, 0)?;
+        let converter = Converter::new(device, &linear, targets, size).context("HDR conversion")?;
+        Ok(Self { linear, converter, state, next_check: Instant::now() + LEVEL_CHECK })
+    }
+}
+
 pub struct DxgiSession {
     output: IDXGIOutput1,
     frame: Arc<D3D11Frame>,
+    /// What `read` copies and the tile diff compares: `frame.texture`, or
+    /// for an HDR picture its 10-bit version (see `Picture`).
+    tiles: ID3D11Texture2D,
+    /// While the desktop arrives in float (HDR, or Windows' colour
+    /// management on an SDR display): its copy and conversion.
+    hdr: Option<HdrPass>,
+    picture: Picture,
     diff: GpuDiff,
     dupl: Option<IDXGIOutputDuplication>,
     /// CPU-readable copy target for `read`, created on first use.
@@ -260,7 +295,8 @@ pub struct DxgiSession {
 unsafe impl Send for DxgiSession {}
 
 impl DxgiSession {
-    pub fn open(out: &Output) -> Result<Self> {
+    /// `hdr`: an HDR picture if the display is in HDR.
+    pub fn open(out: &Output, hdr: bool) -> Result<Self> {
         let output: IDXGIOutput1 = out.output.cast().context("IDXGIOutput1 (Windows 8+ required)")?;
         desktop::follow_input_desktop(true);
         let (device, context) = create_device(&out.adapter)?;
@@ -269,13 +305,35 @@ impl DxgiSession {
         if (width, height) != (out.info.width, out.info.height) {
             bail!("duplication is {width}x{height} but the output is {}x{}", out.info.width, out.info.height);
         }
-        let texture = create_texture(&device, width, height, D3D11_USAGE_DEFAULT.0, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0)?;
+        let state = hdr::state(&out.output).inspect_err(|e| eprintln!("HDR state of {}: {e:#}", out.info.id)).ok();
+        let on = state.filter(|s| s.on);
+        if let Some(s) = on {
+            eprintln!("{}: HDR, SDR white {:.0} nits, peak {:.0} nits", out.info.id, s.white, s.peak);
+        }
+        let hdr_max = on.filter(|s| hdr && s.max() > 1.0).map_or(0.0, |s| s.max());
+        // A render target in case the desktop arrives in float (see `process`).
+        let target = (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32;
+        let texture = create_texture(&device, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_USAGE_DEFAULT.0, target, 0)?;
+        let tiles = match hdr_max > 0.0 {
+            true => create_texture(&device, width, height, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_USAGE_DEFAULT.0, target, 0)?,
+            false => texture.clone(),
+        };
+        let pass = match on {
+            Some(state) => {
+                let targets: &[&ID3D11Texture2D] = if hdr_max > 0.0 { &[&tiles, &texture] } else { &[&texture] };
+                Some(HdrPass::new(&device, targets, (width, height), state)?)
+            }
+            None => None,
+        };
         let frame = Arc::new(D3D11Frame::new(device, context, texture, width, height));
         Ok(Self {
             output,
-            diff: GpuDiff::new(&frame).context("GPU tile diff")?,
+            diff: GpuDiff::new(&frame, &tiles).context("GPU tile diff")?,
             copied: GpuFence::new(&frame)?,
             frame,
+            tiles,
+            picture: Picture { hdr_display: on.is_some(), hdr_max },
+            hdr: pass,
             dupl: Some(dupl),
             staging: None,
             width,
@@ -359,9 +417,13 @@ impl DxgiSession {
         if (desc.Width, desc.Height) != (self.width, self.height) {
             bail!("display size changed to {}x{}", desc.Width, desc.Height);
         }
-        // DuplicateOutput1 converts HDR desktops to BGRA; the legacy fallback does not.
-        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB {
-            bail!("desktop image format {} is not BGRA (HDR desktop without DuplicateOutput1?)", desc.Format.0);
+        let float = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if float != self.hdr.is_some() && !self.follow_format(float)? {
+            return Ok(None);
+        }
+        // The legacy DuplicateOutput fallback delivers the desktop's own format.
+        if !float && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB {
+            bail!("desktop image format {} is neither BGRA nor float (HDR desktop without DuplicateOutput1?)", desc.Format.0);
         }
 
         let (w, h) = (self.width, self.height);
@@ -369,13 +431,21 @@ impl DxgiSession {
         let mut moved = Vec::new();
         if self.full_pending {
             self.full_pending = false;
-            let (frame, diff) = (&self.frame, &self.diff);
+            let whole = Rect::new(0, 0, w, h);
+            let (frame, diff, tiles, hdr_max) = (&self.frame, &self.diff, &self.tiles, self.picture.hdr_max);
             frame.with_context(|ctx| {
-                // SAFETY: same size and format family (checked above).
-                unsafe { ctx.CopyResource(&frame.texture, &image) };
-                diff.reset(ctx, &frame.texture);
+                match &self.hdr {
+                    Some(pass) => {
+                        // SAFETY: same size and format (checked above).
+                        unsafe { ctx.CopyResource(&pass.linear, &image) };
+                        pass.converter.convert(ctx, &pass.state, hdr_max, &[whole]);
+                    }
+                    // SAFETY: same size and format family (checked above).
+                    None => unsafe { ctx.CopyResource(&frame.texture, &image) },
+                }
+                diff.reset(ctx, tiles);
             });
-            dirty.push(Rect::new(0, 0, w, h));
+            dirty.push(whole);
             return Ok(Some((FrameInfo { capture_us, dirty, moved }, false)));
         }
         if info.TotalMetadataBufferSize == 0 {
@@ -400,14 +470,20 @@ impl DxgiSession {
         // The acquired image already is the complete new desktop, so moved
         // areas are copied from their destination like any damage: no
         // overlapping self-copies in the persistent texture.
-        let (frame, diff) = (&self.frame, &mut self.diff);
+        let (frame, diff, tiles, hdr_max) = (&self.frame, &mut self.diff, &self.tiles, self.picture.hdr_max);
+        let pass = self.hdr.as_ref();
         let compared = frame.with_context(|ctx| {
+            let target = pass.map_or(&frame.texture, |p| &p.linear);
             for r in dirty.iter().chain(moved.iter().map(|m| &m.dst)) {
                 let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
-                // SAFETY: box clipped to both textures (same size).
-                unsafe { ctx.CopySubresourceRegion(&frame.texture, 0, r.x, r.y, 0, &image, 0, Some(&b)) };
+                // SAFETY: box clipped to both textures (same size and format).
+                unsafe { ctx.CopySubresourceRegion(target, 0, r.x, r.y, 0, &image, 0, Some(&b)) };
             }
-            diff.submit(ctx, &frame.texture)
+            if let Some(p) = pass {
+                let areas: Vec<Rect> = dirty.iter().chain(moved.iter().map(|m| &m.dst)).copied().collect();
+                p.converter.convert(ctx, &p.state, hdr_max, &areas);
+            }
+            diff.submit(ctx, tiles)
         })?;
         if compared {
             // Replaced by the tiles that really changed; move destinations stay reported through `moved`.
@@ -454,13 +530,69 @@ impl DxgiSession {
         Ok(())
     }
 
+    /// The desktop now arrives in float (`float`) or in BGRA, unlike when the
+    /// conversion was set up. HDR switched on or off: another picture, so the
+    /// display is opened again (`false`; see `picture`). Otherwise (Windows'
+    /// colour management turned on or off on an SDR display) the SDR
+    /// conversion is set up or dropped and the frame goes on whole (`true`).
+    fn follow_format(&mut self, float: bool) -> Result<bool> {
+        let state = hdr::state(&self.output).unwrap_or(HdrState { on: false, white: 80.0, peak: 80.0 });
+        if state.on != self.picture.hdr_display || self.picture.hdr_max > 0.0 {
+            self.picture.hdr_display = state.on;
+            // An HDR picture cannot go on without its conversion.
+            self.picture.hdr_max = 0.0;
+            return Ok(false);
+        }
+        self.hdr = match float {
+            true => Some(HdrPass::new(&self.frame.device, &[&self.frame.texture], (self.width, self.height), state)?),
+            false => None,
+        };
+        self.full_pending = true;
+        Ok(true)
+    }
+
     fn staging(&mut self) -> Result<ID3D11Texture2D> {
         if let Some(t) = &self.staging {
             return Ok(t.clone());
         }
-        let t = create_texture(&self.frame.device, self.width, self.height, D3D11_USAGE_STAGING.0, 0, D3D11_CPU_ACCESS_READ.0 as u32)?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: valid out pointer.
+        unsafe { self.tiles.GetDesc(&mut desc) };
+        let cpu = D3D11_CPU_ACCESS_READ.0 as u32;
+        let t = create_texture(&self.frame.device, self.width, self.height, desc.Format, D3D11_USAGE_STAGING.0, 0, cpu)?;
         self.staging = Some(t.clone());
         Ok(t)
+    }
+
+    /// Reads an HDR display's levels again (every LEVEL_CHECK). A new white
+    /// or peak changes an HDR picture (the display is opened again, see
+    /// `picture`); an SDR one is converted again with them, from the float
+    /// copy, and reported whole (the core resends only what really changed:
+    /// an SDR program's pixels stay the same at any slider position).
+    fn check_levels(&mut self, capture_us: u64) -> Option<FrameInfo> {
+        let pass = self.hdr.as_mut()?;
+        let now = Instant::now();
+        if now < pass.next_check {
+            return None;
+        }
+        pass.next_check = now + LEVEL_CHECK;
+        let state = hdr::state(&self.output).ok().filter(|s| *s != pass.state)?;
+        if state.on != self.picture.hdr_display {
+            self.picture.hdr_display = state.on;
+            return None;
+        }
+        if self.picture.hdr_max > 0.0 && state.max() != self.picture.hdr_max {
+            self.picture.hdr_max = state.max();
+            return None;
+        }
+        pass.state = state;
+        let whole = Rect::new(0, 0, self.width, self.height);
+        let (frame, diff, tiles, hdr_max) = (&self.frame, &self.diff, &self.tiles, self.picture.hdr_max);
+        frame.with_context(|ctx| {
+            pass.converter.convert(ctx, &pass.state, hdr_max, &[whole]);
+            diff.reset(ctx, tiles);
+        });
+        Some(FrameInfo { capture_us, dirty: vec![whole], moved: Vec::new() })
     }
 }
 
@@ -476,13 +608,21 @@ fn check_mode(dupl: &IDXGIOutputDuplication) -> Result<(u32, u32)> {
     Ok((desc.ModeDesc.Width, desc.ModeDesc.Height))
 }
 
-pub(crate) fn create_texture(device: &ID3D11Device, width: u32, height: u32, usage: i32, bind: u32, cpu: u32) -> Result<ID3D11Texture2D> {
+pub(crate) fn create_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    format: DXGI_FORMAT,
+    usage: i32,
+    bind: u32,
+    cpu: u32,
+) -> Result<ID3D11Texture2D> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        Format: format,
         SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE(usage),
         BindFlags: bind,
@@ -562,6 +702,9 @@ impl CaptureSession for DxgiSession {
                 return Ok(None);
             }
         }
+        if let Some(frame) = self.check_levels(proto::now_us()) {
+            return Ok(Some(frame));
+        }
         let dupl = self.dupl.clone().expect("duplication present");
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
@@ -618,12 +761,12 @@ impl CaptureSession for DxgiSession {
             bail!("read: destination too small ({} < {end} bytes)", dst.len());
         }
         let staging = self.staging()?;
-        let (frame, copied) = (&self.frame, &mut self.copied);
+        let (frame, copied, tiles) = (&self.frame, &mut self.copied, &self.tiles);
         frame.with_context(|ctx| {
             for r in clipped() {
                 let b = D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 };
                 // SAFETY: rects clipped to the (equal) texture sizes.
-                unsafe { ctx.CopySubresourceRegion(&staging, 0, r.x, r.y, 0, &frame.texture, 0, Some(&b)) };
+                unsafe { ctx.CopySubresourceRegion(&staging, 0, r.x, r.y, 0, tiles, 0, Some(&b)) };
             }
             copied.signal(ctx)
         })?;
@@ -654,5 +797,9 @@ impl CaptureSession for DxgiSession {
 
     fn gpu_surface(&self) -> Option<GpuSurface> {
         Some(self.frame.clone())
+    }
+
+    fn picture(&self) -> Picture {
+        self.picture
     }
 }

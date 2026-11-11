@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Fence, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11UnorderedAccessView, D3D11_BIND_SHADER_RESOURCE,
     D3D11_BIND_UNORDERED_ACCESS, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_READ, D3D11_FENCE_FLAG_NONE,
     D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, D3D11_USAGE, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_STAGING,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
@@ -105,8 +105,9 @@ pub struct GpuDiff {
 unsafe impl Send for GpuDiff {}
 
 impl GpuDiff {
-    /// Diff state for `frame`; the previous image must be set with [`GpuDiff::reset`] before the first [`GpuDiff::submit`].
-    pub fn new(frame: &D3D11Frame) -> Result<Self> {
+    /// Diff state for `image` (a texture of `frame`'s device and size); the
+    /// previous image must be set with [`GpuDiff::reset`] before the first [`GpuDiff::submit`].
+    pub fn new(frame: &D3D11Frame, image: &ID3D11Texture2D) -> Result<Self> {
         let device = &frame.device;
         let (width, height) = (frame.width, frame.height);
         let tiles_x = width.div_ceil(TILE);
@@ -115,7 +116,11 @@ impl GpuDiff {
         let mut shader = None;
         // SAFETY: bytecode produced by D3DCompile for cs_5_0; valid out pointer.
         unsafe { device.CreateComputeShader(&code, None, Some(&mut shader)) }.context("CreateComputeShader")?;
-        let previous = crate::dxgi::create_texture(device, width, height, D3D11_USAGE_DEFAULT.0, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0)?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: valid out pointer.
+        unsafe { image.GetDesc(&mut desc) };
+        let srv = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        let previous = crate::dxgi::create_texture(device, width, height, desc.Format, D3D11_USAGE_DEFAULT.0, srv, 0)?;
         let structured = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32;
         let tile_list = buffer(device, tiles, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0, structured)?;
         let flags = buffer(device, tiles, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS.0 as u32, 0, structured)?;
@@ -123,7 +128,7 @@ impl GpuDiff {
         let (mut current_view, mut previous_view, mut list_view, mut flags_view) = (None, None, None, None);
         // SAFETY: resources of this device; null descriptors view whole resources in their own format.
         unsafe {
-            device.CreateShaderResourceView(&frame.texture, None, Some(&mut current_view)).context("current image view")?;
+            device.CreateShaderResourceView(image, None, Some(&mut current_view)).context("current image view")?;
             device.CreateShaderResourceView(&previous, None, Some(&mut previous_view)).context("previous image view")?;
             device.CreateShaderResourceView(&tile_list, None, Some(&mut list_view)).context("tile list view")?;
             device.CreateUnorderedAccessView(&flags, None, Some(&mut flags_view)).context("tile flags view")?;

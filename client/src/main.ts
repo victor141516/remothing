@@ -159,18 +159,53 @@ let viewTimer = 0;
 let shownView = '';
 /** The display's refresh rate, from animation frames (0 until measured). */
 let refreshHz = 0;
+/** The screen the page is on shows HDR (it changes when the window moves to another one). */
+const hdrScreen = matchMedia('(dynamic-range: high)');
+hdrScreen.addEventListener('change', () => {
+  shownView = '';
+  layout();
+});
 function reportView(width: number, height: number): void {
   // `?bench` measures the pipeline at the display's size and the capture rate.
   if (benchSeconds > 0) return;
   clearTimeout(viewTimer);
   const send = () => {
-    const key = `${width}x${height}@${refreshHz}`;
+    const hdr = hdrScreen.matches && 'gpu' in navigator;
+    const key = `${width}x${height}@${refreshHz}${hdr ? ' hdr' : ''}`;
     if (key === shownView) return;
     shownView = key;
-    toWorker({ type: 'view', width, height, hz: refreshHz });
+    toWorker({ type: 'view', width, height, hz: refreshHz, hdr });
   };
   // The first report goes at once; later ones once the window settles.
   viewTimer = setTimeout(send, shownView ? VIEW_SETTLE_MS : 0);
+}
+
+/** A canvas drawn from a worker is shown in HDR only while the page's own
+ * thread shows something in HDR (measured, docs/ARCHITECTURE.md "HDR"): one
+ * pixel of a WebGPU canvas in `extended` mode, the one switch that also
+ * works with our `desynchronized` canvas. Present while the picture is HDR. */
+let hdrSwitch: HTMLCanvasElement | null = null;
+async function pageHdr(on: boolean): Promise<void> {
+  if (!on) {
+    hdrSwitch?.remove();
+    hdrSwitch = null;
+    return;
+  }
+  if (hdrSwitch) return;
+  const c = document.createElement('canvas');
+  c.id = 'hdr-switch';
+  c.width = c.height = 1;
+  hdrSwitch = c;
+  document.body.append(c);
+  const adapter = await navigator.gpu?.requestAdapter().catch(() => null);
+  const device = await adapter?.requestDevice().catch(() => null);
+  const gpu = c.getContext('webgpu');
+  if (!device || !gpu || hdrSwitch !== c) return;
+  gpu.configure({ device, format: 'rgba16float', toneMapping: { mode: 'extended' }, alphaMode: 'opaque' });
+  const encoder = device.createCommandEncoder();
+  const view = gpu.getCurrentTexture().createView();
+  encoder.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] }).end();
+  device.queue.submit([encoder.finish()]);
 }
 
 /** Median interval of 60 animation frames, rounded to the usual rates. */
@@ -231,6 +266,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case 'hello':
       input.setScreen(m.width, m.height);
       layout();
+      void pageHdr(m.hdr);
       break;
     case 'cursor':
       setCursor(m.buf);
@@ -285,6 +321,7 @@ toWorker(
     wt: transport !== 'ws' && transport !== 'webrtc',
     // `?codec=h264|hevc|av1`: offer only that codec (H.264 is always possible).
     codec: params.get('codec'),
+    hdr: hdrScreen.matches,
   },
   [offscreen],
 );

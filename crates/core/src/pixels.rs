@@ -52,7 +52,8 @@ impl Geometry {
     }
 }
 
-/// Screen copy (BGRX), one band per tile row.
+/// Screen copy, 4 bytes per pixel (BGRX, or R10G10B10A2 for an HDR picture,
+/// see `platform::Picture`), one band per tile row.
 pub struct Pixels {
     pub geometry: Geometry,
     bands: Vec<Mutex<Vec<u8>>>,
@@ -86,6 +87,26 @@ impl Pixels {
     pub fn with_band<R>(&self, row: u32, f: impl FnOnce(&[u8], u32) -> R) -> R {
         let band = self.bands[row as usize].lock().unwrap();
         f(&band, row * self.geometry.tile)
+    }
+
+    /// Runs `f(band_pixels, band_origin_y)` for the band of tile row `row`
+    /// with an HDR picture's 10-bit pixels turned into the 8-bit BGRX an
+    /// encoder takes (the same curve, fewer codes), in `scratch`. Only the
+    /// columns of `r` are converted.
+    pub fn with_band_8bit<R>(&self, row: u32, r: Rect, scratch: &mut Vec<u8>, f: impl FnOnce(&[u8], u32) -> R) -> R {
+        let stride = self.geometry.stride();
+        let band = self.bands[row as usize].lock().unwrap();
+        scratch.resize(band.len(), 0);
+        let (bx, wb) = (r.x as usize * 4, r.w as usize * 4);
+        let to8 = |v: u32| ((v & 0x3ff) * 255 + 511) / 1023;
+        for (src, dst) in band.chunks_exact(stride).zip(scratch.chunks_exact_mut(stride)) {
+            for (s, d) in src[bx..bx + wb].chunks_exact(4).zip(dst[bx..bx + wb].chunks_exact_mut(4)) {
+                let p = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+                d.copy_from_slice(&[to8(p >> 20) as u8, to8(p >> 10) as u8, to8(p) as u8, 255]);
+            }
+        }
+        drop(band);
+        f(scratch, row * self.geometry.tile)
     }
 
     fn row_hash(&self, y: u32, bx: usize, wb: usize) -> u64 {

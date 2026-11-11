@@ -1,7 +1,12 @@
 // WebGL2 compositor (runs in the stream worker). Two layers:
-//  - lossless: exact server framebuffer (BGRX bytes uploaded as RGBA, swizzled here)
-//  - video: last decoded H.264 frame of the whole screen
-// A per-tile mask picks the layer for each tile.
+//  - lossless: exact server framebuffer (BGRX bytes uploaded as RGBA, swizzled
+//    here; or, for an HDR picture, 10-bit R10G10B10A2 words)
+//  - video: last decoded frame of the whole screen
+// A per-tile mask picks the layer for each tile. An HDR picture (proto.rs
+// S_HELLO) is decoded from its curve to linear light, 1.0 = SDR white, and
+// drawn into a float drawing buffer as extended sRGB: what is brighter than
+// white goes above 1, which the browser shows brighter when the page is in
+// HDR (see `hdrSwitch` in main.ts).
 
 const VS = `#version 300 es
 void main() {
@@ -17,17 +22,33 @@ uniform highp sampler2D u_mask;
 uniform int u_height;
 uniform int u_tile;
 uniform vec2 u_size;
+// HDR picture: ln of its brightest value (multiples of SDR white) and the
+// SDR range's share of the codes; u_split 0 for an SDR picture.
+uniform float u_lnmax;
+uniform float u_split;
 out vec4 o;
+vec3 decode(vec3 e) {
+  vec3 s = e / u_split;
+  vec3 sdr = mix(s / 12.92, pow((s + 0.055) / 1.055, vec3(2.4)), step(0.04045, s));
+  vec3 high = exp((e - u_split) / (1.0 - u_split) * u_lnmax);
+  return mix(sdr, high, step(u_split, e));
+}
+vec3 srgb(vec3 v) {
+  return mix(12.92 * v, 1.055 * pow(v, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, v));
+}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   p.y = u_height - 1 - p.y;
+  vec3 c;
   if (texelFetch(u_mask, p / u_tile, 0).r > 0.5) {
     // The video may be encoded smaller than the screen (motion mode):
     // sampled at this pixel's centre, which at the same size is the texel itself.
-    o = vec4(texture(u_video, (vec2(p) + 0.5) / u_size).rgb, 1.0);
+    c = texture(u_video, (vec2(p) + 0.5) / u_size).rgb;
   } else {
-    o = vec4(texelFetch(u_screen, p, 0).bgr, 1.0);
+    vec4 t = texelFetch(u_screen, p, 0);
+    c = u_split > 0.0 ? t.rgb : t.bgr;
   }
+  o = vec4(u_split > 0.0 ? srgb(decode(c)) : c, 1.0);
 }`;
 
 function texture(gl: WebGL2RenderingContext, unit: number): WebGLTexture {
@@ -39,6 +60,11 @@ function texture(gl: WebGL2RenderingContext, unit: number): WebGLTexture {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   return t;
+}
+
+/** The SDR range's share of the codes in an HDR picture's curve (proto.rs `hdr_split`). */
+export function hdrSplit(hdrMax: number): number {
+  return 1 / (1 + (1.055 / 2.4) * Math.log(Math.max(hdrMax, 1)));
 }
 
 export class Renderer {
@@ -59,10 +85,21 @@ export class Renderer {
   private tilesY = 0;
   width = 0;
   height = 0;
+  /** The picture is HDR: 10-bit tiles and video in the curve of proto.rs S_HELLO. */
+  hdr = false;
+  /** The drawing buffer is float, so what is brighter than white shows (HDR on screen). */
+  float = false;
+  /** This context can draw an HDR picture: a float drawing buffer (which an opaque canvas cannot have). */
+  readonly hdrCapable: boolean;
+  /** Words of an unaligned 10-bit upload. */
+  private words = new Uint32Array(0);
 
-  constructor(readonly canvas: OffscreenCanvas) {
+  /** `hdr`: the page starts on an HDR screen, so the canvas gets alpha (a
+   * float drawing buffer is refused on an opaque one); every pixel drawn is
+   * opaque anyway. */
+  constructor(readonly canvas: OffscreenCanvas, hdr: boolean) {
     const gl = canvas.getContext('webgl2', {
-      alpha: false,
+      alpha: hdr,
       antialias: false,
       depth: false,
       stencil: false,
@@ -71,6 +108,7 @@ export class Renderer {
       powerPreference: 'high-performance',
     });
     if (!gl) throw new Error('WebGL2 unavailable');
+    this.hdrCapable = hdr && gl.getExtension('EXT_color_buffer_float') !== null && 'drawingBufferStorage' in gl;
     this.gl = gl;
     const prog = gl.createProgram()!;
     for (const [type, src] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, FS]] as const) {
@@ -90,12 +128,23 @@ export class Renderer {
     gl.bindVertexArray(gl.createVertexArray());
   }
 
-  resize(width: number, height: number, tile: number): void {
+  /** `hdrMax` above 0: an HDR picture up to that many times SDR white. */
+  resize(width: number, height: number, tile: number, hdrMax: number): void {
     const gl = this.gl;
     this.width = width;
     this.height = height;
+    // A picture this page cannot show in HDR is still decoded, clipped at
+    // white (a moment after it connects, until the server sends SDR).
+    const hdr = hdrMax > 0;
+    const float = hdr && this.hdrCapable;
     this.canvas.width = width;
     this.canvas.height = height;
+    if (float || this.float) {
+      gl.drawingBufferStorage(float ? gl.RGBA16F : gl.RGBA8, width, height);
+    }
+    this.hdr = hdr;
+    this.float = float;
+    const format = hdr ? gl.RGB10_A2 : gl.RGBA8;
     for (const t of this.textures) gl.deleteTexture(t);
     gl.deleteFramebuffer(this.fbScreen);
     gl.deleteFramebuffer(this.fbScratch);
@@ -108,7 +157,7 @@ export class Renderer {
     const [screen, mask, scratch] = [texture(gl, 0), texture(gl, 2), texture(gl, 3)];
     this.textures = [screen, gl.createTexture()!, mask, scratch];
     gl.activeTexture(gl.TEXTURE3);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, width, height);
     this.fbScreen = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbScreen);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, screen, 0);
@@ -117,7 +166,7 @@ export class Renderer {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, scratch, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, format, width, height);
     this.allocVideo(width, height);
     gl.activeTexture(gl.TEXTURE2);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, this.tilesX, this.tilesY);
@@ -126,12 +175,27 @@ export class Renderer {
     gl.uniform1i(gl.getUniformLocation(this.prog, 'u_height'), height);
     gl.uniform2f(gl.getUniformLocation(this.prog, 'u_size'), width, height);
     gl.uniform1i(gl.getUniformLocation(this.prog, 'u_tile'), tile);
+    gl.uniform1f(gl.getUniformLocation(this.prog, 'u_lnmax'), hdr ? Math.log(hdrMax) : 0);
+    gl.uniform1f(gl.getUniformLocation(this.prog, 'u_split'), hdr ? hdrSplit(hdrMax) : 0);
   }
 
-  upload(x: number, y: number, w: number, h: number, bgrx: Uint8Array): void {
+  upload(x: number, y: number, w: number, h: number, pixels: Uint8Array): void {
     const gl = this.gl;
     gl.activeTexture(gl.TEXTURE0);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bgrx);
+    if (!this.hdr) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return;
+    }
+    // A u32 view needs 4-byte alignment; raw rects sit anywhere in their frame.
+    let words: Uint32Array;
+    if (pixels.byteOffset % 4 === 0) {
+      words = new Uint32Array(pixels.buffer, pixels.byteOffset, pixels.byteLength / 4);
+    } else {
+      if (this.words.length < pixels.byteLength / 4) this.words = new Uint32Array(pixels.byteLength / 4);
+      words = this.words.subarray(0, pixels.byteLength / 4);
+      new Uint8Array(words.buffer, 0, pixels.byteLength).set(pixels);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, words);
   }
 
   /** Screen move on the lossless layer (through scratch: overlapping blits are undefined). */

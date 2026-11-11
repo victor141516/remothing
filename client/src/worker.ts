@@ -21,14 +21,15 @@ import {
   C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
-  S_SIGNAL, now,
+  S_SIGNAL, VIEW_HDR, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { WtPath, type WtOffer } from './wt';
 import { Recorder, type Batch } from './stats';
 
 export type ToWorker =
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null }
+  /** `hdr`: the page started on an HDR screen (see `Renderer`). */
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null; hdr: boolean }
   | { type: 'report'; json: string }
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
@@ -54,11 +55,13 @@ export type ToWorker =
   | { type: 'micdata'; buf: ArrayBuffer }
   /** An input message, for the WebTransport path. */
   | { type: 'input'; buf: ArrayBuffer }
-  /** How the picture is shown: its size in the window (device pixels) and the refresh rate. */
-  | { type: 'view'; width: number; height: number; hz: number };
+  /** How the picture is shown: its size in the window (device pixels), the
+   * refresh rate, and whether the page can show HDR where it is now. */
+  | { type: 'view'; width: number; height: number; hz: number; hdr: boolean };
 
 export type FromWorker =
-  | { type: 'hello'; width: number; height: number }
+  /** `hdr`: the picture is HDR (the page has to be switched to HDR). */
+  | { type: 'hello'; width: number; height: number; hdr: boolean }
   | { type: 'cursor'; buf: ArrayBuffer }
   | { type: 'marker'; marker: number; at: number }
   | { type: 'stats'; batch: Batch; pipeline: string; pingRtt: number }
@@ -824,7 +827,7 @@ function connect(url: string): void {
         const width = v.getUint32(4, true);
         const height = v.getUint32(8, true);
         const tile = v.getUint32(12, true);
-        renderer.resize(width, height, tile);
+        renderer.resize(width, height, tile, v.getFloat32(20, true));
         staging = new Uint8Array(width * tile * 4);
         queue.length = 0;
         // Frames of the previous display (late, on any path) are dropped.
@@ -837,7 +840,7 @@ function connect(url: string): void {
         lost = [];
         lateFrom = received + LATE_SKIP_MS;
         resetDecoder();
-        post({ type: 'hello', width, height });
+        post({ type: 'hello', width, height, hdr: renderer.float });
         // The server sends this display's frames once it knows we are ready.
         send(new Uint8Array([C_HELLO_ACK]));
         break;
@@ -854,7 +857,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   switch (m.type) {
     case 'init':
-      renderer = new Renderer(m.canvas);
+      renderer = new Renderer(m.canvas, m.hdr);
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
       wtAllowed = m.wt;
@@ -887,7 +890,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
             : dcOpen
               ? 'websocket (webrtc standby)'
               : 'websocket';
-        const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles`;
+        const picture = renderer.float ? '  HDR' : renderer.hdr ? '  HDR picture clipped to SDR' : '';
+        const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles${picture}`;
         const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${CODECS[decoderCodec].name} ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
         const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
@@ -931,6 +935,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       const v = new Uint8Array(8);
       const d = new DataView(v.buffer);
       v[0] = C_VIEW;
+      v[1] = m.hdr && renderer.hdrCapable ? VIEW_HDR : 0;
       d.setUint16(2, Math.min(m.width, 0xffff), true);
       d.setUint16(4, Math.min(m.height, 0xffff), true);
       d.setUint16(6, m.hz, true);

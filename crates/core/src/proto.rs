@@ -4,11 +4,19 @@
 use crate::platform::CursorState;
 
 // Server -> client
-/// width u32, height u32, tile u32, first_seq u32 (at offsets 4/8/12/16). Sent
-/// on connect and whenever the streamed display changes; the client resets
-/// its layers and decoder, drops frames before `first_seq` and answers
-/// C_HELLO_ACK. No frame of the new display is sent before that answer, so
-/// frames on another path (data channel) can never overtake it.
+/// width u32, height u32, tile u32, first_seq u32, hdr_max f32 (at offsets
+/// 4/8/12/16/20). Sent on connect and whenever the streamed display (or its
+/// picture) changes; the client resets its layers and decoder, drops frames
+/// before `first_seq` and answers C_HELLO_ACK. No frame of the new display is
+/// sent before that answer, so frames on another path (data channel) can
+/// never overtake it. `hdr_max` 0: an SDR picture (BGRX tiles, sRGB video).
+/// Above 0: an HDR picture (`platform::Picture`): tiles are `R10G10B10A2`,
+/// and tiles and video carry each channel's linear value `v`, relative to
+/// the host's SDR white, through the curve
+///   e = a * srgb(v)                           for v <= 1
+///   e = a + (1 - a) * ln(v) / ln(hdr_max)     for 1 < v <= hdr_max
+/// with `a = hdr_split(hdr_max)`: most codes for the SDR range, the rest for
+/// highlights, in 10 bits for tiles and 8 for video.
 pub const S_HELLO: u8 = 1;
 pub const S_FRAME: u8 = 2;
 /// w u16, h u16, xhot u16, yhot u16, pad u16, RGBA. w = h = 0 hides the cursor.
@@ -131,12 +139,14 @@ pub const C_MIC: u8 = 19;
 /// Pieces of a frame that did not arrive (WebTransport datagram): pad u8,
 /// count u16, seq u32, then count x index u16. The server sends them again.
 pub const C_NACK: u8 = 20;
-/// How the client shows the picture: pad u8, width u16, height u16 (its
-/// size in the window, device pixels; sent a moment after the window
-/// settles), refresh rate u16 (Hz, 0: unknown). In motion mode the video is
-/// encoded no larger than the link affords and never smaller than this, and
-/// never at more frames per second than the refresh rate.
+/// How the client shows the picture: flags u8, width u16, height u16 (its
+/// size in the window, device pixels; sent at once, then a moment after the
+/// window settles), refresh rate u16 (Hz, 0: unknown). In motion mode the
+/// video is encoded no larger than the link affords and never smaller than
+/// this, and never at more frames per second than the refresh rate. Flags:
+/// VIEW_HDR, the client can show an HDR picture where it is now.
 pub const C_VIEW: u8 = 21;
+pub const VIEW_HDR: u8 = 1;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
@@ -174,13 +184,21 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn hello(width: u32, height: u32, tile: u32, first_seq: u32) -> Vec<u8> {
-    let mut m = Vec::with_capacity(20);
+pub fn hello(width: u32, height: u32, tile: u32, first_seq: u32, hdr_max: f32) -> Vec<u8> {
+    let mut m = Vec::with_capacity(24);
     m.extend_from_slice(&[S_HELLO, 0, 0, 0]);
     for v in [width, height, tile, first_seq] {
         m.extend_from_slice(&v.to_le_bytes());
     }
+    m.extend_from_slice(&hdr_max.to_le_bytes());
     m
+}
+
+/// Share of the codes the SDR range gets in the HDR curve (see S_HELLO): the
+/// two pieces meet with the same slope, so code steps stay even across white.
+/// 0.4396 is the slope of the sRGB curve at 1 (1.055 / 2.4).
+pub fn hdr_split(hdr_max: f32) -> f32 {
+    1.0 / (1.0 + 1.055 / 2.4 * hdr_max.max(1.0).ln())
 }
 
 pub fn signal(json: &serde_json::Value) -> Vec<u8> {

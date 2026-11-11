@@ -109,6 +109,8 @@ struct Inner {
     pixels: Arc<Pixels>,
     /// Capture GPU surface for zero-copy encoders.
     surface: Option<GpuSurface>,
+    /// The picture's `Picture::hdr_max` (0: SDR).
+    hdr_max: f32,
     /// Last three change times per tile, most recent first (0 = never).
     changes: Vec<[u64; 3]>,
     /// Last time anything on the screen changed.
@@ -123,6 +125,8 @@ struct ClientState {
     epoch: u64,
     /// The client's encoder reads the capture GPU surface (no CPU pixels needed for video).
     gpu_input: bool,
+    /// The client can show an HDR picture (`proto::VIEW_HDR`).
+    hdr: bool,
     /// Content changed since last sent.
     dirty: Vec<bool>,
     /// Client currently shows this tile from the video layer.
@@ -168,7 +172,7 @@ pub enum Pull {
     Frame { msg: Vec<u8>, key: bool, contents: FrameContents },
     /// The display changed: send HELLO (its frames start at `first_seq`),
     /// recreate the encoder, then pull again.
-    Reset { geometry: Geometry, first_seq: u32 },
+    Reset { geometry: Geometry, first_seq: u32, hdr_max: f32 },
     /// Nothing to send; pull again at `wake_at_us` (a video tile cools down) or when woken.
     Idle { wake_at_us: Option<u64> },
 }
@@ -232,6 +236,7 @@ impl Shared {
                 tile,
                 pixels: Arc::new(Pixels::new(Geometry { width: 0, height: 0, tile })),
                 surface: None,
+                hdr_max: 0.0,
                 changes: Vec::new(),
                 changed_us: 0,
                 motion: MotionDetector::default(),
@@ -242,9 +247,10 @@ impl Shared {
         }
     }
 
-    /// Switches to a new display: geometry, blank screen copy, every client
-    /// resynchronised (HELLO + full frame + keyframe). Returns the new copy.
-    pub fn reconfigure(&self, width: u32, height: u32, surface: Option<GpuSurface>) -> Arc<Pixels> {
+    /// Switches to a new display (or a new picture of it): geometry, blank
+    /// screen copy, every client resynchronised (HELLO + full frame +
+    /// keyframe). Returns the new copy.
+    pub fn reconfigure(&self, width: u32, height: u32, surface: Option<GpuSurface>, hdr_max: f32) -> Arc<Pixels> {
         let mut g = self.inner.lock().unwrap();
         let geometry = Geometry { width, height, tile: g.tile };
         g.pixels = Arc::new(Pixels::new(geometry));
@@ -252,6 +258,7 @@ impl Shared {
         g.changed_us = 0;
         g.motion = MotionDetector::default();
         g.surface = surface;
+        g.hdr_max = hdr_max;
         g.epoch += 1;
         for c in &g.clients {
             c.waker.unpark();
@@ -261,6 +268,11 @@ impl Shared {
 
     pub fn geometry(&self) -> Geometry {
         self.inner.lock().unwrap().pixels.geometry
+    }
+
+    /// The picture's `Picture::hdr_max` (0: SDR).
+    pub fn hdr_max(&self) -> f32 {
+        self.inner.lock().unwrap().hdr_max
     }
 
     pub fn new_client_id(&self) -> u64 {
@@ -276,6 +288,7 @@ impl Shared {
             // Forces a Reset on the first pull.
             epoch: u64::MAX,
             gpu_input: false,
+            hdr: false,
             dirty: Vec::new(),
             video: Vec::new(),
             force_video: Vec::new(),
@@ -322,6 +335,20 @@ impl Shared {
 
     pub fn remove_client(&self, id: u64) {
         self.inner.lock().unwrap().clients.retain(|c| c.id != id);
+    }
+
+    /// Whether the client can show an HDR picture where it is now.
+    pub fn set_client_hdr(&self, id: u64, hdr: bool) {
+        if let Some(c) = self.inner.lock().unwrap().clients.iter_mut().find(|c| c.id == id) {
+            c.hdr = hdr;
+        }
+    }
+
+    /// One picture for all clients: HDR only when every client can show it.
+    /// None without clients (the picture may stay as it is).
+    pub fn hdr_wanted(&self) -> Option<bool> {
+        let g = self.inner.lock().unwrap();
+        (!g.clients.is_empty()).then(|| g.clients.iter().all(|c| c.hdr))
     }
 
     /// Whether the client's current encoder reads the capture GPU surface.
@@ -501,7 +528,8 @@ impl Shared {
         let now = proto::now_us();
         codec.paced = false;
         let mut guard = self.inner.lock().unwrap();
-        let Inner { epoch, pixels, changes, clients, surface, changed_us, motion: detector, .. } = &mut *guard;
+        let Inner { epoch, pixels, changes, clients, surface, changed_us, motion: detector, hdr_max, .. } = &mut *guard;
+        let hdr = *hdr_max > 0.0;
         let changed_us = *changed_us;
         let geometry = pixels.geometry;
         let Some(c) = clients.iter_mut().find(|c| c.id == id) else {
@@ -515,7 +543,7 @@ impl Shared {
             c.gpu_input = false;
             c.reset(changes.len(), now);
             codec.cost = vec![geometry.tile * geometry.tile; changes.len()];
-            return Ok(Pull::Reset { geometry, first_seq: c.seq.wrapping_add(1) });
+            return Ok(Pull::Reset { geometry, first_seq: c.seq.wrapping_add(1), hdr_max: *hdr_max });
         }
 
         let tuning = codec.tuning;
@@ -685,7 +713,13 @@ impl Shared {
                     let stride = geometry.stride();
                     for r in &codec.encoder_rects {
                         // Rects come per tile row: hand the encoder that band.
-                        pixels.with_band(r.y / geometry.tile, |band, y0| e.load_cpu(band, stride, y0, &[*r]))?;
+                        let row = r.y / geometry.tile;
+                        let load = |band: &[u8], y0| e.load_cpu(band, stride, y0, &[*r]);
+                        if hdr {
+                            pixels.with_band_8bit(row, *r, &mut codec.band8, load)?;
+                        } else {
+                            pixels.with_band(row, load)?;
+                        }
                     }
                 }
             }
@@ -821,6 +855,8 @@ pub struct ClientCodec {
     cost: Vec<u32>,
     /// Scratch: raw pixels and (rect, first tile, tile count) of lossless rects.
     raw: Vec<u8>,
+    /// Scratch: an HDR picture's band in 8 bits, for encoders fed from the CPU.
+    band8: Vec<u8>,
     rects: Vec<(Rect, usize, usize)>,
     /// Scratch: areas to refresh in the encoder input.
     encoder_rects: Vec<Rect>,
@@ -846,6 +882,7 @@ impl ClientCodec {
             tuning,
             cost: Vec::new(),
             raw: Vec::new(),
+            band8: Vec::new(),
             rects: Vec::new(),
             encoder_rects: Vec::new(),
             copies: Vec::new(),

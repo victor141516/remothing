@@ -145,6 +145,62 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   one keeps encoding, then takes over with a keyframe. HEVC and AV1 gained
   nothing measurable from it.
 
+## HDR
+
+A display in HDR mode (Windows) is streamed either as a correct SDR
+picture or, when every connected client can show it, as an HDR picture.
+
+- **Why not Windows' own conversion.** In HDR mode the desktop is
+  composed in linear light, 16-bit float, 1.0 = 80 nits (scRGB); ordinary
+  programs sit at the "SDR content brightness" level. Asked for 8 bits,
+  Desktop Duplication cuts off at 80 nits: at 280 nits the picture came
+  out 3.5 times too bright and every light grey white (measured). So the
+  session asks for the float image (`DuplicateOutput1` with float first)
+  and converts it itself (`platform-windows/src/hdr.rs`), on the GPU,
+  relative to the host's SDR white read from Windows
+  (`DISPLAYCONFIG_SDR_WHITE_LEVEL`) and the display's peak
+  (`IDXGIOutput6::GetDesc1`). Both are read again every second; the
+  slider has no event.
+- **SDR picture**: up to SDR white exactly the sRGB an SDR program drew
+  (all 256 levels round-trip at 80-480 nits, computed with the float16
+  composition); brighter, real HDR content is scaled into range and turned
+  towards white as it nears the display's peak, per pixel and the same way
+  every frame (unchanged areas must stay unchanged). Colours outside sRGB
+  move towards the grey of their luminance. Every client gets it; tiles,
+  video and client are as for any display. A new slider position converts
+  the float copy again; SDR programs' pixels do not change.
+- **HDR picture** (`platform::Picture`, `proto::S_HELLO`): each channel's
+  linear value relative to SDR white, up to the peak (`hdr_max`, e.g.
+  465 / 280 = 1.66), through one curve: sRGB scaled to the first
+  `hdr_split(hdr_max)` of the codes, logarithmic above, the two meeting
+  with the same slope. Tiles carry it in 10 bits (`R10G10B10A2`, still
+  4 bytes per pixel, compared and compressed like BGRX); video in 8 bits,
+  signalled as ordinary SDR so the browser passes the samples untouched
+  (a stream signalled as HDR is tone-mapped differently by every browser
+  path; decoded pictures reach WebGL with 8 bits whatever was sent). Any
+  codec carries it. Encoders fed from the CPU get the tiles turned into
+  8 bits (`Pixels::with_band_8bit`); the D3D11 input reads the 8-bit
+  output of the same pass.
+- **One picture for all** (`Shared::hdr_wanted`): HDR only while every
+  client says it can show it (`C_VIEW` flag `VIEW_HDR`); otherwise SDR. A
+  change of that, of the display's HDR mode or of an HDR picture's levels
+  opens the display again (`CaptureSession::picture`), which every client
+  sees as a new HELLO. Windows' colour management on an SDR display can
+  also deliver float images: they get the SDR conversion.
+- **Client** (`renderer.ts`): a page that starts on an HDR screen
+  (`dynamic-range: high`) asks WebGL for a non-opaque canvas (an opaque
+  one refuses a float drawing buffer) and, with `EXT_color_buffer_float`
+  and `drawingBufferStorage`, reports HDR. For an HDR picture the drawing
+  buffer becomes `RGBA16F` and the shader decodes the curve to linear and
+  writes extended sRGB, above 1 for highlights. A canvas drawn from a
+  worker only shows above 1 while the page's own thread shows something
+  in HDR (measured in Edge 156): a 1-pixel WebGPU canvas in `extended`
+  mode is kept in a corner while the picture is HDR (`main.ts` `pageHdr`).
+  A client given an HDR picture it cannot show (the moment between
+  connecting and the server reopening in SDR) decodes it clipped at white.
+- **Linux**: X11 has no HDR, so every picture is SDR; HDR there exists
+  only under Wayland compositors, which are not captured.
+
 ## Motion mode
 
 For a screen that moves as a whole: a game, a full-screen video. Weighing

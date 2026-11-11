@@ -489,6 +489,63 @@ forced) decode without errors (200/200 frames, dav1d and FFmpeg's HEVC
 decoder). Decoded and compared with the source, HEVC (split disabled or
 the driver's choice) has the MAE of H.264 (1.4-1.8).
 
+## HDR
+
+This PC's main display (3840x2160) in HDR mode, SDR content brightness
+280 nits, peak 465 nits, Edge 156. A tool outside the browser read what
+reached the screen by duplicating the display in 16-bit float (linear
+scRGB, 1.0 = 80 nits) and averaging each patch; values in nits.
+
+**Windows' own 8-bit conversion** (what the capture got before): it cuts
+off at 80 nits.
+
+| on the desktop | received |
+|---|---|
+| grey 32 / 64 / 96 / 128 | 64 / 117 / 171 / 225 |
+| grey 160 and above, anything brighter than white | 255 |
+| pure red, green, blue | unchanged |
+
+In float, SDR white reads 3.50 (= 280 / 80), grey 128 0.755; divided by
+the level the nine greys and three pure colours of the test page came back
+to their 8-bit values. All 256 levels round-trip through our SDR
+conversion at 80, 200, 280 and 480 nits (computed with the float16
+composition).
+
+**Canvas** (patches at 1, 1.5, 3 times SDR white: 280 / 420 / 840 is
+right; one canvas per page, browser restarted per row):
+
+| canvas | on screen |
+|---|---|
+| WebGL2 8-bit, or float with sRGB, on the page | 280 / 280 / 280 |
+| WebGL2 float display-p3, or float sRGB next to a display-p3 or WebGPU `extended` canvas | 280 / 419 / 839 |
+| WebGL2 opaque, float asked | float buffer refused (`INVALID_OPERATION`) |
+| in a worker, alone (WebGL2 float or WebGPU `extended`) | 280 / 280 / 280 |
+| worker WebGL2 float + visible display-p3 canvas on the page (1 px is enough) | 280 / 419 / 839 |
+| the same, that canvas hidden, off-window or `opacity: 0` | 280 / 280 / 280 |
+| worker WebGL2 float, `desynchronized`, alone | 80 / 95 / 129 (raw scRGB) |
+| worker WebGL2 float, `desynchronized` + WebGPU `extended` canvas on the page | 280 / 419 / 839 |
+| `RGB10_A2` tiles with our curve, last setup (138 / 280 / 552 / 1379 / 5517 wanted) | 138 / 280 / 554 / 1377 / 5494 |
+
+**Decoded video signalled as HDR** (BT.2020 PQ bars at 100 / 203 / 400 /
+1000 / 4000 nits): every way onto the page maps it differently.
+
+| way onto the page | hardware HEVC | software AV1 |
+|---|---|---|
+| `<video>` | 71 / 145 / 244 / 325 / 463 | 83 / 170 / 307 / 465 / 465 |
+| 2D canvas | 68 / 139 / 175 / 210 / 280 | 68 / 139 / 207 / 277 / 280 |
+| WebGL `texImage2D` | 61 / 83 / 107 / 147 / 221 | 134 / 280 / 280 / 280 / 280 |
+| WebGPU `importExternalTexture` | 141 / 162 / 182 / 210 / 252 | 123 / 143 / 154 / 162 / 162 |
+
+The same samples signalled as SDR with the curve applied in our shader
+came out 2-4 % low and in order (133 / 275 / 537 / 1323 / 5369 against
+138 / 280 / 552 / 1379 / 5517), on WebGL and WebGPU, hardware and
+software. A decoded picture reaches WebGL with 8 bits whatever was sent
+(254-256 distinct levels of 877 sent); hence 8-bit video with our own
+curve.
+
+The finished feature was checked by the user by hand on this PC
+(2026-11-11): SDR picture of the HDR display, and HDR to an HDR client.
+
 ## Sound
 
 A 3 s sine played by a program of the session, received in headless

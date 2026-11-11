@@ -6,6 +6,7 @@
     "build": "tsc --noEmit && esbuild src/main.ts src/worker.ts src/admin.ts --bundle --format=esm --target=chrome120 --sourcemap --outdir=dist && node -e \"for (const f of ['index.html','admin.html']) require('fs').copyFileSync(f,'dist/'+f)\""
   },
   "devDependencies": {
+    "@webgpu/types": "^0.1.74",
     "esbuild": "^0.25.0",
     "typescript": "^5.8.0"
   },

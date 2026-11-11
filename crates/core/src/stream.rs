@@ -475,8 +475,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     }
                     (Some(proto::C_VIEW), 8..) => {
                         let view = View { width: u16_at(&b, 2) as u32, height: u16_at(&b, 4) as u32, hz: u16_at(&b, 6) as u32 };
-                        app.telemetry.event(link.id, &format!("view {}x{} at {} Hz", view.width, view.height, view.hz));
+                        let hdr = b[1] & proto::VIEW_HDR != 0;
+                        let shows = if hdr { ", HDR" } else { "" };
+                        app.telemetry.event(link.id, &format!("view {}x{} at {} Hz{shows}", view.width, view.height, view.hz));
                         *link.view.lock().unwrap() = view;
+                        app.shared.set_client_hdr(link.id, hdr);
                         waker.unpark();
                     }
                     (Some(proto::C_HELLO_ACK), _) => {
@@ -986,7 +989,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     }
                     continue;
                 }
-                Ok(Pull::Reset { geometry: g, first_seq }) => {
+                Ok(Pull::Reset { geometry: g, first_seq, hdr_max }) => {
                     size = (g.width, g.height);
                     encoded = size;
                     let s = app.settings.read().unwrap();
@@ -1002,7 +1005,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     link.pacer.lock().unwrap().forget_inflight();
                     link.sent.lock().unwrap().clear();
                     link.hello_acked.store(false, Ordering::Release);
-                    if out.send(proto::hello(g.width, g.height, g.tile, first_seq)).is_err() {
+                    if out.send(proto::hello(g.width, g.height, g.tile, first_seq, hdr_max)).is_err() {
                         return;
                     }
                     continue;

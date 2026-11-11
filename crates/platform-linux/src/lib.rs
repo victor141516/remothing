@@ -87,7 +87,8 @@ impl DisplayProvider for LinuxDisplays {
         Ok(out)
     }
 
-    fn open(&self, id: &str) -> Result<OpenedDisplay> {
+    /// X11 has no HDR (docs/ARCHITECTURE.md, "HDR"): every picture is SDR.
+    fn open(&self, id: &str, _hdr: bool) -> Result<OpenedDisplay> {
         // Streaming works without it (e.g. an X server without XFixes).
         let clipboard = |display: &str| {
             X11Clipboard::new(display)

@@ -82,7 +82,9 @@ pub trait DisplayProvider: Send + Sync {
     /// Human-readable provider name for status ("xvfb + x11", "dxgi duplication").
     fn provider_name(&self) -> String;
     fn list(&self) -> Result<Vec<DisplayInfo>>;
-    fn open(&self, id: &str) -> Result<OpenedDisplay>;
+    /// Opens display `id`; `hdr`: deliver an HDR picture if the display is
+    /// in HDR (see [`Picture`]), else an SDR one.
+    fn open(&self, id: &str, hdr: bool) -> Result<OpenedDisplay>;
     /// Present only where simulated displays can be created (Linux).
     fn virtual_displays(&self) -> Option<&dyn VirtualDisplays> {
         None
@@ -126,6 +128,21 @@ pub struct FrameInfo {
     pub moved: Vec<MovedRect>,
 }
 
+/// What the pixels of a capture session mean.
+///
+/// SDR: 8-bit sRGB BGRX, as always. HDR: each pixel is a little-endian u32
+/// with 10 bits per channel (red in the low bits, then green, blue, and 2
+/// bits of alpha: `R10G10B10A2`), and the encoder's GPU surface holds the
+/// same picture in 8 bits. Both carry `proto::hdr_encode` of the linear
+/// value relative to the host's SDR white, up to `hdr_max` times it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Picture {
+    /// The display is in HDR, so an HDR picture could be asked for.
+    pub hdr_display: bool,
+    /// Brightest value of an HDR picture in multiples of SDR white; 0: SDR.
+    pub hdr_max: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorShape {
     pub width: u32,
@@ -164,6 +181,12 @@ pub trait CaptureSession: CursorProvider + Send {
     /// GPU surface always holding the latest frame (BGRA), for zero-copy encoding.
     fn gpu_surface(&self) -> Option<GpuSurface> {
         None
+    }
+    /// The picture delivered. A session whose picture would change (the
+    /// display switched HDR on or off, its brightness levels changed) fails
+    /// instead, so the display is opened again.
+    fn picture(&self) -> Picture {
+        Picture::default()
     }
 }
 
