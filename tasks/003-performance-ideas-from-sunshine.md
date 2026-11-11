@@ -1,6 +1,6 @@
 # Performance techniques from Sunshine that we could adopt
 
-- Status: under discussion
+- Status: in progress (candidates 1, 2, 4, 6 and 7)
 - Created: 2026-11-10
 
 ## Goal
@@ -8,25 +8,14 @@
 The user asked to study LizardByte/Sunshine, a project similar to this one,
 for what it does for performance that remothing could do too. This file is
 the catalogue of every improvement that study found, with what was measured
-since. Nothing here is implemented, and nothing is to be implemented from
-this file: the user will later turn this and the other investigations into
-separate tickets. Only what came out of the Sunshine study belongs here.
+since. It started as a catalogue only; on 2026-11-11 the user chose the
+candidates to build (see "Decided"). Only what came out of the Sunshine
+study belongs here.
 
 ## Open questions
 
-None block this file. These belong to single candidates and are to be
-settled when each becomes a ticket:
-
-1. **Candidate 2**: the realtime GPU scheduling class is the only setting
-   that helped (see "Measured under load"). Sunshine documents NVIDIA driver
-   freezes with it when hardware-accelerated GPU scheduling (HAGS) is on.
-   Always on, an option, or only with HAGS off?
-2. **Candidate 3** changes a setting of the NVIDIA driver on the host (more
-   power drawn while idle), and the measurements here do not support it.
-   Drop it, or try it on a machine whose GPU is really idle?
-3. **Candidate 6**: which browsers and devices must keep working decides
-   between HEVC and AV1, or neither.
-4. **Candidate 9** cannot be verified here (no AMD or Intel GPU).
+1. **Candidate 9** cannot be verified here (no AMD or Intel GPU). Not
+   chosen for now.
 
 ## Decided (user, 2026-11-10)
 
@@ -37,6 +26,19 @@ settled when each becomes a ticket:
 - `docs/SUNSHINE.md` (the same analysis in Spanish) was deleted; this file
   replaces it.
 - The sound candidate (was 12) is dropped as a separate item: see "Sound".
+
+## Decided (user, 2026-11-11)
+
+- Build candidates **1** (thread and process priority, timer resolution),
+  **2** (GPU scheduling class), **4** (MMCSS for the compositor), **7** (the
+  rate-control trial) and **6** (HEVC / AV1). Not now: 5, 8, 9, 11;
+  candidate 10 is done by task 002.
+- Candidate 2: the realtime class **always**, whether HAGS is on or not.
+  The user accepts Sunshine's warning about NVIDIA with HAGS.
+- Candidate 3: kept, to be tried on a machine whose GPU is really idle.
+- Candidate 6: no browser list was given. Taken as: the client says which
+  codecs it decodes in hardware and the server picks among them, so every
+  browser keeps at least H.264.
 
 ## Source and method
 
