@@ -1,7 +1,8 @@
 //! Frames in flight and their repair after a loss.
 //!
-//! Frames sent over the data channel can be lost: the channel (or the path
-//! under it) may die with frames in flight, and the client skips them. The
+//! Frames sent over a UDP path (WebTransport, the data channel) can be lost:
+//! a datagram whose pieces never came back, or a path that died with frames
+//! in flight; the client skips them. The
 //! lossless layer is state, not history, so repairing it means re-sending the
 //! current pixels of every tile the lost frame touched. Moves make it
 //! subtler: the client replays later moves on a copy that misses the lost
@@ -20,8 +21,8 @@ use crate::shared::FrameContents;
 struct Sent {
     seq: u32,
     sent_us: u64,
-    /// Went over the data channel (can be lost; WebSocket frames cannot).
-    rtc: bool,
+    /// Went over a UDP path (can be lost; WebSocket frames cannot).
+    udp: bool,
     contents: FrameContents,
 }
 
@@ -46,8 +47,8 @@ fn seq_le(a: u32, b: u32) -> bool {
 }
 
 impl SentLog {
-    pub fn push(&mut self, seq: u32, sent_us: u64, rtc: bool, contents: FrameContents) {
-        self.frames.push_back(Sent { seq, sent_us, rtc, contents });
+    pub fn push(&mut self, seq: u32, sent_us: u64, udp: bool, contents: FrameContents) {
+        self.frames.push_back(Sent { seq, sent_us, udp, contents });
     }
 
     /// Every frame up to `seq` was drawn or reported lost: forget them.
@@ -102,14 +103,14 @@ impl SentLog {
         Some(Repair { tiles, layers: lost.contents.switches, keyframe: lost.contents.video })
     }
 
-    /// Data-channel frames sent before `before_us` and still unacknowledged.
+    /// UDP-path frames sent before `before_us` and still unacknowledged.
     pub fn older_than(&self, before_us: u64) -> Vec<u32> {
-        self.frames.iter().take_while(|f| f.sent_us < before_us).filter(|f| f.rtc).map(|f| f.seq).collect()
+        self.frames.iter().take_while(|f| f.sent_us < before_us).filter(|f| f.udp).map(|f| f.seq).collect()
     }
 
-    /// Send time of the oldest unacknowledged data-channel frame.
-    pub fn oldest_rtc_us(&self) -> Option<u64> {
-        self.frames.iter().find(|f| f.rtc).map(|f| f.sent_us)
+    /// Send time of the oldest unacknowledged UDP-path frame.
+    pub fn oldest_udp_us(&self) -> Option<u64> {
+        self.frames.iter().find(|f| f.udp).map(|f| f.sent_us)
     }
 }
 

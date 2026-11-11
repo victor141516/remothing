@@ -255,6 +255,33 @@ over the WebSocket (140 fps, 12 Mbit/s before and after the switch):
 | movement resumes for 1.5 s | every tile video again, mode still on |
 | movement stops for good | mode still on at 39 s, off at 42 s |
 
+## WebTransport datagrams vs WebSocket
+
+Linux bench container, `rt-testapp` at 165 fps, the same link shaping on
+all traffic, 10 s runs; `total` = capture→draw p50 / p99 / max:
+
+| profile | scenario | WebTransport | WebSocket |
+|---|---|---|---|
+| clean | full | 184 fps, 10 / 20 | (195 fps, 8 / 35 above) |
+| Wi-Fi 50M/10ms +-3, 2 % loss | full | 161 fps, 20 / 45 / 77 | 96 fps, 41 / 132 / 183 |
+| Wi-Fi 50M/10ms +-3, 2 % loss | scroll | 159 fps, 19 / 44 / 64 | 113 fps, 27 / 163 / 558 |
+| 50M/4ms, 0.5 % loss | full | 176 fps, 14 / 30 / 35 | 177 fps, 13 / 25 / 31 |
+| 50M/4ms, 0.5 % loss | scroll | 165 fps, 15 / 27 / 34 | 170 fps, 13 / 24 / 36 |
+| mobile 6M/50ms +-10, 0.5 % loss | full | 53-57 fps, 72-75 / 148-153 | 63 fps, 68 / 137 |
+| mobile 6M/50ms +-10, 0.5 % loss | scroll | 141 fps, 65 / 173 / 315 | 118 fps, 70 / 259 / 548 |
+
+Where loss meets a round trip TCP takes time to recover (Wi-Fi), the
+datagrams keep the frame rate and cut the worst frames to a third or less.
+On a 4 ms path TCP recovers fast and both are the same. On the slow mobile
+link the link model, not the transport, is the limit.
+
+Failure cases (`transport=auto`):
+
+| case | observed |
+|---|---|
+| all UDP dropped from the start | WebTransport failed on every candidate within 3 s, frames on the WebSocket throughout: 185 fps, 9 / 18 |
+| all UDP dropped 5 s into the session | given up after 300 ms without a ping answer, 3 frames repaired with a keyframe, one frame 431 ms late, then WebSocket at full rate |
+
 ## Sound
 
 A 3 s sine played by a program of the session, received in headless

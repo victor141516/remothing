@@ -26,3 +26,6 @@ zstd = { version = "0.13", default-features = false }
 # Self-signed TLS certificate (already built for str0m's DTLS, same backend).
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 time = "0.3"
+# WebTransport (HTTP/3 over QUIC): frames as datagrams. `quinn` exposes the
+# QUIC layer underneath, for our own congestion controller.
+wtransport = { version = "0.7", default-features = false, features = ["ring", "quinn"] }

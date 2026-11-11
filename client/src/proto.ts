@@ -62,6 +62,13 @@ export const FLAG_KEY = 2;
 /** The screen is in motion mode (what changes is shown from video). */
 export const FLAG_MOTION = 4;
 
+/** One piece of a FRAME as a WebTransport datagram (see proto.rs S_PIECE). */
+export const S_PIECE = 12;
+export const PIECE_HEADER_LEN = 16;
+export const PIECE_PAYLOAD = 1100;
+/** Pieces of a frame that did not arrive: pad u8, count u16, seq u32, count x index u16 (0: all). */
+export const C_NACK = 20;
+
 export const FRAME_HEADER_LEN = 48;
 /** Screen move entry after the FRAME header: src_x, src_y, dst_x, dst_y, w, h (u16 each). */
 export const COPY_LEN = 12;

@@ -24,10 +24,11 @@ import {
   S_SIGNAL, now,
 } from './proto';
 import { Renderer } from './renderer';
+import { WtPath, type WtOffer } from './wt';
 import { Recorder, type Batch } from './stats';
 
 export type ToWorker =
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean }
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean }
   | { type: 'report'; json: string }
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
@@ -50,7 +51,9 @@ export type ToWorker =
   | { type: 'event'; text: string }
   /** About this device's microphone: a C_MIC_INFO as JSON, or a complete C_MIC message. */
   | { type: 'mic'; json: string }
-  | { type: 'micdata'; buf: ArrayBuffer };
+  | { type: 'micdata'; buf: ArrayBuffer }
+  /** An input message, for the WebTransport path. */
+  | { type: 'input'; buf: ArrayBuffer };
 
 export type FromWorker =
   | { type: 'hello'; width: number; height: number }
@@ -59,8 +62,8 @@ export type FromWorker =
   | { type: 'stats'; batch: Batch; pipeline: string; pingRtt: number }
   | { type: 'signal'; json: string }
   | { type: 'dcsend'; buf: ArrayBuffer }
-  /** Frames (so input too) go over the data channel. */
-  | { type: 'path'; webrtc: boolean }
+  /** Where frames (so input too) go. */
+  | { type: 'path'; path: Path }
   /** The remote clipboard's text. */
   | { type: 'clipboard'; text: string }
   /** Display list as JSON (S_DISPLAYS). */
@@ -73,6 +76,13 @@ export type FromWorker =
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
+/** Frames over the WebSocket, a WebRTC data channel, or WebTransport datagrams. */
+export type Path = 'ws' | 'webrtc' | 'wt';
+
+interface Signal {
+  type: string;
+}
+
 interface Frame {
   buf: ArrayBuffer;
   seq: number;
@@ -84,6 +94,8 @@ interface Frame {
   hasVideo: boolean;
   picture: VideoFrame | null;
   decoded: number;
+  /** Only complete after pieces were asked for again (WebTransport). */
+  repaired: boolean;
 }
 
 let renderer: Renderer;
@@ -141,7 +153,7 @@ let expected = -1;
 /** Newest frame seen (a chunk or all of it). */
 let newest = -1;
 /** Complete frames that arrived ahead of `expected`. */
-const early = new Map<number, { buf: ArrayBuffer; received: number }>();
+const early = new Map<number, { buf: ArrayBuffer; received: number; repaired: boolean }>();
 interface Assembly {
   pieces: Uint8Array[];
   got: number;
@@ -162,8 +174,8 @@ let dcOpen = false;
 let useDc = false;
 /** Gaps before this are frames of the path used before (see DC_GRACE_MS). */
 let dcGraceUntil = 0;
-/** The data channel was given up as dead (see `setPath`). */
-let dcDead = false;
+/** The UDP path was given up as dead (see `setPath`). */
+let udpDead = false;
 /** The last frame drawn said the screen is in motion mode. */
 let motion = false;
 /** Send time of the oldest unanswered data-channel ping (0: none). */
@@ -175,6 +187,30 @@ let dcBannedUntil = 0;
 let dcBan = DC_BAN_MS;
 /** `?transport=webrtc`: the data channel whenever it is up, regardless of round trips. */
 let forceDc = false;
+/** WebTransport: tried at every connection, used for frames whenever up. */
+const wt = new WtPath(
+  {
+    frame: (buf, received, repaired) => onSequenced(buf, received, repaired),
+    giveUp,
+    pong: (v, received) => {
+      wtPingSince = 0;
+      onPong(v, received);
+    },
+    down: wtDown,
+  },
+  () => expected,
+);
+let useWt = false;
+/** `?transport=` leaves WebTransport out. */
+let wtAllowed = true;
+let wtOffer: WtOffer | null = null;
+let wtConnecting = false;
+let wtBannedUntil = 0;
+let wtBan = DC_BAN_MS;
+/** Send time of the oldest unanswered WebTransport ping (0: none). */
+let wtPingSince = 0;
+/** Frames the WebTransport path gave up, by seq: whether they may have carried video. */
+const gaveUp = new Map<number, boolean>();
 /** The tab is shown; the server sends nothing to a hidden one. */
 let visible = true;
 /** Late frames since the last report: count, and the worst one's times. */
@@ -224,20 +260,24 @@ function requestKey(): void {
   send(m);
 }
 
-/** ACKs go over the WebSocket, which always works, and over the data channel
- * when open: that one usually arrives first (shorter path, the same one the
- * frames took) and the server takes the first, so both stay cheap duplicates. */
+/** ACKs go over the WebSocket, which always works, and over the UDP path
+ * when one is open: that one usually arrives first (the path the frames
+ * took) and the server takes the first, so the others stay cheap duplicates. */
 function sendAckBoth(m: Uint8Array): void {
   send(m);
   sendDc(m);
+  wt.send(m);
 }
 
-function sendAck(seq: number, holdUs: number): void {
+/** `repaired`: the frame was only complete after pieces were asked for
+ * again, so its arrival time is no sample of the link's queue. */
+function sendAck(seq: number, holdUs: number, repaired: boolean): void {
   const n = Math.min(lost.length, 255);
   const ack = new Uint8Array(12 + 4 * n);
   const v = new DataView(ack.buffer);
   ack[0] = C_ACK;
   ack[1] = n;
+  ack[2] = repaired ? 1 : 0;
   v.setUint32(4, seq, true);
   v.setUint32(8, holdUs, true);
   for (let i = 0; i < n; i++) v.setUint32(12 + 4 * i, lost[i], true);
@@ -252,6 +292,8 @@ function sendAck(seq: number, holdUs: number): void {
  * path where the WebSocket is relayed (Funnel, a reverse proxy). Over the
  * same path TCP handles loss better than the data channel's SCTP. */
 function choosePath(): void {
+  // WebTransport is used whenever it is up; it has no round trip to beat.
+  if (useWt) return;
   const t = now();
   let want = false;
   if (forceDc) {
@@ -264,19 +306,21 @@ function choosePath(): void {
     const margin = Math.max(8, 0.25 * ws);
     want = dc < ws - (useDc ? 0 : margin);
   }
-  if (want !== useDc) setPath(want);
+  if (want !== useDc) setPath(want ? 'webrtc' : 'ws');
 }
 
-/** `dead`: the data channel is given up as stalled or closed. The server
+/** `dead`: the UDP path in use is given up as stalled or closed. The server
  * then repairs what is unacknowledged there at once, and frames missing
  * when the next one arrives over the WebSocket are not waited for. */
-function setPath(dc: boolean, dead = false): void {
-  useDc = dc;
-  dcDead = dead;
+function setPath(p: Path, dead = false): void {
+  useDc = p === 'webrtc';
+  useWt = p === 'wt';
+  udpDead = dead;
   dcPingSince = 0;
+  wtPingSince = 0;
   dcGraceUntil = now() + DC_GRACE_MS;
-  sendText(C_SIGNAL, JSON.stringify({ type: 'path', webrtc: dc, dead }));
-  post({ type: 'path', webrtc: dc });
+  sendText(C_SIGNAL, JSON.stringify({ type: 'path', path: p, dead }));
+  post({ type: 'path', path: p });
 }
 
 /** Gives the data channel up as dead and keeps away from it for a while,
@@ -286,10 +330,64 @@ function abandonDc(why: string): void {
   sendText(C_EVENT, `data channel abandoned for ${dcBan / 1000} s: ${why}`);
   dcBannedUntil = now() + dcBan;
   dcBan = Math.min(2 * dcBan, DC_BAN_MAX_MS);
-  setPath(false, true);
+  setPath('ws', true);
 }
 
-/** Runs every 20 ms: data-channel health, and frames lost with an abandoned one. */
+/** Opens WebTransport when the server offers it and it is not kept away. */
+function tryWt(): void {
+  if (!wtAllowed || !wtOffer || wt.up || wtConnecting || now() < wtBannedUntil) return;
+  wtConnecting = true;
+  wt.connect(wtOffer).then(
+    (where) => {
+      wtConnecting = false;
+      wtBan = DC_BAN_MS;
+      sendText(C_EVENT, `webtransport up via ${where}`);
+      for (let i = 0; i < 5; i++) setTimeout(pingWt, i * 20);
+      setPath('wt');
+    },
+    (e: unknown) => {
+      wtConnecting = false;
+      banWt(`webtransport failed: ${e instanceof Error ? e.message : String(e)}`);
+    },
+  );
+}
+
+/** Not tried again for a while, longer each time. */
+function banWt(why: string): void {
+  sendText(C_EVENT, `${why}; next try in ${wtBan / 1000} s`);
+  wtBannedUntil = now() + wtBan;
+  wtBan = Math.min(2 * wtBan, DC_BAN_MAX_MS);
+}
+
+/** The WebTransport session closed or stalled: frames go back to the other paths. */
+function wtDown(why: string, key: string): void {
+  // A session of a WebSocket connection that is gone ended with it; the
+  // new connection's offer is tried at once.
+  if (key === wtOffer?.key) banWt(`webtransport down: ${why}`);
+  if (useWt) {
+    setPath('ws', true);
+    choosePath();
+  }
+  tryWt();
+}
+
+/** The WebTransport path will not deliver frame `seq`. */
+function giveUp(seq: number, video: boolean): void {
+  if (before(seq, expected)) return;
+  gaveUp.set(seq, video);
+  release();
+  // Nothing drawn after it carries the loss to the server: say it now. The
+  // frame is listed lost, so its own timing is no sample.
+  if (lost.length) sendAck((expected - 1) >>> 0, 0, true);
+}
+
+function pingWt(): void {
+  if (!wt.up) return;
+  if (!wtPingSince) wtPingSince = now();
+  wt.send(pingMessage());
+}
+
+/** Runs every 20 ms: health of the UDP path in use, and frames lost with an abandoned one. */
 function watchGap(): void {
   const t = now();
   if (useDc) {
@@ -299,7 +397,14 @@ function watchGap(): void {
     if (gap > Math.max(DC_GAP_MS, limit)) abandonDc(`a frame missing for ${gap.toFixed(0)} ms`);
     else if (silent > Math.max(DC_STALL_MS, limit)) abandonDc(`no answer for ${silent.toFixed(0)} ms`);
   }
-  if (!gapSince || (useDc && dcOpen) || t - gapSince < (dcDead ? 0 : LOSS_WAIT_MS)) return;
+  if (useWt) {
+    // Its gaps are the WebTransport path's own business (asked for again,
+    // or given up); a path that stops answering is dead.
+    const silent = wtPingSince ? t - wtPingSince : 0;
+    if (silent > Math.max(DC_STALL_MS, 4 * wt.rtt)) wt.close(`no answer for ${silent.toFixed(0)} ms`);
+    return;
+  }
+  if (!gapSince || (useDc && dcOpen) || t - gapSince < (udpDead ? 0 : LOSS_WAIT_MS)) return;
   // Everything missing before the next frame that arrived is gone.
   while (!early.has(expected) && before(expected, newest)) {
     const a = assembling.get(expected);
@@ -356,24 +461,38 @@ function onDcMessage(buf: ArrayBuffer, received: number): void {
     }
     frame = out.buffer;
   }
-  onSequenced(frame, received);
+  onSequenced(frame, received, false);
 }
 
-function onSequenced(buf: ArrayBuffer, received: number): void {
+function onSequenced(buf: ArrayBuffer, received: number, repaired: boolean): void {
   const seq = new DataView(buf).getUint32(4, true);
   // Before the current display, or already given up on (late frame).
   if (expected < 0 || before(seq, expected)) return;
   if (newest < 0 || before(newest, seq)) newest = seq;
-  early.set(seq, { buf, received });
+  early.set(seq, { buf, received, repaired });
   release();
 }
 
-/** Applies frames in sequence; notes when the next one is missing. */
+/** Applies frames in sequence, skipping those the WebTransport path gave
+ * up; notes when the next one is missing. */
 function release(): void {
-  for (let f = early.get(expected); f; f = early.get(expected)) {
-    early.delete(expected);
+  for (;;) {
+    const f = early.get(expected);
+    if (f) {
+      early.delete(expected);
+      expected = (expected + 1) >>> 0;
+      onFrame(f.buf, f.received, f.repaired);
+      continue;
+    }
+    const video = gaveUp.get(expected);
+    if (video === undefined) break;
+    gaveUp.delete(expected);
+    lost.push(expected);
+    lostTotal++;
+    // Later P-frames reference the missing picture: wait for the keyframe
+    // the server sends once it hears of the loss.
+    if (video) awaitingKey = true;
     expected = (expected + 1) >>> 0;
-    onFrame(f.buf, f.received);
   }
   if (!before(expected, newest)) gapSince = 0;
   else if (!gapSince) gapSince = now();
@@ -392,10 +511,11 @@ function pingDc(): void {
   sendDc(pingMessage());
 }
 
-/** Pings both paths (round trips for the path choice, clock offset). */
+/** Pings every path (round trips for the path choice and health, clock offset). */
 function ping(): void {
   send(pingMessage());
   pingDc();
+  pingWt();
 }
 
 /** A pong from either path: clock offset from the shortest round trips (the
@@ -440,7 +560,7 @@ function resetDecoder(): void {
   pump();
 }
 
-function onFrame(buf: ArrayBuffer, received: number): void {
+function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
   const v = new DataView(buf);
   const flags = v.getUint8(1);
   const n = v.getUint16(2, true);
@@ -456,6 +576,7 @@ function onFrame(buf: ArrayBuffer, received: number): void {
     hasVideo: false,
     picture: null,
     decoded: 0,
+    repaired,
   };
   if (flags & FLAG_VIDEO) {
     const sw = v.getUint16(off, true);
@@ -532,7 +653,7 @@ function apply(f: Frame): void {
   const drawn = now();
 
   // The server leaves this frame's time here out of its network model.
-  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)));
+  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired);
 
   if (code) {
     if (code.ts !== lastTs) {
@@ -588,11 +709,28 @@ function connect(url: string): void {
     const v = new DataView(buf);
     switch (v.getUint8(0)) {
       case S_FRAME:
-        onSequenced(buf, received);
+        onSequenced(buf, received, false);
         break;
-      case S_SIGNAL:
-        post({ type: 'signal', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
+      case S_SIGNAL: {
+        const json = new TextDecoder().decode(new Uint8Array(buf, 1));
+        const signal = JSON.parse(json) as Signal;
+        if (signal.type === 'wt') {
+          // A new WebSocket connection is a new server session: its offer
+          // is tried at once, whatever happened to the last one.
+          const offer = JSON.parse(json) as WtOffer;
+          if (offer.key !== wtOffer?.key) {
+            wtBannedUntil = 0;
+            wtBan = DC_BAN_MS;
+          }
+          wtOffer = offer;
+          tryWt();
+        } else if (signal.type === 'wtclosed') {
+          wt.close('closed by the server');
+        } else {
+          post({ type: 'signal', json });
+        }
         break;
+      }
       case S_CURSOR:
         post({ type: 'cursor', buf }, [buf]);
         break;
@@ -622,6 +760,7 @@ function connect(url: string): void {
         expected = v.getUint32(16, true);
         for (const s of [...early.keys()]) if (before(s, expected)) early.delete(s);
         for (const s of [...assembling.keys()]) if (before(s, expected)) assembling.delete(s);
+        for (const s of [...gaveUp.keys()]) if (before(s, expected)) gaveUp.delete(s);
         newest = -1;
         gapSince = 0;
         lost = [];
@@ -647,6 +786,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       renderer = new Renderer(m.canvas);
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
+      wtAllowed = m.wt;
       createDecoder();
       // WASM zstd (~1.5 GB/s; pure-JS decoders run ~60x slower and stall
       // this worker, delaying video output and ACKs). Ready before any frame.
@@ -654,15 +794,25 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       setInterval(() => {
         ping();
         choosePath();
+        tryWt();
       }, 1000);
       setInterval(watchGap, 20);
+      // Missing pieces are asked for within a few ms.
+      setInterval(() => wt.tick(), 5);
       setInterval(() => {
         if (useDc) pingDc();
+        if (useWt) pingWt();
       }, DC_PING_MS);
       setInterval(reportLate, LATE_REPORT_MS);
       setInterval(() => {
         const rtts = dcOpen ? `  rtt ws ${Math.min(...wsRtts).toFixed(0)} dc ${Math.min(...dcRtts).toFixed(0)} ms` : '';
-        const path = useDc ? 'webrtc' : dcOpen ? 'websocket (webrtc standby)' : 'websocket';
+        const path = useWt
+          ? `webtransport rtt ${wt.rtt.toFixed(0)} ms`
+          : useDc
+            ? 'webrtc'
+            : dcOpen
+              ? 'websocket (webrtc standby)'
+              : 'websocket';
         const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles`;
         const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
         const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
@@ -706,6 +856,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'micdata':
       send(new Uint8Array(m.buf));
       break;
+    case 'input':
+      // The input stream may not be open yet: the stream socket takes input too.
+      if (!wt.sendInput(new Uint8Array(m.buf))) send(new Uint8Array(m.buf));
+      break;
     case 'wsrtt':
       wsRtts.push(m.rtt);
       if (wsRtts.length > RTT_WINDOW) wsRtts.shift();
@@ -722,7 +876,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         for (let i = 1; i <= 5; i++) setTimeout(pingDc, i * 50);
         setTimeout(choosePath, 400);
       } else if (useDc) {
-        setPath(false, true);
+        setPath('ws', true);
       }
       break;
   }

@@ -11,7 +11,12 @@
   for 5 s; tiles that are exact and do not change stay exact. The whole
   frame is not re-encoded from scratch either: the encoder input is updated
   where the screen changed, as before.
-- Left: steps 2 to 6.
+- Done: step 2, WebTransport (`docs/ARCHITECTURE.md`, "Transport"). As
+  built, both modes use it (whatever video goes as pieces with parity; no
+  frame is dropped without the existing repair). QUIC's congestion control
+  is off and our link model paces, as planned. Not tried: a proxy that
+  ends WebTransport (arrangement 3), Safari, a real phone or Wi-Fi.
+- Left: steps 3 to 6.
 
 ## Goal
 

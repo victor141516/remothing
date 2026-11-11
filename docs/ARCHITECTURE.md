@@ -316,22 +316,85 @@ virtual microphone that programs of the session record from.
   it only appears after a restart, the client offers to restart the
   computer (`restart`). An installed cable is simply used.
 
-## Transport: WebSocket and WebRTC data channel
+## Transport: WebTransport, WebRTC data channel, WebSocket
 
 The WebSocket is always there: signaling, HELLO, cursor, pongs, and frames
-unless a better path exists. `rtc.rs` (str0m, sans-IO, one hub thread, UDP
-sockets on every local IPv4 address on the listen port, STUN for the
-public address, `webrtc.advertise` for forwards/containers) answers the
-browser's offer, so ICE can find a direct UDP path (LAN, tailnet, punched
-NAT) even when the page and WebSocket go through a relay.
+unless a better path exists. Frames prefer UDP, where a lost packet does
+not hold back everything sent after it as it does on TCP (a game session
+on Wi-Fi showed 200 ms stalls with nothing but the network to blame:
+TCP's retransmission timeout). Two UDP paths, in this order:
+
+1. **WebTransport** (`wt.rs`, wtransport/quinn), tried at every connection
+   and used whenever it is up, in both modes.
+2. **WebRTC data channel** (`rtc.rs`, str0m, sans-IO, one hub thread, UDP
+   sockets on every local IPv4 address on the listen port, STUN for the
+   public address, `webrtc.advertise` for forwards/containers), answering
+   the browser's offer so ICE can find a direct UDP path (LAN, tailnet,
+   punched NAT) even when the page and WebSocket go through a relay. Used
+   only when its round trip is clearly shorter (below).
 
 ```mermaid
 flowchart LR
   B[browser] -- "WS /ws: signaling, HELLO, cursor, ACK copy (+ frames on WS path)" --> S[server]
   B -- "WS /input: input, unloaded pings" --> S
+  B -. "WT datagrams: frame pieces, parity; ACKs, NACKs, pings" .-> S
+  B -. "WT stream: input" .-> S
   B -. "DC frames: reliable, unordered chunks ≤60 KiB; ACKs, pings" .-> S
   B -. "DC input: reliable, ordered" .-> S
 ```
+
+### WebTransport
+
+- **Reaching it**: its own UDP port (`webtransport.port`, default one above
+  `server.listen`, whose UDP side is WebRTC's). The server offers over the
+  WebSocket a session key, the port, the places to try (the page's own
+  host, `webtransport.advertise`, this machine's addresses) and the hash of
+  its certificate; the client tries them all at once and keeps the first
+  that answers. The key ties the session to that WebSocket session, which
+  the stream token already authorized.
+- **Certificate**: browsers check WebTransport like HTTPS and show no
+  warning to click through. Unless `tls.cert`/`tls.key` hold a CA-signed
+  certificate, the server makes its own ECDSA P-256 one, valid 13 days
+  (browsers accept a certificate pinned by hash only under two weeks),
+  renews it every 5 days and sends the new hash; the client pins it with
+  `serverCertificateHashes`. It is trusted as much as the page that brought
+  the hash, whatever made the page trusted (a proxy's certificate in front,
+  or our self-signed one accepted once): no second certificate to obtain.
+  QUIC has no unencrypted form, so a proxy in front cannot end TLS for a
+  plain WebTransport backend; the page can go through it while the
+  datagrams go straight to the server, a plain UDP forward on the proxy
+  host carries them untouched, and a full `https://` URL in `advertise`
+  points at a proxy that ends WebTransport itself (checked as any HTTPS
+  site; not tried here).
+- **Frames** go as pieces of at most 1100 bytes (they fit the smallest QUIC
+  packet), plus one parity piece per 8: the XOR of every 8th piece, so one
+  lost piece per group, or a run of up to one piece per group, is rebuilt
+  without a round trip. What is still missing is asked for again
+  (`C_NACK`): holes behind later pieces after 4 ms, the rest of a frame
+  once its pieces stopped for 4 ms and three times their usual spacing (on
+  a slow link they come far apart), or when a later frame arrives; again
+  after 1.5 round trips, up to five times. A frame that got nothing new for
+  250 ms (or 4 round trips) is given up: the ACK lists it as lost and the
+  repair below follows. The server keeps the last 256 unacknowledged
+  frames for these requests.
+- **Rate**: QUIC's own congestion control is switched off (a window
+  beyond what quinn paces). Frames are already paced by the link model,
+  and a second controller would hold datagrams back, and drop the oldest,
+  on losses it reads as congestion. A frame that was only complete after
+  asking again says so in its ACK, and its timing is not a link sample.
+- **Health**: the session is given up when it closes or a ping (every
+  250 ms) stays unanswered for 300 ms (or 4 round trips), and not tried
+  again for 30 s, doubling up to 5 min; a failed attempt counts the same.
+  Frames then take the data channel or the WebSocket, with the same repair
+  as an abandoned data channel. A new WebSocket connection starts afresh.
+- **Input** goes over one unidirectional stream (ordered, each message
+  after its length).
+- An unreliable *data channel* with our own retransmission was tried
+  before and dropped (SCTP shrinks its window for what it abandons); with
+  QUIC the sending rate is ours to set, which is what makes the same idea
+  work here.
+
+### Data channel
 
 - **Path choice (client)**: the minimum of recent ping round trips on the
   input WebSocket (no frames queue ahead of its pongs) against the data

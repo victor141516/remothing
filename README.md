@@ -123,14 +123,28 @@ address (e.g. `"0.0.0.0:8443"`) adds an HTTPS listener for the client and
 keeps `server.listen` and the admin UI plain, for a reverse proxy or
 Tailscale Funnel in front of the plain port plus direct access.
 
+`[webtransport]`: `enabled` (default true), `port` (UDP; 0 = one above
+the listen port), `advertise` (more places to try: `"host"` or
+`"host:port"` of a forwarded or published UDP port, or the full
+`https://` URL of a proxy that ends WebTransport itself). Every client
+tries WebTransport first: frames then travel as datagrams, and a lost
+packet costs only its own frame a short repair instead of stalling the
+stream as on TCP. It needs no certificate of its own: the server makes a
+short-lived one and the client trusts it through the page (a proxy's
+certificate in front, or the self-signed one accepted once). Forward or
+publish its UDP port as you do for WebRTC (Docker:
+`WEBTRANSPORT_ADVERTISE`); behind a proxy without UDP the page still goes
+through the proxy and the datagrams straight to that port.
+
 `[webrtc]`: `enabled` (default true), `udp_port` (0 = the listen port),
 `stun_servers` (public address discovery), `advertise` (extra candidate
 addresses, `"ip"` or `"ip:port"`, for NAT/port forwards and containers).
-When the browser reaches the server over UDP on a shorter path than the
-WebSocket's (e.g. the page goes through Tailscale Funnel or a reverse proxy),
-frames and input move to a WebRTC data channel; otherwise, or when UDP is
-blocked or stalls, everything stays on the WebSocket. `?transport=ws` or
-`?transport=webrtc` in the client URL overrides the choice.
+Without WebTransport, when the browser reaches the server over UDP on a
+shorter path than the WebSocket's (e.g. the page goes through Tailscale
+Funnel or a reverse proxy), frames and input move to a WebRTC data
+channel; otherwise, or when UDP is blocked or stalls, everything stays on
+the WebSocket. `?transport=ws`, `?transport=webrtc` or `?transport=wt` in
+the client URL overrides the choice.
 
 ## Latency benchmark
 

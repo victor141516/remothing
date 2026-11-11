@@ -443,7 +443,7 @@ fn xor_mapped_address(msg: &[u8]) -> Option<SocketAddr> {
 }
 
 /// IPv4 addresses of the up interfaces, loopback included (local browsers).
-fn local_ipv4() -> Result<Vec<Ipv4Addr>> {
+pub(crate) fn local_ipv4() -> Result<Vec<Ipv4Addr>> {
     let mut ips: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
         .context("list network interfaces")?
         .into_iter()

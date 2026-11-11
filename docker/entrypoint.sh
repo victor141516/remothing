@@ -7,6 +7,8 @@
 # WEBRTC_ADVERTISE: comma-separated host addresses browsers can reach the
 #   published UDP port at (container interfaces are Docker-internal); default
 #   127.0.0.1 for a browser on the Docker host. Publish it with -p 8080:8080/udp.
+# WEBTRANSPORT_ADVERTISE: the same for WebTransport ("host:port" of the
+#   published UDP port 8081, e.g. -p 8081:8081/udp and 127.0.0.1:8081).
 set -euo pipefail
 
 CONFIG=/etc/remothing/config.toml
@@ -23,6 +25,8 @@ if [ ! -f "$CONFIG" ]; then
     if [ -n "${ADMIN_TOKEN:-}" ]; then echo "admin_token = \"${ADMIN_TOKEN}\""; fi
     echo '[webrtc]'
     echo "advertise = [$(echo "${WEBRTC_ADVERTISE:-127.0.0.1}" | sed 's/[^,][^,]*/"&"/g')]"
+    echo '[webtransport]'
+    echo "advertise = [$(echo "${WEBTRANSPORT_ADVERTISE:-}" | sed 's/[^,][^,]*/"&"/g')]"
   } > "$CONFIG"
 fi
 

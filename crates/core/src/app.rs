@@ -35,6 +35,8 @@ pub struct App {
     pub tls_enabled: bool,
     /// WebRTC transport, when enabled and a UDP socket could be bound.
     pub rtc: Option<crate::rtc::Hub>,
+    /// WebTransport, when enabled and its UDP port could be bound.
+    pub wt: Option<Arc<crate::wt::WtHub>>,
 }
 
 impl App {
@@ -73,6 +75,17 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
             .ok(),
         false => None,
     };
+    // One rustls backend for HTTPS and WebTransport.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
+    let wt = match settings.webtransport.enabled {
+        // Without it frames take the data channel or the WebSocket.
+        true => runtime
+            .block_on(crate::wt::WtHub::start(&settings.webtransport, &settings.tls, stream_addr.port()))
+            .inspect_err(|e| telemetry.error("webtransport disabled", e))
+            .ok(),
+        false => None,
+    };
     let app = Arc::new(App {
         platform: platform.clone(),
         shared: Arc::new(Shared::new(settings.server.tile)),
@@ -86,6 +99,7 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         admin_sessions: Mutex::new(HashSet::new()),
         tls_enabled: pems.is_some() && https_addr.is_none(),
         rtc,
+        wt,
     });
 
     let capture = CaptureLoop {
@@ -114,10 +128,9 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         .with_state(app.clone());
     let admin_router = crate::admin::router().fallback(assets::admin_asset).with_state(app.clone());
 
-    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async move {
+    runtime.block_on(async move {
         let rustls = match pems {
             Some((cert, key)) => {
-                let _ = rustls::crypto::ring::default_provider().install_default();
                 Some(
                     axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
                         .await

@@ -14,10 +14,16 @@ pub const S_FRAME: u8 = 2;
 /// w u16, h u16, xhot u16, yhot u16, pad u16, RGBA. w = h = 0 hides the cursor.
 pub const S_CURSOR: u8 = 3;
 pub const S_PONG: u8 = 4;
-/// UTF-8 JSON, WebRTC signaling over the WebSocket: `{"type":"config",
+/// UTF-8 JSON, signaling over the WebSocket. WebRTC: `{"type":"config",
 /// "iceServers":[...]}` on connect, `{"type":"answer","sdp":...}`,
 /// `{"type":"closed"}` (the server dropped the peer) and `{"type":"slow"}`
 /// (the data channel carries less than the WebSocket did: leave it).
+/// WebTransport: `{"type":"wt","key","hash","port","candidates":[...]}`
+/// on connect and when the certificate is renewed: `candidates` are URLs to
+/// try (`key` goes in their query as `k`), or bare hosts for
+/// `https://host:port/wt`, the empty one standing for the page's own host;
+/// `hash` is the SHA-256 (hex) of the certificate to accept at the hosts
+/// (full URLs are checked as any HTTPS site).
 pub const S_SIGNAL: u8 = 5;
 /// One piece of a FRAME on the data channel: flags u8 (FLAG_VIDEO of the
 /// frame), part u16, parts u16, pad u16, seq u32 (offsets 1/2/4/6/8), data.
@@ -45,6 +51,20 @@ pub const S_AUDIO: u8 = 10;
 /// server and can be installed), `"installing"`, `"restart"` (installed,
 /// the computer has to restart) or `"unavailable"` (`reason`, `tried`).
 pub const S_MIC_INFO: u8 = 11;
+/// One piece of a FRAME as a WebTransport datagram: flags u8 (FLAG_VIDEO of
+/// the frame), index u16, data pieces u16, parity pieces u16, seq u32, frame
+/// length u32 (offsets 1/2/4/6/8/12), payload. Pieces `0..data` carry the
+/// frame in order, PIECE_PAYLOAD bytes each but the last. Piece `data + j`
+/// is parity: the XOR of the data pieces whose index is `j` modulo `parity`
+/// (short ones padded with zeros), so one lost piece of each such group can
+/// be rebuilt, and a run of up to `parity` lost in a row too.
+pub const S_PIECE: u8 = 12;
+pub const PIECE_HEADER_LEN: usize = 16;
+/// Fits a QUIC datagram on the smallest path every QUIC connection has
+/// (1200 bytes), with the headers around it.
+pub const PIECE_PAYLOAD: usize = 1100;
+/// Data pieces per parity piece.
+pub const PIECES_PER_PARITY: usize = 8;
 
 // Client -> server
 /// client_ts f64 at offset 8; answered with S_PONG on the same path (the
@@ -54,7 +74,9 @@ pub const C_PING: u8 = 1;
 /// seq u32. `seq` is the last frame drawn; every earlier frame was drawn or
 /// is listed as lost (in this ACK or an earlier one). `hold_us` is the client
 /// time from receiving that frame to drawing it, excluded from the network
-/// round trip.
+/// round trip. The first pad byte is 1 when the frame was only complete
+/// after asking for pieces again (WebTransport): when it arrived then says
+/// nothing about the link's queue.
 pub const C_ACK: u8 = 2;
 /// The client's decoder needs an IDR frame: pad u8 x 3, seq u32 of the
 /// newest frame it received (requests older than the last keyframe sent are
@@ -62,10 +84,11 @@ pub const C_ACK: u8 = 2;
 pub const C_KEYFRAME: u8 = 3;
 /// UTF-8 JSON with the client's measured stats (shown in the admin UI).
 pub const C_STATS: u8 = 4;
-/// UTF-8 JSON, WebRTC signaling: `{"type":"offer","sdp":...}`,
-/// `{"type":"candidate","candidate":"candidate:..."}`, and the path the
-/// client wants frames on: `{"type":"path","webrtc":bool,"dead":bool}`
-/// (`dead`: it gave the data channel up; frames left there are lost).
+/// UTF-8 JSON, signaling: `{"type":"offer","sdp":...}` and
+/// `{"type":"candidate","candidate":"candidate:..."}` (WebRTC), and the
+/// path the client wants frames on: `{"type":"path","path":"ws"|"webrtc"|
+/// "wt","dead":bool}` (`dead`: it gave the UDP path it was on up; frames
+/// left there are lost).
 pub const C_SIGNAL: u8 = 5;
 /// The client applied the last HELLO.
 pub const C_HELLO_ACK: u8 = 6;
@@ -99,6 +122,10 @@ pub const C_AUDIO: u8 = 17;
 pub const C_MIC_INFO: u8 = 18;
 /// One packet of the microphone, in the format given with C_MIC_INFO.
 pub const C_MIC: u8 = 19;
+
+/// Pieces of a frame that did not arrive (WebTransport datagram): pad u8,
+/// count u16, seq u32, then count x index u16. The server sends them again.
+pub const C_NACK: u8 = 20;
 
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
@@ -170,6 +197,38 @@ pub fn chunks(frame: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
     })
 }
 
+/// Data and parity pieces a FRAME of `len` bytes is sent as over WebTransport.
+pub fn piece_counts(len: usize) -> (usize, usize) {
+    let data = len.div_ceil(PIECE_PAYLOAD).max(1);
+    (data, data.div_ceil(PIECES_PER_PARITY))
+}
+
+/// Appends piece `index` of `frame` (see S_PIECE) to `out`.
+pub fn piece(frame: &[u8], index: usize, out: &mut Vec<u8>) {
+    let (data, parity) = piece_counts(frame.len());
+    out.extend_from_slice(&[S_PIECE, frame[1] & FLAG_VIDEO]);
+    for v in [index, data, parity] {
+        out.extend_from_slice(&(v as u16).to_le_bytes());
+    }
+    out.extend_from_slice(&frame[4..8]);
+    out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+    let chunk = |i: usize| &frame[i * PIECE_PAYLOAD..((i + 1) * PIECE_PAYLOAD).min(frame.len())];
+    if index < data {
+        out.extend_from_slice(chunk(index));
+        return;
+    }
+    let at = out.len();
+    for i in (index - data..data).step_by(parity) {
+        let c = chunk(i);
+        if out.len() < at + c.len() {
+            out.resize(at + c.len(), 0);
+        }
+        for (o, b) in out[at..].iter_mut().zip(c) {
+            *o ^= b;
+        }
+    }
+}
+
 pub fn pong(client_ts: f64) -> Vec<u8> {
     let mut m = Vec::with_capacity(24);
     m.extend_from_slice(&[S_PONG, 0, 0, 0, 0, 0, 0, 0]);
@@ -191,4 +250,42 @@ pub fn cursor(state: &CursorState) -> Vec<u8> {
     m.extend_from_slice(&[0, 0]);
     m.extend_from_slice(rgba);
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame is whole again after losing any `parity` pieces in a row.
+    #[test]
+    fn parity_rebuilds_a_lost_run() {
+        for len in [FRAME_HEADER_LEN, PIECE_PAYLOAD, 9 * PIECE_PAYLOAD - 3, 40 * PIECE_PAYLOAD + 17] {
+            let frame: Vec<u8> = (0..len).map(|i| (i * 31 + i / 7) as u8).collect();
+            let (data, parity) = piece_counts(len);
+            let payload = |index: usize| {
+                let mut p = Vec::new();
+                piece(&frame, index, &mut p);
+                p.split_off(PIECE_HEADER_LEN)
+            };
+            for first in 0..data {
+                let lost: Vec<usize> = (first..data.min(first + parity)).collect();
+                let mut rebuilt = Vec::new();
+                for i in 0..data {
+                    let mut p = payload(i);
+                    if lost.contains(&i) {
+                        // Its group's parity, less the pieces that did arrive.
+                        p = payload(data + i % parity);
+                        for other in (i % parity..data).step_by(parity).filter(|&o| o != i) {
+                            for (a, b) in p.iter_mut().zip(payload(other)) {
+                                *a ^= b;
+                            }
+                        }
+                        p.truncate(if i == data - 1 { len - i * PIECE_PAYLOAD } else { PIECE_PAYLOAD });
+                    }
+                    rebuilt.extend(p);
+                }
+                assert_eq!(rebuilt, frame, "len {len}, lost {lost:?}");
+            }
+        }
+    }
 }

@@ -20,6 +20,7 @@ pub struct Settings {
     pub auth: AuthSettings,
     pub tls: TlsSettings,
     pub webrtc: WebRtcSettings,
+    pub webtransport: WebTransportSettings,
     /// Platform-specific options (e.g. `[platform] session_command = "..."` on Linux).
     pub platform: toml::Table,
 }
@@ -102,6 +103,30 @@ impl Default for WebRtcSettings {
     }
 }
 
+/// Frames as WebTransport datagrams (UDP, nothing waits for a lost packet's
+/// retransmission). Tried first by every client; the WebSocket and the data
+/// channel stay as fallbacks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebTransportSettings {
+    pub enabled: bool,
+    /// UDP port; 0 = one above the port of `server.listen` (that port's UDP
+    /// side belongs to WebRTC).
+    pub port: u16,
+    /// More places clients try, beyond the page's own host and this
+    /// machine's addresses: "host" or "host:port" (a forwarded port, a
+    /// published container port), checked against the server's own
+    /// short-lived certificate; or a full "https://..." URL of a proxy that
+    /// ends WebTransport itself, checked as any HTTPS site.
+    pub advertise: Vec<String>,
+}
+
+impl Default for WebTransportSettings {
+    fn default() -> Self {
+        Self { enabled: true, port: 0, advertise: Vec::new() }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -112,6 +137,7 @@ impl Default for Settings {
             auth: AuthSettings::default(),
             tls: TlsSettings::default(),
             webrtc: WebRtcSettings::default(),
+            webtransport: WebTransportSettings::default(),
             platform: toml::Table::new(),
         }
     }

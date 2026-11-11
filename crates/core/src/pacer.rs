@@ -275,8 +275,10 @@ impl Pacer {
     /// it `hold_us` (decode, decompression, upload). The window counts the
     /// frame until now, so a slow client still holds content back, but the
     /// link model sees only the network: a heavy frame's processing is not
-    /// queueing on the path.
-    pub fn on_ack(&mut self, seq: u32, now: u64, hold_us: u64) {
+    /// queueing on the path. `repaired`: the frame was only complete after
+    /// pieces were sent again, so its timing is a round trip of repair, not
+    /// queue; it is delivered, but not a sample.
+    pub fn on_ack(&mut self, seq: u32, now: u64, hold_us: u64, repaired: bool) {
         // Unknown seq: a frame forgotten by `forget_inflight` (display switch).
         let Some(n) = self.sent.iter().position(|f| f.seq == seq) else { return };
         let mut acked = None;
@@ -289,7 +291,9 @@ impl Pacer {
         let arrived = now.saturating_sub(hold_us).max(f.sent_us + 1);
         self.delivered_us = arrived;
         self.first_sent_us = f.sent_us;
-        self.sample(&f, arrived);
+        if !repaired {
+            self.sample(&f, arrived);
+        }
     }
 
     /// Frames in flight will never be ACKed meaningfully (display switch).
@@ -477,7 +481,7 @@ mod tests {
         while t < end {
             while acks.front().is_some_and(|&(at, _)| at <= t) {
                 let (_, s) = acks.pop_front().unwrap();
-                p.on_ack(s, t, link.hold_us);
+                p.on_ack(s, t, link.hold_us, false);
             }
             if t >= next_frame {
                 if p.can_send(t) {
@@ -626,7 +630,7 @@ mod tests {
         for i in 0..10u32 {
             let t = 1_000_000 * (i as u64 + 1);
             p.on_send(i, 200_000, t);
-            p.on_ack(i, t + 40_000 + 320_000, 0);
+            p.on_ack(i, t + 40_000 + 320_000, 0, false);
         }
         assert!(p.rate() < 10e6 / 8.0, "estimate {}", p.rate());
     }
@@ -639,7 +643,7 @@ mod tests {
             let t = 1_000_000 + i as u64 * 10_000;
             let hold = 50_000 + (i as u64 % 4) * 10_000;
             p.on_send(i, 50_000, t);
-            p.on_ack(i, t + 2_000 + hold, hold);
+            p.on_ack(i, t + 2_000 + hold, hold, false);
         }
         assert!(!p.proven() && p.rate() >= INITIAL_RATE, "estimate {} proven {}", p.rate(), p.proven());
     }
@@ -653,7 +657,7 @@ mod tests {
         for _ in 0..200 {
             seq += 1;
             p.on_send(seq, 10_000, t);
-            p.on_ack(seq, t + 1_000, 500);
+            p.on_ack(seq, t + 1_000, 500, false);
             t += 6_060;
         }
         let mut during_stall = 0;

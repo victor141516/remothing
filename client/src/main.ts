@@ -11,7 +11,7 @@ import { InputProber } from './probe';
 import { C_PING, S_PONG, now } from './proto';
 import { Stats } from './stats';
 import { Ui, type DisplayEntry } from './ui';
-import type { FromWorker, ToWorker } from './worker';
+import type { FromWorker, Path, ToWorker } from './worker';
 
 declare global {
   interface Window {
@@ -54,12 +54,17 @@ function connectInput(): void {
 }
 connectInput();
 setInterval(pingInput, 1000);
-/** Frames go over the data channel (the worker's choice): input follows. */
-let dcPath = false;
+/** Where frames go (the worker's choice): input follows. */
+let path: Path = 'ws';
 const input = new Input(
   canvas,
   (m) => {
-    if (!(dcPath && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) inputWs.send(m);
+    if (path === 'wt') {
+      const buf = m.slice().buffer;
+      toWorker({ type: 'input', buf }, [buf]);
+    } else if (!(path === 'webrtc' && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) {
+      inputWs.send(m);
+    }
   },
   showPointer,
 );
@@ -101,10 +106,11 @@ const mic = new Microphone({
 ui.microphone(mic.state, mic.status);
 
 // `?transport=ws` keeps everything on the WebSocket, `?transport=webrtc` uses
-// the data channel whenever it is up (comparisons, troubleshooting); by
-// default the worker picks the path with the shorter round trip.
+// the data channel whenever it is up, `?transport=wt` WebTransport only
+// (comparisons, troubleshooting); by default WebTransport when it comes up,
+// else the worker picks the path with the shorter round trip.
 const transport = params.get('transport');
-const webrtc = transport !== 'ws' && 'RTCPeerConnection' in window;
+const webrtc = transport !== 'ws' && transport !== 'wt' && 'RTCPeerConnection' in window;
 const peer = new Peer({
   signal: (json) => toWorker({ type: 'signal', json: JSON.stringify(json) }),
   message: (buf, received) => toWorker({ type: 'dcmsg', buf, received }, [buf]),
@@ -201,7 +207,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       peer.sendFrames(m.buf);
       break;
     case 'path':
-      dcPath = m.webrtc;
+      path = m.path;
       break;
     case 'clipboard':
       ui.remoteClipboard(m.text);
@@ -227,7 +233,14 @@ const offscreen = canvas.transferControlToOffscreen();
 // `noread` keeps timing stats but skips the GPU readback the barcode probe needs.
 const readBarcode = probeEnabled && !params.has('noread');
 toWorker(
-  { type: 'init', canvas: offscreen, url: `${wsBase}ws${auth}`, probe: readBarcode, forceDc: transport === 'webrtc' },
+  {
+    type: 'init',
+    canvas: offscreen,
+    url: `${wsBase}ws${auth}`,
+    probe: readBarcode,
+    forceDc: transport === 'webrtc',
+    wt: transport !== 'ws' && transport !== 'webrtc',
+  },
   [offscreen],
 );
 statsEl.hidden = !(params.has('stats') || probeEnabled);
