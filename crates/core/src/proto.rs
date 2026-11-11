@@ -157,6 +157,11 @@ pub const C_MOVE_REL: u8 = 22;
 /// it gets S_CURSOR_POS.
 pub const C_CAPTURE: u8 = 23;
 
+/// WebSocket close code for a token the server does not accept. Browsers do
+/// not show a page the HTTP status of a refused upgrade, so the server
+/// upgrades and closes with this; the client then stops reconnecting.
+pub const CLOSE_UNAUTHORIZED: u16 = 4401;
+
 /// Rect payload encodings.
 pub const ENC_RAW: u8 = 0;
 /// LZ4 block (lz4_flex::block) of the raw BGRX rows.

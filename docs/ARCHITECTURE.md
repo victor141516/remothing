@@ -515,6 +515,13 @@ flowchart LR
   B -. "DC input: reliable, ordered" .-> S
 ```
 
+A wrong stream token is refused with WebSocket close code 4401
+(`CLOSE_UNAUTHORIZED`) on both sockets, after an upgrade that carries
+nothing else: a browser hides the HTTP status of a refused upgrade from the
+page, so a plain 401 looked like a network failure and the client retried
+every second. On 4401 the client stops and shows "Error 4401"; the server
+logs the refused address.
+
 ### WebTransport
 
 - **Reaching it**: its own UDP port (`webtransport.port`, default one above

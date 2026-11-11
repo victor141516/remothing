@@ -188,6 +188,15 @@ export class Ui {
     return promise;
   }
 
+  /** Shows why the stream stopped for good, over the picture. */
+  stopped(text: string): void {
+    this.answer?.(false);
+    const p = document.createElement('p');
+    p.textContent = text;
+    this.prompt.replaceChildren(p);
+    this.prompt.hidden = false;
+  }
+
   displays(list: DisplayEntry[], current: string | null): void {
     this.displaySelect.replaceChildren(
       ...list.map((d) => {

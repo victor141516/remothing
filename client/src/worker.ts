@@ -18,6 +18,7 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
+  CLOSE_UNAUTHORIZED,
   C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
@@ -81,7 +82,9 @@ export type FromWorker =
   | { type: 'audioinfo'; json: string }
   | { type: 'audio'; buf: ArrayBuffer }
   /** How the server sees this client's microphone (S_MIC_INFO). */
-  | { type: 'micinfo'; json: string };
+  | { type: 'micinfo'; json: string }
+  /** The server closed the stream for good with this close code. */
+  | { type: 'refused'; code: number };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -860,7 +863,11 @@ function connect(url: string): void {
         break;
     }
   };
-  ws.onclose = () => setTimeout(() => connect(url), 1000);
+  // A refused token stays refused: retrying would only repeat the refusal.
+  ws.onclose = (ev) => {
+    if (ev.code === CLOSE_UNAUTHORIZED) post({ type: 'refused', code: ev.code });
+    else setTimeout(() => connect(url), 1000);
+  };
 }
 
 self.onmessage = (ev: MessageEvent<ToWorker>) => {

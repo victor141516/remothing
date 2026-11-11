@@ -90,6 +90,8 @@ export const VIEW_HDR = 1;
 export const C_MOVE_REL = 22;
 /** on u8: this client captured the mouse (it then gets S_CURSOR_POS). */
 export const C_CAPTURE = 23;
+/** WebSocket close code for a token the server does not accept (see proto.rs). */
+export const CLOSE_UNAUTHORIZED = 4401;
 
 export const FRAME_HEADER_LEN = 48;
 /** Screen move entry after the FRAME header: src_x, src_y, dst_x, dst_y, w, h (u16 each). */

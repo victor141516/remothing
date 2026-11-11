@@ -16,10 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -115,6 +114,15 @@ fn authorized(app: &App, q: &TokenQuery) -> bool {
     expected.is_empty() || constant_time_eq(expected.as_bytes(), q.token.as_bytes())
 }
 
+/// Answers a wrong token: the upgrade goes through only to carry the close
+/// code, which is all a browser lets the page see; nothing else is sent.
+fn refuse(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|mut socket| async move {
+        let close = CloseFrame { code: proto::CLOSE_UNAUTHORIZED, reason: "".into() };
+        let _ = socket.send(Message::Close(Some(close))).await;
+    })
+}
+
 pub async fn stream_handler(
     ws: WebSocketUpgrade,
     Query(q): Query<TokenQuery>,
@@ -122,7 +130,8 @@ pub async fn stream_handler(
     State(app): State<Arc<App>>,
 ) -> Response {
     if !authorized(&app, &q) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        eprintln!("refused a stream connection from {addr}: wrong token");
+        return refuse(ws);
     }
     let mut codecs = vec![Codec::H264];
     codecs.extend(q.codecs.split(',').filter_map(Codec::from_name).filter(|c| *c != Codec::H264));
@@ -138,7 +147,7 @@ pub async fn input_handler(
     State(app): State<Arc<App>>,
 ) -> Response {
     if !authorized(&app, &q) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return refuse(ws);
     }
     ws.on_upgrade(move |mut socket| async move {
         let mut held = Held::default();

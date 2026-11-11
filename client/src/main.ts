@@ -8,7 +8,7 @@ import { Input } from './input';
 import { Microphone } from './mic';
 import { Peer } from './peer';
 import { InputProber } from './probe';
-import { C_PING, S_PONG, now } from './proto';
+import { C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
 import { Stats } from './stats';
 import { Ui, type DisplayEntry } from './ui';
 import type { FromWorker, Path, ToWorker } from './worker';
@@ -50,7 +50,9 @@ function connectInput(): void {
     const v = new DataView(e.data as ArrayBuffer);
     if (v.getUint8(0) === S_PONG) toWorker({ type: 'wsrtt', rtt: now() - v.getFloat64(8, true) });
   };
-  inputWs.onclose = () => setTimeout(connectInput, 1000);
+  inputWs.onclose = (e) => {
+    if (e.code !== CLOSE_UNAUTHORIZED) setTimeout(connectInput, 1000);
+  };
 }
 connectInput();
 setInterval(pingInput, 1000);
@@ -319,6 +321,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'micinfo':
       mic.info(m.json);
+      break;
+    case 'refused':
+      ui.stopped(`Error ${m.code}`);
       break;
   }
 };
