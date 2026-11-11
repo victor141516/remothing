@@ -1,6 +1,8 @@
 # Games: stalls of 200-450 ms, and a motion mode (whole screen as video)
 
-- Status: in progress
+- Status: on hold (2026-11-11: games play well on the current build; the
+  user keeps playing and reports new stalls, with the event log's late-frame
+  reports, if they come back)
 - Created: 2026-11-10
 
 ## Progress

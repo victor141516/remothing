@@ -98,6 +98,9 @@ docker build --target desktop -t remothing-desktop .
   Windows FFmpeg; decode the dump with dav1d in a container).
 - The admin API (`/api/status`, Bearer admin token) lists per-client events,
   errors and the sound status: the first place to look after a hiccup.
+- Remote input can be checked without touching this PC: in a container,
+  send `C_MOVE`/`C_MOVE_REL` over `/input` and read `xdotool
+  getmouselocation` (`apt-get install xdotool`).
 - Unit tests exist where logic can be judged without a machine
   (`pacer.rs` simulator, input mapping). Do not add tests that only pin
   wording or wiring.
