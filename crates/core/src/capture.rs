@@ -168,6 +168,7 @@ impl CaptureLoop {
         // GPU-based sessions can skip CPU readback of tiles shown only from video.
         let gpu = capture.gpu_surface().is_some();
         let pixels = self.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
+        *self.control.input.write().unwrap() = Some(input);
         *self.control.current.write().unwrap() = Some(info);
         if let Some(c) = &clipboard {
             let control = self.control.clone();
