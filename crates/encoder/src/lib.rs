@@ -1,7 +1,7 @@
 //! FFmpeg-based `EncoderProvider`: NVENC, AMF, QuickSync and x264 behind one
 //! low-latency configuration, with zero-copy GPU input where the platform
 //! offers it (CUDA on Linux, D3D11 on Windows) and system memory otherwise;
-//! Opus or AAC for sound.
+//! H.264 everywhere, HEVC and AV1 with NVENC; Opus or AAC for sound.
 
 mod audio;
 
@@ -13,7 +13,7 @@ mod ffmpeg;
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ff;
-use remothing_core::encode::{AudioDecoder, AudioEncoder, EncoderProvider, EncoderRequest, VideoEncoder};
+use remothing_core::encode::{AudioDecoder, AudioEncoder, Codec, EncoderProvider, EncoderRequest, VideoEncoder};
 
 use crate::ffmpeg::{FfmpegEncoder, InputKind};
 
@@ -37,12 +37,19 @@ impl Backend {
         }
     }
 
-    pub(crate) fn ffmpeg_name(self) -> &'static str {
-        match self {
-            Backend::Nvenc => "h264_nvenc",
-            Backend::Amf => "h264_amf",
-            Backend::Qsv => "h264_qsv",
-            Backend::X264 => "libx264",
+    /// The FFmpeg encoder for `codec`, None when this backend does not
+    /// offer it here. HEVC and AV1 only with NVENC: AMF and QuickSync have
+    /// them too, but their no-reorder output and rate control were never
+    /// checked (no such GPU here); x264 is H.264 only.
+    pub(crate) fn ffmpeg_name(self, codec: Codec) -> Option<&'static str> {
+        match (self, codec) {
+            (Backend::Nvenc, Codec::H264) => Some("h264_nvenc"),
+            (Backend::Nvenc, Codec::Hevc) => Some("hevc_nvenc"),
+            (Backend::Nvenc, Codec::Av1) => Some("av1_nvenc"),
+            (Backend::Amf, Codec::H264) => Some("h264_amf"),
+            (Backend::Qsv, Codec::H264) => Some("h264_qsv"),
+            (Backend::X264, Codec::H264) => Some("libx264"),
+            _ => None,
         }
     }
 
@@ -80,17 +87,22 @@ impl Backend {
     }
 }
 
+/// FFmpeg encoder options (name, value).
+type Options = Vec<(String, String)>;
+
 pub struct FfmpegEncoders {
-    available: Vec<Backend>,
-    /// Compiled-in backends that failed the startup probe, with the reason.
+    /// Backends and codecs that passed the startup probe, in preference order.
+    available: Vec<(Backend, Codec)>,
+    /// Compiled-in backends and codecs that failed the startup probe, with the reason.
     unavailable: Vec<(String, String)>,
-    /// Option overrides applied over a backend's defaults.
-    overrides: Vec<(Backend, Vec<(String, String)>)>,
+    /// Option overrides applied over a backend's defaults for one codec.
+    overrides: Vec<(Backend, Codec, Options)>,
 }
 
 impl FfmpegEncoders {
-    /// Probes every compiled-in backend once (small host-memory encoder), so
-    /// status and fallback choices reflect what this machine can actually run.
+    /// Probes every compiled-in backend and codec once (small host-memory
+    /// encoder), so status and fallback choices reflect what this machine
+    /// can actually run (AV1 needs a recent GPU, for one).
     pub fn new() -> Result<Self> {
         ff::init()?;
         // Missing vendor runtimes are expected while probing; the reason is kept per backend.
@@ -98,12 +110,15 @@ impl FfmpegEncoders {
         let mut available = Vec::new();
         let mut unavailable = Vec::new();
         for b in ALL {
-            if ff::encoder::find_by_name(b.ffmpeg_name()).is_none() {
-                continue;
-            }
-            match FfmpegEncoder::open(b, InputKind::Host, (256, 256), (256, 256), None, 1_000_000, &[]) {
-                Ok(_) => available.push(b),
-                Err(e) => unavailable.push((b.name().to_string(), format!("{e:#}"))),
+            for codec in Codec::ALL {
+                let Some(name) = b.ffmpeg_name(codec) else { continue };
+                if ff::encoder::find_by_name(name).is_none() {
+                    continue;
+                }
+                match FfmpegEncoder::open(b, codec, InputKind::Host, (256, 256), (256, 256), None, 1_000_000, &[]) {
+                    Ok(_) => available.push((b, codec)),
+                    Err(e) => unavailable.push((format!("{} {}", b.name(), codec.name()), format!("{e:#}"))),
+                }
             }
         }
         ff::util::log::set_level(ff::util::log::Level::Error);
@@ -111,25 +126,37 @@ impl FfmpegEncoders {
     }
 
     /// Replaces the option overrides of `backend` ("nvenc", "amf", "qsv",
-    /// "x264") for encoders created afterwards: FFmpeg encoder options set
-    /// over the low-latency defaults (tuning experiments, benchmarks).
-    pub fn set_options(&mut self, backend: &str, opts: &[(String, String)]) -> Result<()> {
+    /// "x264") for `codec`, for encoders created afterwards: FFmpeg encoder
+    /// options set over the low-latency defaults (tuning experiments,
+    /// benchmarks).
+    pub fn set_options(&mut self, backend: &str, codec: Codec, opts: &[(String, String)]) -> Result<()> {
         let b = ALL.into_iter().find(|b| b.name() == backend).ok_or_else(|| anyhow!("unknown backend {backend}"))?;
-        if let Some(codec) = ff::encoder::find_by_name(b.ffmpeg_name()) {
+        let name = b.ffmpeg_name(codec).ok_or_else(|| anyhow!("{backend} has no {} encoder", codec.name()))?;
+        if let Some(encoder) = ff::encoder::find_by_name(name) {
             // FFmpeg silently ignores unknown options.
-            if let Some((k, _)) = opts.iter().find(|(k, _)| !ffmpeg::has_option(codec, k)) {
-                return Err(anyhow!("{} has no option {k:?}", b.ffmpeg_name()));
+            if let Some((k, _)) = opts.iter().find(|(k, _)| !ffmpeg::has_option(encoder, k)) {
+                return Err(anyhow!("{name} has no option {k:?}"));
             }
         }
-        self.overrides.retain(|(o, _)| *o != b);
-        self.overrides.push((b, opts.to_vec()));
+        self.overrides.retain(|(o, c, _)| (*o, *c) != (b, codec));
+        self.overrides.push((b, codec, opts.to_vec()));
         Ok(())
     }
 }
 
 impl EncoderProvider for FfmpegEncoders {
     fn backends(&self) -> Vec<&'static str> {
-        self.available.iter().map(|b| b.name()).collect()
+        let mut names: Vec<&'static str> = Vec::new();
+        for (b, _) in &self.available {
+            if !names.contains(&b.name()) {
+                names.push(b.name());
+            }
+        }
+        names
+    }
+
+    fn codecs(&self) -> Vec<Codec> {
+        Codec::ALL.into_iter().filter(|c| self.available.iter().any(|(_, a)| a == c)).collect()
     }
 
     fn unavailable(&self) -> Vec<(String, String)> {
@@ -137,7 +164,7 @@ impl EncoderProvider for FfmpegEncoders {
     }
 
     fn create(&self, req: &EncoderRequest) -> Result<Box<dyn VideoEncoder>> {
-        let mut order = self.available.clone();
+        let mut order: Vec<Backend> = self.available.iter().filter(|(_, c)| *c == req.codec).map(|(b, _)| *b).collect();
         if let Some(p) = req.preferred.as_deref() {
             if let Some(i) = order.iter().position(|b| b.name() == p) {
                 let b = order.remove(i);
@@ -146,9 +173,10 @@ impl EncoderProvider for FfmpegEncoders {
         }
         let mut skipped = Vec::new();
         for backend in order {
-            let opts = self.overrides.iter().find(|(b, _)| *b == backend).map_or(&[][..], |(_, o)| o);
+            let opts = self.overrides.iter().find(|(b, c, _)| (*b, *c) == (backend, req.codec)).map_or(&[][..], |(_, _, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {
-                match FfmpegEncoder::open(backend, kind, (req.width, req.height), req.output, req.surface.as_ref(), req.max_bitrate, opts) {
+                let (input, surface) = ((req.width, req.height), req.surface.as_ref());
+                match FfmpegEncoder::open(backend, req.codec, kind, input, req.output, surface, req.max_bitrate, opts) {
                     Ok(mut e) => {
                         if !skipped.is_empty() {
                             e.fallback = Some(skipped.join("; "));
@@ -160,7 +188,7 @@ impl EncoderProvider for FfmpegEncoders {
                 }
             }
         }
-        Err(anyhow!("no H.264 encoder available: {}", skipped.join("; ")))
+        Err(anyhow!("no {} encoder available: {}", req.codec.name(), skipped.join("; ")))
     }
 
     fn audio(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioEncoder>> {

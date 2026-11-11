@@ -61,6 +61,15 @@ export const FLAG_VIDEO = 1;
 export const FLAG_KEY = 2;
 /** The screen is in motion mode (what changes is shown from video). */
 export const FLAG_MOTION = 4;
+/** Bits 3-4 of FRAME flags: the video codec, a key of CODECS (see proto.rs FLAG_CODEC_SHIFT). */
+export const FLAG_CODEC_SHIFT = 3;
+export const FLAG_CODEC_MASK = 3;
+/** Video codecs by their number in FRAME flags: the server's name and the WebCodecs string (levels for 4K at 120 Hz; H.264's 5.1 is what it supports). */
+export const CODECS: Record<number, { name: string; config: string }> = {
+  0: { name: 'h264', config: 'avc1.640033' },
+  1: { name: 'hevc', config: 'hev1.1.6.L156.B0' },
+  2: { name: 'av1', config: 'av01.0.14M.08' },
+};
 
 /** One piece of a FRAME as a WebTransport datagram (see proto.rs S_PIECE). */
 export const S_PIECE = 12;

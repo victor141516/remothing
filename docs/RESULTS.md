@@ -336,6 +336,66 @@ two-pass gives tighter frames on slow links (worst frame at 18 Mbit/s from
 0.7 ms of encode at the median and 4 ms at p99, which the fast links pay in
 frame rate and latency. Kept the current settings.
 
+## Video codecs
+
+**Quality per byte.** Five seconds of `rt-testapp` recorded losslessly in
+the container (1920x1080, 60 fps), encoded with our NVENC settings at
+constant QP; PSNR (Y) and SSIM against the recording:
+
+| codec, QP | `full`: KiB/frame, PSNR, SSIM | `scroll`: KiB/frame, PSNR, SSIM |
+|---|---|---|
+| H.264 20 | 10, 52.6 dB, 0.9945 | 8, 46.9 dB, 0.99955 |
+| H.264 24 | 6, 51.8 dB, 0.9929 | 6, 43.3 dB, 0.99915 |
+| HEVC 20 | 10, 52.2 dB, 0.9945 | 7, 48.8 dB, 0.99953 |
+| HEVC 24 | 6, 51.3 dB, 0.9929 | 6, 46.2 dB, 0.99929 |
+| AV1 60 | 4, 52.0 dB, 0.9945 | 5, 47.4 dB, 0.99934 |
+| AV1 80 | 3, 51.5 dB, 0.9941 | 4, 44.5 dB, 0.99847 |
+| AV1 100 | 2, 50.8 dB, 0.9937 | 4, 42.2 dB, 0.99738 |
+
+AV1's QP floor is 60 (H.264 and HEVC: 20).
+
+**Streaming.** Linux bench container (NVENC through CUDA), `rt-testapp` at
+165 fps, `transport=auto`, the client restricted with `?codec=`, 10 s runs;
+`total` = capture→draw p50 / p99 / max, decode = receive → picture p50 /
+p99, encode p50 / p99:
+
+| profile | scenario | H.264 | HEVC | AV1 |
+|---|---|---|---|---|
+| clean (2 runs) | full | 179-181 fps, 11 / 20-22 / 24-39, 9.9 KB/frame, decode 0.4 / 2.3-2.8, encode 2.4 / 4.5 | 164-165 fps, 9-10 / 17-18 / 20-23, 11.0 KB, decode 0.5-0.6 / 1.1-1.3, encode 2.0 / 4.1-4.3 | 178-191 fps, 9-10 / 19-20 / 22-23, 4.4-4.7 KB, decode 0.4 / 1.4-2.2, encode 1.9-2.0 / 4.1 |
+| 18M/40ms (2 runs) | full | 158-160 fps, 42-43 / 56-58 / 78-79 | 149-151 fps, 46-47 / 62-69 / 102-106 | 173-175 fps, 31-32 / 40 / 43-45 |
+| mobile 6M/50ms +-10, 0.5 % loss (2 runs) | full | 50-51 fps, 79-83 / 138-165 / 156-199 | 51-53 fps, 78-85 / 152-172 / 184-296 | 80-81 fps, 67 / 151-156 / 163-222 |
+| 50M/20ms | scroll | 164 fps, 23 / 34 / 37, 4.0 KB | 163 fps, 23 / 32 / 41, 3.4 KB | 168 fps, 22 / 32 / 37, 1.8 KB |
+| mobile 6M/50ms +-10, 0.5 % loss | scroll | 151 fps, 63 / 191 / 328 | 147 fps, 63 / 222 / 293 | 164 fps, 57 / 297 / 399 |
+
+AV1 sends half the bytes or less at the same quality: on the 18 Mbit/s
+link the median drops by 11 ms and the worst frame by half, on the mobile
+profile the frame rate rises by 60 %. The decode medians stay far below
+a frame interval for all three (no picture held back for reordering). The
+single mobile `scroll` run per codec is within that profile's spread seen
+before (p99 141-315 ms).
+
+**Split-frame encoding** (Windows, `examples/d3d11_bench`, D3D11 input,
+RTX 4080 SUPER, 800 frames; encode p50 / p99 ms, KiB/frame):
+
+| codec | size | scene | driver's choice (`auto`) | forced |
+|---|---|---|---|---|
+| AV1 | 3840x2160 | plasma | 2.45 / 10.38, 17.6 (`disabled`: 4.16 / 12.08) | 2.46 / 10.13, 17.6 |
+| AV1 | 3168x1440 | plasma | 2.59 / 10.34, 9.5 | 1.58 / 7.88, 9.7 |
+| AV1 | 3168x1440 | window | 2.55 / 10.80, 14.5 | 1.62 / 9.30, 16.3 |
+| AV1 | 1920x1080 | plasma | 1.34 / 8.19, 4.5 | 0.91 / 6.69, 4.6 |
+| AV1 | 1920x1080 | window | 1.46 / 9.75, 14.9 | 1.01 / 8.62, 16.9 |
+| HEVC | 3840x2160 | plasma | 3.01 / 11.65, 40.5 (`disabled`: 4.82 / 11.72) | 3.00 / 9.67, 40.5 |
+| HEVC | 3168x1440 | plasma | 2.66 / 11.07, 21.5 | 1.67 / 8.81, 21.7 |
+| HEVC | 3168x1440 | window | 2.51 / 10.11, 27.4 | 1.61 / 9.54, 28.7 |
+| HEVC | 1920x1080 | plasma | 1.42 / 8.54, 10.1 | 0.97 / 7.69, 10.2 |
+| HEVC | 1920x1080 | window | 1.46 / 10.12, 25.8 | 1.03 / 8.36, 26.9 |
+| H.264 (no split) | 3168x1440 | plasma | 3.39 / 10.88, 21.2 | |
+
+Streams of both codecs dumped from the Windows encoder (`--dump`, split
+forced) decode without errors (200/200 frames, dav1d and FFmpeg's HEVC
+decoder). Decoded and compared with the source, HEVC (split disabled or
+the driver's choice) has the MAE of H.264 (1.4-1.8).
+
 ## Sound
 
 A 3 s sine played by a program of the session, received in headless

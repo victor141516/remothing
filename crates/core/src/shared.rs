@@ -757,7 +757,8 @@ impl Shared {
             codec.video_slot = (codec.video_slot + min).max(now.saturating_sub(2 * min));
             codec.next_video_us = now + paced;
             key = v.key;
-            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 };
+            let wire = codec.encoder.as_ref().expect("loaded implies encoder").codec().wire();
+            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 } | wire << proto::FLAG_CODEC_SHIFT;
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
             msg.extend_from_slice(&v.data);
         }

@@ -15,8 +15,8 @@ use crate::config::{constant_time_eq, hash_password, random_token, verify_passwo
 use crate::shared::Tuning;
 
 const COOKIE: &str = "rt_admin";
-/// Video codecs the encoders and the browser client implement.
-const CODECS: [&str; 1] = ["h264"];
+/// Values of the codec setting (see `EncoderSettings::codec`).
+const CODECS: [&str; 4] = ["auto", "h264", "hevc", "av1"];
 
 pub fn router() -> Router<Arc<App>> {
     Router::new()

@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::app::App;
 use crate::config::constant_time_eq;
-use crate::encode::EncoderRequest;
+use crate::encode::{Codec, EncoderRequest};
 use crate::mic;
 use crate::pacer::Pacer;
 use crate::platform::{Button, ThreadRole};
@@ -88,6 +88,10 @@ const CLIENT_SILENCE: Duration = Duration::from_secs(5);
 pub struct TokenQuery {
     #[serde(default)]
     token: String,
+    /// Stream socket: codecs besides H.264 the client decodes in hardware,
+    /// comma-separated ("hevc,av1").
+    #[serde(default)]
+    codecs: String,
 }
 
 /// C_MIC_INFO.
@@ -120,7 +124,9 @@ pub async fn stream_handler(
     if !authorized(&app, &q) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.write_buffer_size(0).on_upgrade(move |socket| session(socket, app, addr))
+    let mut codecs = vec![Codec::H264];
+    codecs.extend(q.codecs.split(',').filter_map(Codec::from_name).filter(|c| *c != Codec::H264));
+    ws.write_buffer_size(0).on_upgrade(move |socket| session(socket, app, addr, codecs))
 }
 
 /// Input gets its own socket so events never queue behind frame data or ACKs.
@@ -200,6 +206,8 @@ struct ClientLink {
     held: Mutex<Held>,
     /// How the client shows the picture (C_VIEW).
     view: Mutex<View>,
+    /// Codecs the client decodes (H.264 always; others in hardware).
+    codecs: Vec<Codec>,
 }
 
 /// The picture's size in the client's window, in device pixels, and the
@@ -211,7 +219,7 @@ struct View {
     hz: u32,
 }
 
-async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
+async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec<Codec>) {
     let (mut tx, mut rx) = socket.split();
     let link = Arc::new(ClientLink {
         id: app.shared.new_client_id(),
@@ -229,6 +237,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr) {
         stop: AtomicBool::new(false),
         held: Mutex::new(Held::default()),
         view: Mutex::new(View::default()),
+        codecs,
     });
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<PeerEvent>();
@@ -784,7 +793,8 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     app.platform.thread_priority(ThreadRole::Stream);
     let shared = &app.shared;
     let mut codec = ClientCodec::new(app.settings.read().unwrap().tuning);
-    let mut encoder_pref = String::new();
+    // Encoder settings the current encoder was made with: backend preference and codec.
+    let mut encoder_conf = (String::new(), String::new());
     let mut size = (0, 0);
     let mut need_key = true;
     let mut video_cap = VideoCap::default();
@@ -840,12 +850,13 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         {
             let s = app.settings.read().unwrap();
             codec.tuning = s.tuning;
-            if s.encoder.preferred != encoder_pref && size != (0, 0) {
-                // Preference changed at runtime: rebuild the encoder.
-                encoder_pref = s.encoder.preferred.clone();
+            let conf = (s.encoder.preferred.clone(), s.encoder.codec.clone());
+            if conf != encoder_conf && size != (0, 0) {
+                // Changed at runtime: rebuild the encoder.
+                encoder_conf = conf;
                 drop(s);
                 video_cap.reset(video_rate(model, &codec.tuning));
-                create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
                 shared.drop_video(link.id);
                 need_key = true;
             }
@@ -887,7 +898,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 app.telemetry.event(link.id, &text);
                 encoded = want;
                 room_since = 0;
-                create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
+                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
                 // The new encoder's input is blank: everything is copied in again.
                 shared.encoder_reset(link.id);
                 need_key = true;
@@ -935,9 +946,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 Ok(Pull::Reset { geometry: g, first_seq }) => {
                     size = (g.width, g.height);
                     encoded = size;
-                    encoder_pref = app.settings.read().unwrap().encoder.preferred.clone();
+                    let s = app.settings.read().unwrap();
+                    encoder_conf = (s.encoder.preferred.clone(), s.encoder.codec.clone());
+                    drop(s);
                     video_cap.reset(video_rate(model, &codec.tuning));
-                    create_encoder(app, link.id, &mut codec, size, encoded, &encoder_pref, video_cap.bps);
+                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, video_cap.bps);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
@@ -1032,12 +1045,42 @@ fn video_rate(link: Link, tuning: &Tuning) -> f64 {
     }
 }
 
+/// Codecs `auto` picks from, best first, among those the client decodes
+/// and an encoder here encodes.
+const AUTO_CODECS: [Codec; 3] = [Codec::Av1, Codec::Hevc, Codec::H264];
+
+/// The codec for a client: the configured one when the client decodes it
+/// and an encoder here encodes it, else H.264, which every client decodes;
+/// `auto` (or anything else) the first usable of AUTO_CODECS.
+fn pick_codec(setting: &str, decodable: &[Codec], encodable: &[Codec]) -> Codec {
+    let usable = |c: &Codec| decodable.contains(c) && encodable.contains(c);
+    match Codec::from_name(setting) {
+        Some(c) if usable(&c) => c,
+        Some(_) => Codec::H264,
+        None => AUTO_CODECS.into_iter().find(usable).unwrap_or(Codec::H264),
+    }
+}
+
 /// A new encoder for `size` (the display's), encoding `output` (smaller in
-/// motion mode for a small client, see `video_size`).
-fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, size: (u32, u32), output: (u32, u32), pref: &str, max_bitrate: u64) {
+/// motion mode for a small client, see `video_size`), with the backend
+/// preference and codec of `conf`. H.264 when the chosen codec cannot be
+/// opened.
+fn create_encoder(
+    app: &App,
+    link: &ClientLink,
+    codec: &mut ClientCodec,
+    size: (u32, u32),
+    output: (u32, u32),
+    conf: &(String, String),
+    max_bitrate: u64,
+) {
+    let id = link.id;
     codec.encoder = None;
     app.shared.set_gpu_input(id, false);
-    let req = EncoderRequest {
+    let encoders = app.platform.encoders();
+    let (pref, setting) = conf;
+    let mut req = EncoderRequest {
+        codec: pick_codec(setting, &link.codecs, &encoders.codecs()),
         width: size.0,
         height: size.1,
         output,
@@ -1045,7 +1088,15 @@ fn create_encoder(app: &App, id: u64, codec: &mut ClientCodec, size: (u32, u32),
         surface: app.shared.surface(),
         max_bitrate,
     };
-    match app.platform.encoders().create(&req) {
+    let mut created = encoders.create(&req);
+    if let Err(e) = &created {
+        if req.codec != Codec::H264 {
+            app.telemetry.event(id, &format!("{} encoder failed, using h264: {e:#}", req.codec.name()));
+            req.codec = Codec::H264;
+            created = encoders.create(&req);
+        }
+    }
+    match created {
         Ok(e) => {
             app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
             app.shared.set_gpu_input(id, e.gpu_input());
@@ -1135,5 +1186,19 @@ mod tests {
         assert_eq!(video_size(DISPLAY, view(1280, 720, 144), 30_000_000), (1920, 1080));
         // A window wider in proportion than the display decides by its width.
         assert_eq!(video_size(DISPLAY, view(3000, 1000, 60), 1_000_000), (3000, 1688));
+    }
+
+    #[test]
+    fn codec_is_the_configured_one_only_when_both_sides_have_it() {
+        use Codec::*;
+        let client = [H264, Hevc];
+        let server = [H264, Hevc, Av1];
+        // auto: the best both have, H.264 when the client offers nothing else.
+        assert_eq!(pick_codec("auto", &client, &server), Hevc);
+        assert_eq!(pick_codec("auto", &[H264, Av1], &[H264, Hevc]), H264);
+        // Configured: kept when both have it, H.264 otherwise (not another one).
+        assert_eq!(pick_codec("h264", &client, &server), H264);
+        assert_eq!(pick_codec("av1", &client, &server), H264);
+        assert_eq!(pick_codec("hevc", &[H264, Hevc, Av1], &[H264, Av1]), H264);
     }
 }

@@ -1,7 +1,8 @@
 # remothing
 
 Low-latency desktop / application streaming to a browser. Static content is
-sent losslessly (pixel-exact), moving areas automatically switch to H.264 and
+sent losslessly (pixel-exact), moving areas automatically switch to video
+(AV1, HEVC or H.264, the best the browser decodes in hardware) and
 are refined back to lossless when they stop. One native binary per platform.
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -114,7 +115,12 @@ as root, else `~/.config/remothing/config.toml`; Windows:
 Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
 below it), `tuning.max_lossless_frame_kb`,
-`encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `input.keyboard_layout`,
+`encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `encoder.codec`
+(`auto`: AV1, HEVC or H.264, the first the client decodes in hardware and
+the server encodes; `h264|hevc|av1`: that one, H.264 for a client without
+it; a config written before codecs could be chosen says `h264`: set
+`auto` to get the others),
+`input.keyboard_layout`,
 `auth.*`, and on Linux `[platform]`:
 `x11_displays = [":0"]`, `session_command = "openbox-session"`,
 `virtual_on_start = "1920x1080"`.
@@ -150,7 +156,8 @@ shorter path than the WebSocket's (e.g. the page goes through Tailscale
 Funnel or a reverse proxy), frames and input move to a WebRTC data
 channel; otherwise, or when UDP is blocked or stalls, everything stays on
 the WebSocket. `?transport=ws`, `?transport=webrtc` or `?transport=wt` in
-the client URL overrides the choice.
+the client URL overrides the choice. `?codec=h264|hevc|av1` offers the
+server only that codec (H.264 is always possible).
 
 ## Latency benchmark
 

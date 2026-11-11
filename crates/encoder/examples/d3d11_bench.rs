@@ -4,7 +4,7 @@
 //! capture, nothing drawn on screen), feeds it to encoders from the
 //! `EncoderProvider` the way the core does (tile-row rects of changed 64x64
 //! tiles), with GPU input (`load_gpu`) or system-memory input (`load_cpu`),
-//! decodes every access unit with FFmpeg's H.264 decoder and compares the
+//! decodes every access unit with FFmpeg's software decoder and compares the
 //! last decoded picture with the source.
 //!
 //! `cargo run --release -p remothing-encoder --features static --example d3d11_bench -- [flags]`
@@ -31,6 +31,10 @@
 //! - `--scale F`: encode at F times the size (as motion mode does for a
 //!   small client: GPU video processor or CPU scaler); no MAE (the decoded
 //!   picture is smaller than the source)
+//! - `--codec C`: `h264` (default), `hevc` or `av1` (AV1 needs `--no-check`
+//!   unless FFmpeg has libdav1d); `--set` applies to it
+//! - `--dump DIR`: writes every case's stream to DIR (`.h264`/`.hevc` Annex
+//!   B, `.obu` AV1 low-overhead OBUs), to check it with other decoders
 
 #[cfg(not(windows))]
 fn main() {
@@ -52,7 +56,7 @@ mod bench {
     use ffmpeg_next as ff;
     use gpu_interop::d3d11::D3D11Frame;
     use parking_lot::lock_api::RawMutex as _;
-    use remothing_core::encode::{EncoderProvider, EncoderRequest, VideoEncoder};
+    use remothing_core::encode::{Codec, EncoderProvider, EncoderRequest, VideoEncoder};
     use remothing_core::geom::Rect;
     use remothing_core::platform::GpuSurface;
     use remothing_encoder::FfmpegEncoders;
@@ -106,6 +110,8 @@ mod bench {
         gpu_priority: Option<i32>,
         check: bool,
         scale: f64,
+        codec: Codec,
+        dump: Option<std::path::PathBuf>,
     }
 
     fn args() -> Result<Args> {
@@ -122,6 +128,8 @@ mod bench {
             gpu_priority: None,
             check: true,
             scale: 1.0,
+            codec: Codec::H264,
+            dump: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -168,6 +176,11 @@ mod bench {
                 "--gpu-priority" => a.gpu_priority = Some(value()?.parse()?),
                 "--no-check" => a.check = false,
                 "--scale" => a.scale = value()?.parse()?,
+                "--codec" => {
+                    let v = value()?;
+                    a.codec = Codec::from_name(&v).with_context(|| format!("unknown codec {v}"))?;
+                }
+                "--dump" => a.dump = Some(value()?.into()),
                 _ => bail!("unknown argument {arg} (see the doc comment of examples/d3d11_bench.rs)"),
             }
         }
@@ -518,8 +531,13 @@ mod bench {
     }
 
     impl Check {
-        fn new() -> Result<Self> {
-            let codec = ff::decoder::find(ff::codec::Id::H264).context("no h264 decoder")?;
+        fn new(codec: Codec) -> Result<Self> {
+            let codec = match codec {
+                Codec::H264 => ff::decoder::find(ff::codec::Id::H264).context("no h264 decoder")?,
+                Codec::Hevc => ff::decoder::find(ff::codec::Id::HEVC).context("no hevc decoder")?,
+                // FFmpeg's own AV1 decoder needs a hardware decoder underneath.
+                Codec::Av1 => ff::decoder::find_by_name("libdav1d").context("no libdav1d in this FFmpeg: --no-check")?,
+            };
             let mut ctx = ff::codec::context::Context::new_with_codec(codec);
             ctx.set_threading(ff::threading::Config { kind: ff::threading::Type::Frame, ..Default::default() });
             Ok(Self { dec: ctx.decoder().video()?, decoded: 0, last: ff::frame::Video::empty() })
@@ -773,6 +791,8 @@ mod bench {
         dupl: Option<&'a str>,
         dupl_poll: bool,
         check: bool,
+        /// File the encoded stream goes to.
+        dump: Option<std::path::PathBuf>,
     }
 
     #[derive(Default)]
@@ -789,6 +809,7 @@ mod bench {
         let surface: GpuSurface = c.frame.clone();
         let mut st = EncodeStats::default();
         let start = Instant::now();
+        let mut stream = Vec::new();
         for n in 0..c.frames {
             if let Some(p) = c.pace {
                 let due = start + p * n;
@@ -825,12 +846,18 @@ mod bench {
             if let Some(check) = check {
                 check.feed(&out.data)?;
             }
+            if c.dump.is_some() {
+                stream.extend_from_slice(&out.data);
+            }
+        }
+        if let Some(path) = &c.dump {
+            std::fs::write(path, &stream).with_context(|| format!("write {}", path.display()))?;
         }
         Ok(st)
     }
 
     fn run_case(c: &Case, enc: &mut dyn VideoEncoder, src: &mut Source) -> Result<String> {
-        let mut check = if c.check { Some(Check::new()?) } else { None };
+        let mut check = if c.check { Some(Check::new(enc.codec())?) } else { None };
         let stop = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let (st, sim, dupl) = std::thread::scope(|s| {
@@ -935,6 +962,7 @@ mod bench {
             for backend in ["nvenc", "amf", "qsv", "x264"] {
                 // Uncapped: the encoder clamps to its highest supported cap.
                 let req = EncoderRequest {
+                    codec: args.codec,
                     width: w,
                     height: h,
                     output: (w, h),
@@ -950,8 +978,9 @@ mod bench {
                 let mut src = Source::new(&gpu, scene, w, h)?;
                 for &(backend, gpu_input) in &args.encoders {
                     for (label, opts) in &args.configs {
-                        provider.set_options("nvenc", opts)?;
+                        provider.set_options("nvenc", args.codec, opts)?;
                         let req = EncoderRequest {
+                            codec: args.codec,
                             width: w,
                             height: h,
                             output: ((w as f64 * args.scale) as u32 & !1, (h as f64 * args.scale) as u32 & !1),
@@ -974,6 +1003,15 @@ mod bench {
                             dupl: args.dupl.as_deref(),
                             dupl_poll: args.dupl_poll,
                             check: args.check && args.scale == 1.0,
+                            dump: args.dump.as_ref().map(|dir| {
+                                let ext = match args.codec {
+                                    Codec::H264 => "h264",
+                                    Codec::Hevc => "hevc",
+                                    Codec::Av1 => "obu",
+                                };
+                                let label: String = label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                                dir.join(format!("{}-{w}x{h}-{}-{label}.{ext}", args.codec.name(), scene.name()))
+                            }),
                         };
                         let row = run_case(&case, e.as_mut(), &mut src)?;
                         println!("{prefix}{row}");

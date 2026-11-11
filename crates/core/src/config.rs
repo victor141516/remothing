@@ -40,6 +40,9 @@ pub struct ServerSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EncoderSettings {
+    /// "auto" (the best codec the client decodes in hardware: AV1, HEVC,
+    /// then H.264) or "h264", "hevc", "av1" (H.264 for a client that cannot
+    /// decode it).
     pub codec: String,
     /// "auto" or a backend name ("nvenc", "amf", "qsv", "x264").
     pub preferred: String,
@@ -151,7 +154,7 @@ impl Default for ServerSettings {
 
 impl Default for EncoderSettings {
     fn default() -> Self {
-        Self { codec: "h264".into(), preferred: "auto".into() }
+        Self { codec: "auto".into(), preferred: "auto".into() }
     }
 }
 

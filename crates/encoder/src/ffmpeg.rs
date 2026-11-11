@@ -1,11 +1,11 @@
-//! One FFmpeg H.264 encoder instance configured for minimum latency:
+//! One FFmpeg video encoder instance configured for minimum latency:
 //! no B-frames, no lookahead, keyframes only on demand, output per input frame.
 
 use anyhow::{anyhow, Context, Result};
 use ff::format::Pixel;
 use ff::software::scaling;
 use ffmpeg_next as ff;
-use remothing_core::encode::{Encoded, VideoEncoder};
+use remothing_core::encode::{Codec, Encoded, VideoEncoder};
 use remothing_core::geom::Rect;
 use remothing_core::platform::GpuSurface;
 
@@ -101,8 +101,17 @@ const RC_FPS: i32 = 60;
 const MIN_BITRATE: u64 = 500_000;
 const MAX_BITRATE: u64 = 200_000_000;
 /// Quality floor: the QP of the former constant-QP mode, so an unconstrained
-/// cap yields the same pictures and no wasted bits.
-const MIN_QP: &str = "20";
+/// cap yields the same pictures and no wasted bits. AV1's scale runs to 255:
+/// measured at constant QP on recordings of rt-testapp (`full`, `scroll`),
+/// AV1 at 60 matches or beats the PSNR of H.264 at 20 with 40-60 % of the
+/// bytes (at 100 it lost 4.7 dB on scrolling text). HEVC at 20 matched
+/// H.264 at 20 on `full` and gained 1.9 dB on `scroll`.
+fn min_qp(codec: Codec) -> i32 {
+    match codec {
+        Codec::H264 | Codec::Hevc => 20,
+        Codec::Av1 => 60,
+    }
+}
 
 fn clamp_bitrate(bps: u64) -> u64 {
     bps.clamp(MIN_BITRATE, MAX_BITRATE)
@@ -121,6 +130,7 @@ pub(crate) struct FfmpegEncoder {
     started: std::time::Instant,
     bitrate: u64,
     backend: Backend,
+    codec: Codec,
     kind: InputKind,
     pub(crate) fallback: Option<String>,
 }
@@ -130,8 +140,10 @@ pub(crate) struct FfmpegEncoder {
 unsafe impl Send for FfmpegEncoder {}
 
 impl FfmpegEncoder {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         backend: Backend,
+        codec: Codec,
         kind: InputKind,
         input: (u32, u32),
         output: (u32, u32),
@@ -140,9 +152,9 @@ impl FfmpegEncoder {
         overrides: &[(String, String)],
     ) -> Result<Self> {
         let (width, height) = output;
-        let name = backend.ffmpeg_name();
-        let codec = ff::encoder::find_by_name(name).ok_or_else(|| anyhow!("{name} not compiled into FFmpeg"))?;
-        let mut enc = ff::codec::context::Context::new_with_codec(codec).encoder().video()?;
+        let name = backend.ffmpeg_name(codec).ok_or_else(|| anyhow!("{} has no {} encoder", backend.name(), codec.name()))?;
+        let encoder = ff::encoder::find_by_name(name).ok_or_else(|| anyhow!("{name} not compiled into FFmpeg"))?;
+        let mut enc = ff::codec::context::Context::new_with_codec(encoder).encoder().video()?;
         enc.set_width(width);
         enc.set_height(height);
         // Microsecond timestamps of the actual capture pace: x264's VBV follows them.
@@ -189,8 +201,14 @@ impl FfmpegEncoder {
         let _ = surface;
 
         let mut opts = ff::Dictionary::new();
-        // High profile: required for the constraint_set3 no-reorder signal (see mark_no_reorder).
-        opts.set("profile", "high");
+        match codec {
+            // Required for the constraint_set3 no-reorder signal (see mark_no_reorder).
+            Codec::H264 => opts.set("profile", "high"),
+            Codec::Hevc => opts.set("profile", "main"),
+            // av1_nvenc has no profile option (FFmpeg's generic one rejects
+            // names); Main, 8-bit 4:2:0, is what it encodes.
+            Codec::Av1 => {}
+        }
         match backend {
             Backend::Nvenc => {
                 // Measured (examples/d3d11_bench, 3168x1440, RTX 4080 S): p1/ull
@@ -204,8 +222,20 @@ impl FfmpegEncoder {
                 opts.set("zerolatency", "1");
                 opts.set("delay", "0");
                 opts.set("rc", "vbr");
-                opts.set("qmin", MIN_QP);
+                // The field, not the option: FFmpeg's generic qmin option
+                // stops at 69, NVENC's AV1 floor goes to 255.
+                // SAFETY: plain field of the not-yet-opened codec context.
+                unsafe { (*enc.as_mut_ptr()).qmin = min_qp(codec) };
                 opts.set("forced-idr", "1");
+                // Split-frame encoding (HEVC and AV1; FFmpeg 7.1 or later):
+                // the GPU's encoders take a strip each. Measured
+                // (d3d11_bench, RTX 4080 S, 1080p to 4K): the driver's "auto"
+                // splits only at 4K; forced cuts the median encode time by
+                // 35-40 % and p99 by 10-25 % at every size, for 1-12 % more
+                // bytes.
+                if codec != Codec::H264 && has_option(encoder, "split_encode_mode") {
+                    opts.set("split_encode_mode", "forced");
+                }
             }
             Backend::Amf => {
                 opts.set("usage", "ultralowlatency");
@@ -226,14 +256,14 @@ impl FfmpegEncoder {
                 // Capped CRF: constant quality within the VBV limits.
                 opts.set("preset", "ultrafast");
                 opts.set("tune", "zerolatency");
-                opts.set("crf", MIN_QP);
+                opts.set("crf", &min_qp(codec).to_string());
                 opts.set("forced-idr", "1");
             }
         }
         for (k, v) in overrides {
             opts.set(k, v);
         }
-        let enc = enc.open_as_with(codec, opts).with_context(|| format!("open {name}"))?;
+        let enc = enc.open_as_with(encoder, opts).with_context(|| format!("open {name}"))?;
         Ok(Self {
             enc,
             input,
@@ -242,6 +272,7 @@ impl FfmpegEncoder {
             started: std::time::Instant::now(),
             bitrate,
             backend,
+            codec,
             kind,
             fallback: None,
         })
@@ -250,7 +281,11 @@ impl FfmpegEncoder {
 
 impl VideoEncoder for FfmpegEncoder {
     fn name(&self) -> String {
-        format!("{} ({})", self.backend.name(), self.kind.label())
+        format!("{} {} ({})", self.backend.name(), self.codec.name(), self.kind.label())
+    }
+
+    fn codec(&self) -> Codec {
+        self.codec
     }
 
     fn fallback_reason(&self) -> Option<String> {
@@ -326,7 +361,9 @@ impl VideoEncoder for FfmpegEncoder {
             }
             out.key |= self.packet.is_key();
         }
-        if out.key {
+        // HEVC's parameter sets say how many pictures may be reordered
+        // (none here, without B-frames) and AV1 has no output reordering.
+        if out.key && self.codec == Codec::H264 {
             mark_no_reorder(&mut out.data);
         }
         Ok(out)

@@ -516,8 +516,7 @@ function renderSettings(s: Settings) {
 
   const bandwidth = h('input', { type: 'number', min: 0.1, step: 'any', required: true, value: s.tuning.bandwidth_mbps }) as HTMLInputElement;
   const maxKb = h('input', { type: 'number', min: 1, step: 1, required: true, value: s.tuning.max_lossless_frame_kb }) as HTMLInputElement;
-  // The server only builds the codecs it lists; with a single one there is nothing to choose.
-  const codec = h('select', { disabled: s.codecs.length < 2 }, ...s.codecs.map((c) => h('option', { value: c, selected: c === s.codec }, c))) as HTMLSelectElement;
+  const codec = h('select', {}, ...s.codecs.map((c) => h('option', { value: c, selected: c === s.codec }, c))) as HTMLSelectElement;
   const encoder = h(
     'select',
     {},
@@ -531,7 +530,7 @@ function renderSettings(s: Settings) {
     { class: 'grid' },
     ...field('Bandwidth cap', bandwidth, h('span', { class: 'dim' }, 'Mbit/s — upper bound; each client\'s measured link usually decides')),
     ...field('Max lossless frame', maxKb, h('span', { class: 'dim' }, 'KB — larger moving areas go to video')),
-    ...field('Codec', codec),
+    ...field('Codec', codec, h('span', { class: 'dim' }, 'auto: AV1, HEVC or H.264, the best each client decodes in hardware')),
     ...field('Encoder preference', encoder, h('span', { class: 'dim' }, s.encoders.length ? '' : 'no hardware/software encoder available')),
     ...field('Keyboard layout', layout, layouts),
     h('span'),

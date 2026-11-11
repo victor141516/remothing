@@ -32,7 +32,7 @@ flowchart LR
 | crate | role |
 |---|---|
 | `crates/core` | traits (`platform.rs`, `encode.rs`), tile diff + motion classification + policy (`shared.rs`), capture loop (`capture.rs`), wire protocol (`proto.rs`), transport (`stream.rs`), sound hub (`audio.rs`), admin API (`admin.rs`), config/auth (`config.rs`), embedded web assets, server wiring (`app.rs`) |
-| `crates/encoder` | FFmpeg `EncoderProvider`: H.264 NVENC / AMF / QuickSync / x264, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; Opus (libopus) or AAC for sound |
+| `crates/encoder` | FFmpeg `EncoderProvider`: H.264 with NVENC / AMF / QuickSync / x264, HEVC and AV1 with NVENC, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; Opus (libopus) or AAC for sound |
 | `crates/gpu-interop` | GPU surface types shared by capture and encoder of one platform (`D3D11Frame`) |
 | `crates/platform-linux` | Xvfb manager (simulated displays, shared-memory framebuffer + XDamage), real X11 displays (RandR outputs, XShm + XDamage), XTest input, XFixes cursor, X selections (clipboard), sound through PulseAudio / PipeWire / ALSA loopback helpers, NVML/DRM GPU info |
 | `crates/platform-windows` | DXGI Desktop Duplication (dirty + move rects, D3D11 texture), SendInput, cursor from duplication, clipboard, WASAPI loopback sound, desktop switching, Windows service supervising the session process |
@@ -75,10 +75,11 @@ flowchart LR
      becomes pixel-exact;
    - when a video tile changed, only the changed tiles are uploaded to the
      encoder input (CUDA surface / D3D11 texture copy / host frame) and one
-     H.264 access unit is encoded (no B-frames, no lookahead, IDR on demand,
-     SPS marked "no reordering" so browsers output each picture immediately).
+     access unit is encoded (no B-frames, no lookahead, IDR on demand; see
+     "Video codecs" for which codec and how each avoids output reordering).
      Video frames are paced to 70 % of the link and the encoder's bitrate
-     cap follows the same share (NVENC VBR / x264 CRF with VBV, QP floor 20);
+     cap follows the same share (NVENC VBR / x264 CRF with VBV, QP floor 20,
+     60 on AV1's scale);
      cap changes cost an IDR with NVENC, so they need a clear shift and hold
      3 s unless the link collapses.
 6. **Client** (`worker.ts`): frames are applied in order and atomically —
@@ -86,6 +87,41 @@ flowchart LR
    a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing,
    carrying the time the frame was held (receive → draw). zstd is decoded in
    WASM (`zstddec`, ~1.5 GB/s; pure-JS decoders stall the worker).
+
+## Video codecs
+
+H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
+
+- **The client's offer.** Before connecting, the worker asks WebCodecs
+  (`isConfigSupported`, `prefer-hardware`, 3840x2160, `optimizeForLatency`)
+  for HEVC and AV1 and lists those decoded in hardware in the stream
+  socket's query (`codecs=hevc,av1`); a software decoder would cost more
+  than the bits saved. H.264 is always possible. `?codec=` in the page URL
+  limits the offer to one codec (tests).
+- **The server's choice.** `encoder.codec = "auto"` takes the first of AV1,
+  HEVC, H.264 that the client offers and an encoder here encodes (probed
+  at start, per backend and codec); a named codec is used when both sides
+  have it, else H.264. A codec that fails to open falls back to H.264 (an
+  event in the log). Changing the setting rebuilds every client's encoder.
+  HEVC and AV1 come only from NVENC: AMF and QuickSync have them too, but
+  their output was never checked here.
+- **On the wire** the codec is in bits 3-4 of a FRAME's flags; a change
+  comes with a keyframe and the client reconfigures its decoder for it.
+  A decoder error on HEVC or AV1 (said to be supported, yet failing) drops
+  that codec from the client's offer and reconnects, so the server picks
+  again without it.
+- **No reordering.** Browsers hold a picture back when the stream allows
+  reordering. H.264 says it cannot through constraint_set3 in the SPS
+  (`mark_no_reorder`); HEVC's SPS carries the reorder count, zero without
+  B-frames; AV1 has no output reordering. Measured: decode p50 0.4 ms
+  (H.264, AV1) and 0.6 ms (HEVC) at 165 fps, far below a frame interval.
+- **Why AV1 first:** at the same quality (PSNR against a lossless
+  recording) it needs 40-60 % of H.264's bytes, which slow links turn into
+  frame rate and latency (docs/RESULTS.md, "Video codecs"). HEVC matched
+  H.264 on moving pictures and saved 10-15 % on text.
+- **Split-frame encoding** (HEVC, AV1; FFmpeg 7.1 or later, so Windows
+  here, not the Ubuntu 24.04 container's 6.1): forced on, the GPU's NVENC
+  units take a strip each; the driver's own choice splits only at 4K.
 
 ## Motion mode
 
@@ -466,7 +502,7 @@ flowchart LR
 
 Identical on every platform (`crates/core/src/proto.rs` ↔ `client/src/proto.ts`):
 HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
-tile layer switches + optional H.264), CURSOR (RGBA + hotspot, 0×0 = hidden),
+tile layer switches + optional video access unit), CURSOR (RGBA + hotspot, 0×0 = hidden),
 PONG, SIGNAL (WebRTC and WebTransport JSON), CHUNK (data-channel piece of a
 FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), CLIPBOARD
 (text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why

@@ -283,6 +283,8 @@ toWorker(
     probe: readBarcode,
     forceDc: transport === 'webrtc',
     wt: transport !== 'ws' && transport !== 'webrtc',
+    // `?codec=h264|hevc|av1`: offer only that codec (H.264 is always possible).
+    codec: params.get('codec'),
   },
   [offscreen],
 );

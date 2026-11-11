@@ -5,7 +5,43 @@ use anyhow::Result;
 use crate::geom::Rect;
 use crate::platform::GpuSurface;
 
+/// Video codecs of the lossy layer. The client says which it decodes in
+/// hardware; H.264 is always possible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    Hevc,
+    Av1,
+}
+
+impl Codec {
+    pub const ALL: [Codec; 3] = [Codec::H264, Codec::Hevc, Codec::Av1];
+
+    /// Name in the config, the client's offer and the admin UI.
+    pub fn name(self) -> &'static str {
+        match self {
+            Codec::H264 => "h264",
+            Codec::Hevc => "hevc",
+            Codec::Av1 => "av1",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Codec> {
+        Codec::ALL.into_iter().find(|c| c.name() == name)
+    }
+
+    /// Its number in FRAME flags (see `proto::FLAG_CODEC_SHIFT`).
+    pub fn wire(self) -> u8 {
+        match self {
+            Codec::H264 => 0,
+            Codec::Hevc => 1,
+            Codec::Av1 => 2,
+        }
+    }
+}
+
 pub struct EncoderRequest {
+    pub codec: Codec,
     /// Input size: the display's.
     pub width: u32,
     pub height: u32,
@@ -20,7 +56,9 @@ pub struct EncoderRequest {
 }
 
 pub struct Encoded {
-    /// H.264 Annex B access unit.
+    /// One access unit: Annex B (H.264, HEVC) or a temporal unit of
+    /// low-overhead OBUs (AV1); keyframes carry the parameter sets or the
+    /// sequence header.
     pub data: Vec<u8>,
     pub key: bool,
 }
@@ -28,10 +66,13 @@ pub struct Encoded {
 pub trait EncoderProvider: Send + Sync {
     /// Backends usable on this machine, in default preference order.
     fn backends(&self) -> Vec<&'static str>;
+    /// Codecs some usable backend encodes.
+    fn codecs(&self) -> Vec<Codec>;
     /// Backends present in the build but not usable here (name, reason), for status.
     fn unavailable(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// An encoder of `req.codec`, from the backends that encode it.
     fn create(&self, req: &EncoderRequest) -> Result<Box<dyn VideoEncoder>>;
     /// Sound encoder for the platform's audio format, the best codec this
     /// build has. Every codec tried goes to `tried` with its outcome.
@@ -41,8 +82,9 @@ pub trait EncoderProvider: Send + Sync {
 }
 
 pub trait VideoEncoder: Send {
-    /// Backend and input path, e.g. "nvenc (d3d11)".
+    /// Backend, codec and input path, e.g. "nvenc hevc (d3d11)".
     fn name(&self) -> String;
+    fn codec(&self) -> Codec;
     /// Why preferred backends were skipped, if any.
     fn fallback_reason(&self) -> Option<String>;
     /// True when input comes from the capture GPU surface (`load_gpu`).
@@ -52,7 +94,7 @@ pub trait VideoEncoder: Send {
     fn load_cpu(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) -> Result<()>;
     /// Copies `rects` of the capture surface into the encoder input (GPU-side).
     fn load_gpu(&mut self, surface: &GpuSurface, rects: &[Rect]) -> Result<()>;
-    /// Low-latency H.264, no reordering; `force_key` produces an IDR.
+    /// Low latency, no reordering; `force_key` produces an IDR.
     fn encode(&mut self, force_key: bool) -> Result<Encoded>;
     /// Caps the bitrate (bits/s) of following frames so video fits the link;
     /// quality stays at the encoder's fixed level whenever the cap allows.

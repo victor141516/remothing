@@ -18,8 +18,8 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO,
-  FRAME_HEADER_LEN,
+  C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
+  FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_SIGNAL, now,
 } from './proto';
@@ -28,7 +28,7 @@ import { WtPath, type WtOffer } from './wt';
 import { Recorder, type Batch } from './stats';
 
 export type ToWorker =
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean }
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null }
   | { type: 'report'; json: string }
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
@@ -108,6 +108,10 @@ const zstd = new ZSTDDecoder();
 /** Opened once the zstd decoder is ready. */
 let ws: WebSocket | undefined;
 let decoder: VideoDecoder;
+/** Codec the decoder is configured for (a key of CODECS). */
+let decoderCodec = 0;
+/** Codecs besides H.264 offered to the server: those decoded in hardware here. */
+let offered: string[] = [];
 let awaitingKey = true;
 const queue: Frame[] = [];
 const rec = new Recorder();
@@ -539,6 +543,23 @@ function onPong(v: DataView, received: number): number {
   return received - sentAt;
 }
 
+/**
+ * Codecs besides H.264 this browser decodes in hardware at 4K (a
+ * software decoder would cost more than the bits saved). `only`
+ * (`?codec=`): offer just that one.
+ */
+async function hardwareCodecs(only: string | null): Promise<string[]> {
+  const found: string[] = [];
+  for (const { name, config } of Object.values(CODECS)) {
+    if (name === 'h264' || (only !== null && only !== name)) continue;
+    const support = await VideoDecoder.isConfigSupported({
+      codec: config, codedWidth: 3840, codedHeight: 2160, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware',
+    }).catch(() => ({ supported: false }));
+    if (support.supported === true) found.push(name);
+  }
+  return found;
+}
+
 function createDecoder(): void {
   decoder = new VideoDecoder({
     output: (picture) => {
@@ -552,13 +573,28 @@ function createDecoder(): void {
       pump();
     },
     error: (e) => {
+      const name = CODECS[decoderCodec].name;
+      if (name !== 'h264') {
+        // Said to be supported, yet failing: not offered again, and a new
+        // session lets the server choose without it.
+        offered = offered.filter((c) => c !== name);
+        sendText(C_EVENT, `decoder error with ${name}, no longer offered: ${e.message}`);
+        decoderCodec = 0;
+        resetDecoder();
+        ws?.close();
+        return;
+      }
       console.warn('decoder error, requesting keyframe', e);
       sendText(C_EVENT, `decoder error: ${e.message}`);
       resetDecoder();
     },
   });
-  decoder.configure({ codec: 'avc1.640033', optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+  configureDecoder();
   awaitingKey = true;
+}
+
+function configureDecoder(): void {
+  decoder.configure({ codec: CODECS[decoderCodec].config, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
 }
 
 function resetDecoder(): void {
@@ -593,7 +629,17 @@ function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
     const videoAt = off + 2 + sw * 2;
     const len = v.getUint32(videoAt, true);
     const key = (flags & FLAG_KEY) !== 0;
-    if (key) awaitingKey = false;
+    const codec = (flags >> FLAG_CODEC_SHIFT) & FLAG_CODEC_MASK;
+    if (codec !== decoderCodec) {
+      // Another codec starts with a keyframe; queued pictures of the old one still come out first.
+      if (key) {
+        decoderCodec = codec;
+        configureDecoder();
+      } else {
+        awaitingKey = true;
+      }
+    }
+    if (key && codec === decoderCodec) awaitingKey = false;
     if (!awaitingKey) {
       f.hasVideo = true;
       decoder.decode(new EncodedVideoChunk({
@@ -719,7 +765,7 @@ function reportLate(): void {
 }
 
 function connect(url: string): void {
-  ws = new WebSocket(url);
+  ws = new WebSocket(offered.length ? `${url}&codecs=${offered.join(',')}` : url);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     syncSamples.length = 0;
@@ -815,7 +861,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       createDecoder();
       // WASM zstd (~1.5 GB/s; pure-JS decoders run ~60x slower and stall
       // this worker, delaying video output and ACKs). Ready before any frame.
-      void zstd.init().then(() => connect(m.url));
+      void Promise.all([zstd.init(), hardwareCodecs(m.codec)]).then(([, codecs]) => {
+        offered = codecs;
+        connect(m.url);
+      });
       setInterval(() => {
         ping();
         choosePath();
@@ -839,7 +888,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
               ? 'websocket (webrtc standby)'
               : 'websocket';
         const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles`;
-        const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
+        const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${CODECS[decoderCodec].name} ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
         const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
       }, 250);

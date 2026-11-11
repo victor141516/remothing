@@ -1,6 +1,7 @@
 # Performance techniques from Sunshine that we could adopt
 
-- Status: in progress (candidates 1, 2, 4, 6 and 7)
+- Status: done (candidates 1, 2, 4 and 6 built; 7 tried, not adopted; 3
+  waits for a machine with an idle GPU)
 - Created: 2026-11-10
 
 ## Goal
@@ -57,7 +58,18 @@ study belongs here.
   9 → 14 ms. Possible follow-up, for the user to decide: two-pass only
   while the link estimate is low (the option is fixed per encoder, so
   crossing the threshold means a new encoder and a keyframe).
-- Left: 6.
+- Done: candidate **6** (`docs/ARCHITECTURE.md`, "Video codecs";
+  `docs/RESULTS.md`, "Video codecs"). The client offers HEVC/AV1 when
+  WebCodecs says it decodes them in hardware; `encoder.codec = "auto"`
+  picks AV1, then HEVC, then H.264. AV1 needs 40-60 % of H.264's bytes at
+  the same PSNR: 18 Mbit/s median 42 → 31 ms, mobile 50 → 80 fps. HEVC
+  barely differs from H.264. Split-frame encoding forced for both on
+  Windows (median encode -35-40 %); the container's FFmpeg 6.1 lacks the
+  option. HEVC/AV1 only with NVENC (AMF/QuickSync not checkable here).
+  Not verified: other browsers and devices (Safari, phones), a client
+  whose hardware decoder fails after saying yes (handled: dropped from
+  the offer and reconnected, never exercised).
+- All chosen candidates done.
 
 ## Source and method
 

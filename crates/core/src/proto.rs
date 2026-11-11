@@ -146,16 +146,20 @@ pub const FLAG_KEY: u8 = 2;
 /// The screen is in motion mode: what changes is shown from video until
 /// the whole screen has been still for a while.
 pub const FLAG_MOTION: u8 = 4;
+/// Bits 3-4: the codec of the video (`Codec::wire`: 0 H.264, 1 HEVC, 2 AV1).
+/// A change of codec comes with a keyframe; the client reconfigures its
+/// decoder for it.
+pub const FLAG_CODEC_SHIFT: u8 = 3;
 
 /// FRAME header: type u8, flags u8, n_rects u16, seq u32,
 /// capture_oldest_us u64, capture_newest_us u64, send_us u64,
-/// pull_us u64 (frame build started), encode_us u32 (H.264 encode only),
+/// pull_us u64 (frame build started), encode_us u32 (video encode only),
 /// n_copies u16, upload u16 (encoder input upload, 10 µs units). Followed by:
 /// - copies, each 6 x u16: src_x, src_y, dst_x, dst_y, w, h — screen moves to
 ///   replay on the lossless layer, in order, before the rects
 /// - rects, each: x u16, y u16, w u16, h u16, enc u8, pad u8, pad u16, len u32, data
 /// - n_switches u16, then u16 each: tile index | 0x8000 when the tile moves to video
-/// - if FLAG_VIDEO: len u32 + H.264 Annex B access unit
+/// - if FLAG_VIDEO: len u32 + one access unit of the codec in the flags
 pub const FRAME_HEADER_LEN: usize = 48;
 
 pub fn now_us() -> u64 {
