@@ -86,12 +86,14 @@ and loss without retransmission.
 | 7 | Rate-control trial: one-frame VBV, quarter-resolution two-pass | Tighter frame sizes, fewer late frames on slow links | Low (a trial) | Low | Not tried |
 | 8 | QoS: DSCP on our sockets, Wi-Fi streaming mode on the host | Less jitter on a local Wi-Fi | Low-medium | Low; some routers mishandle it | Not measured |
 | 9 | AMD and Intel: a bitrate cap, with Sunshine's option sets | Video would follow the link on those GPUs; today it is constant quality | Medium | Medium: no such hardware here | Read in our code |
-| 10 | Video as datagrams with FEC (no head-of-line blocking) | Steady latency under loss | Very high | High | Being designed in task 002 |
+| 10 | Video as datagrams with FEC (no head-of-line blocking) | Steady latency under loss | Very high | High | Done in task 002 (WebTransport): Wi-Fi 2 % loss `full` 161 fps, p99 45 ms (was 96, 146) |
 | 11 | Linux real desktops: NvFBC / KMS / PipeWire | Capture without the CPU; Wayland | Very high | Medium | None |
 
 `tasks/002-game-stalls-video-mode.md` refers to these numbers: its GPU step
-is candidates 1, 2 and 4, its UDP video is candidate 10, and it needs the
-reference invalidation of candidate 5.
+is candidates 1, 2 and 4, and its UDP video (candidate 10) is built:
+WebTransport datagrams with XOR parity and re-sends on request. Dropping a
+frame without a keyframe would still need the reference invalidation of
+candidate 5.
 
 ### 1. Thread and process priority, our own timer resolution
 
@@ -337,9 +339,11 @@ with our own resend over the data channel was tried and dropped, because
 SCTP's congestion control counts what is abandoned as lost too
 (ARCHITECTURE, transport).
 
-What it takes is a third transport, not a technique. Task 002 has taken
-this up and holds the design (WebTransport datagrams, redundancy, the
-certificate); what Sunshine contributes is the list above.
+Done by task 002 as a third transport (`docs/ARCHITECTURE.md`, "Transport"):
+WebTransport datagrams, one XOR parity piece per 8 instead of Reed-Solomon,
+and, unlike Sunshine, missing pieces asked for again before a frame is
+given up (the round trip is short where it matters). Measured in
+`docs/RESULTS.md`, "WebTransport datagrams vs WebSocket".
 
 ### 11. Linux with a real desktop
 
