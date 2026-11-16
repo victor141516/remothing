@@ -2,9 +2,9 @@
 
 remothing streams a desktop (or one application) to a browser with low
 latency: static areas pixel-exact, moving areas as H.264, plus sound, input
-and clipboard. One native server binary per platform (Linux X11, Windows)
-with the TypeScript client embedded in it. It uses no existing streaming
-software; codec and compression libraries are fine.
+and clipboard. One native server binary per platform (Linux X11, Windows,
+macOS on Apple Silicon) with the TypeScript client embedded in it. It uses
+no existing streaming software; codec and compression libraries are fine.
 
 This file holds only what the other documents do not. Read the relevant one
 before changing a subsystem:
@@ -30,15 +30,17 @@ before changing a subsystem:
 | path | what |
 |---|---|
 | `crates/core` | Everything platform-independent: provider traits (`platform.rs`, `encode.rs`), tiles and policy (`shared.rs`, `pixels.rs`), capture loop (`capture.rs`), per-client link model (`pacer.rs`), sessions and transports (`stream.rs`, `rtc.rs`), sound hub (`audio.rs`), wire protocol (`proto.rs`), admin API, config, TLS |
-| `crates/encoder` | FFmpeg: H.264 (NVENC, AMF, QuickSync, x264), Opus / AAC |
+| `crates/encoder` | FFmpeg: H.264 (NVENC, AMF, QuickSync, x264), Opus / AAC; VideoToolbox directly on macOS |
 | `crates/platform-linux` | Xvfb and X11 capture, XTest input, X selections, sound helpers. Whole crate is `cfg(target_os = "linux")` |
 | `crates/platform-windows` | DXGI duplication, SendInput, clipboard, WASAPI loopback, Windows service. Whole crate is `cfg(windows)` |
+| `crates/platform-macos` | ScreenCaptureKit capture and sound, Quartz input, NSCursor, NSPasteboard, launch agent. Whole crate is `cfg(target_os = "macos")` |
 | `crates/gpu-interop` | GPU surface types shared by capture and encoder |
 | `crates/server` | The `remothing` binary: CLI, config path, picks the platform |
 | `testapp` | `rt-testapp`: the latency probe application |
 | `client` | Browser client and admin UI (TypeScript, esbuild). `client/dist` is embedded into the binary at compile time |
 | `Dockerfile`, `docker/` | Linux images: `remothing` (slim) and `remothing-desktop` (XFCE + Firefox) |
 | `scripts/` | Windows build dependencies and environment |
+| `.github/workflows/macos.yml` | macOS build, tests and smoke test on GitHub's Macs; the binary is the run's artifact |
 | `tasks/` | Pending work, one file per task (see Tasks) |
 | `.tools/` | Git-ignored: vcpkg, libclang, local deployment configs, tokens, logs |
 
@@ -64,8 +66,15 @@ docker build -t remothing .
 docker build --target desktop -t remothing-desktop .
 ```
 
-- Clippy must be clean on Windows and the Docker build must pass before a
-  change is done.
+- Clippy must be clean on Windows, the Docker build must pass and the
+  macOS workflow must be green before a change is done.
+- There is no Mac here. `cargo-zigbuild clippy --target aarch64-apple-darwin
+  -p remothing` (zig from `pip install ziglang`, path in
+  `CARGO_ZIGBUILD_ZIG_PATH`; for the encoder also `LIBCLANG_PATH`,
+  `FFMPEG_DIR` from vcpkg and `BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin`
+  with zig's `lib/libc/include/any-darwin-any` and `lib/include`) checks the
+  macOS code; the real build and a smoke test run in GitHub Actions on a
+  push to master or to a `macos-*` branch.
 - cargo under PowerShell ends with exit code 1 and `NativeCommandError`
   because it writes progress to stderr. Read the output, not the exit code.
 - Inside `powershell -Command "..."` started from a POSIX shell, `$_` and
@@ -123,12 +132,15 @@ docker build --target desktop -t remothing-desktop .
   `powershell -NoProfile -ExecutionPolicy Bypass -File .tools/redeploy-desktop.ps1`,
   which keeps the tokens and settings of the running container
   (`.tools/desktop-tokens.txt` has only the stream token) and runs it with
-  `--gpus all --shm-size=1g --cap-add SYS_NICE -p 8080:8080 -p 8080:8080/udp
-  -p 127.0.0.1:8081:8081 -p 8081:8081/udp` (WebTransport on UDP 8081,
-  advertised as `100.100.74.85:8081,127.0.0.1:8081`).
+  `--gpus all --shm-size=1g --cap-add SYS_NICE -v rt-desktop-tls:/etc/remothing/tls
+  -p 8080:8080 -p 9443:8443 -p 9080:8080/udp -p 127.0.0.1:8081:8081
+  -p 9081:8081/udp` and `TLS_LISTEN`: reached from the Internet like the
+  Windows demo (HTTPS 9443, WebRTC UDP 9080, WebTransport UDP 9081, the
+  ports the router forwards). Only one of rt-desktop and the Windows
+  service can hold those ports: stop the other first.
 - The router (Zyxel, 192.168.1.1) forwards UDP 9080 (WebRTC) and UDP 9081
-  (WebTransport) to the Windows demo; the Windows firewall's private
-  profile is off.
+  (WebTransport) to this PC, for whichever of the two deployments holds
+  them; the Windows firewall's private profile is off.
 - Redeploy both after a finished change and tell the user to reload tabs.
 
 ## Conventions
@@ -146,8 +158,9 @@ docker build --target desktop -t remothing-desktop .
 - A behaviour change updates the docs in the same commit: ARCHITECTURE (how
   and why), README (how to use it), RESULTS (measured numbers only).
 - Commits: one per finished piece of work; subject names what changed, body
-  goes area by area (see `git log`). The repository is local: add no remote
-  and push nothing unless asked.
+  goes area by area (see `git log`). `origin` is the user's private GitHub
+  repository, used for the macOS build: push master after a finished
+  change; nothing else goes there.
 
 ## Boundaries
 
