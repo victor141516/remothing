@@ -3,6 +3,14 @@ import { C_BUTTON, C_KEY, C_MOVE, C_MOVE_REL, C_TEXT, C_WHEEL, WHEEL_NOTCH } fro
 
 // Browser MouseEvent.button -> X button.
 const BUTTONS = [1, 2, 3, 8, 9];
+/** PointerEvent.buttons bit -> MouseEvent.button. */
+const BUTTON_BITS: [number, number][] = [
+  [1, 0],
+  [2, 2],
+  [4, 1],
+  [8, 3],
+  [16, 4],
+];
 const LEFT = 1;
 const RIGHT = 3;
 /** Pixel delta of one wheel notch, as Chromium on Windows reports it. A
@@ -57,6 +65,8 @@ export class Input {
   /** Mouse counts not sent yet (less than one). */
   private relX = 0;
   private relY = 0;
+  /** Buttons still held from the click that trapped the mouse (not sent). */
+  private ignored = 0;
 
   /** `pointerChanged`: `touch` changed, or the pointer moved by touch.
    * `captureChanged`: the capture mode, or whether the mouse is trapped, changed. */
@@ -70,12 +80,20 @@ export class Input {
     const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
     // A mouse or pen points at a place of the picture.
     canvas.addEventListener(moveEvent, (e) => this.onMove(e as PointerEvent));
+    // A button pressed or let go while another is held comes as a move, not
+    // as pointerdown/pointerup ("chorded" buttons), and maybe not as a raw update.
+    if (moveEvent !== 'pointermove') {
+      canvas.addEventListener('pointermove', (e) => {
+        if (e.pointerType !== 'touch') this.syncButtons(e.buttons);
+      });
+    }
     canvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'touch') return;
       canvas.focus();
       e.preventDefault();
       if (this.capture && !this.locked) {
         // This click only traps the mouse; the remote side does not get it.
+        this.ignored = e.buttons;
         this.lock();
         return;
       }
@@ -163,6 +181,7 @@ export class Input {
     if (this.screenWidth === 0 || e.pointerType === 'touch') return;
     if (this.locked) {
       this.moveBy(e.movementX, e.movementY);
+      this.syncButtons(e.buttons);
       return;
     }
     const r = this.canvas.getBoundingClientRect();
@@ -171,6 +190,7 @@ export class Input {
     this.pointerX = Math.max(0, Math.min(this.screenWidth - 1, x));
     this.pointerY = Math.max(0, Math.min(this.screenHeight - 1, y));
     this.moveTo(this.pointerX, this.pointerY);
+    this.syncButtons(e.buttons);
     if (this.touch) {
       this.touch = false;
       this.pointerChanged();
@@ -197,9 +217,19 @@ export class Input {
   private button(browserButton: number, down: boolean): void {
     const b = BUTTONS[browserButton];
     if (b === undefined) return;
-    if (down) this.buttons.add(b);
-    else if (!this.buttons.delete(b)) return;
+    if (down) {
+      if (this.buttons.has(b)) return;
+      this.buttons.add(b);
+    } else if (!this.buttons.delete(b)) return;
     this.send(new Uint8Array([C_BUTTON, b, down ? 1 : 0]));
+  }
+
+  /** Held buttons follow the event's `buttons`, so chorded presses and
+   * releases are sent too. */
+  private syncButtons(buttons: number): void {
+    this.ignored &= buttons;
+    const pressed = buttons & ~this.ignored;
+    for (const [bit, browserButton] of BUTTON_BITS) this.button(browserButton, (pressed & bit) !== 0);
   }
 
   private touchDown(e: PointerEvent): void {

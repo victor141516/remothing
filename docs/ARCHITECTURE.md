@@ -323,6 +323,11 @@ coordinates, evdev key codes on the wire).
   remembers the keys and buttons it holds: they are released when it ends
   or stays silent for 5 s (the client pings every second), so a dropped
   connection leaves nothing stuck.
+- **Mouse buttons**: a button pressed or let go while another is held
+  comes as a pointer move, not as pointerdown/pointerup (Pointer Events'
+  chorded buttons), so the client makes the held buttons follow every
+  event's `buttons` mask. The click that traps the mouse in capture mode is
+  left out until it is let go.
 - **Text** (`C_TEXT`): a phone's keyboard gives characters, not keys.
   Windows types them with `KEYEVENTF_UNICODE`. X11 can only press keys:
   the key of the current layout that gives the character is pressed (with
