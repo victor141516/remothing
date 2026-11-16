@@ -4,6 +4,7 @@ members = [
     "crates/encoder",
     "crates/gpu-interop",
     "crates/platform-linux",
+    "crates/platform-macos",
     "crates/platform-windows",
     "crates/server",
     "testapp",

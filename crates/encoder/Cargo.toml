@@ -2,7 +2,7 @@
 name = "remothing-encoder"
 version.workspace = true
 edition.workspace = true
-description = "FFmpeg-based H.264 EncoderProvider (NVENC, AMF, QuickSync, x264) with CUDA / D3D11 zero-copy input"
+description = "Video encoders (NVENC, AMF, QuickSync, x264 through FFmpeg; VideoToolbox on macOS) with zero-copy GPU input, and FFmpeg sound codecs"
 
 [dependencies]
 anyhow.workspace = true
@@ -16,6 +16,14 @@ libc.workspace = true
 gpu-interop.workspace = true
 parking_lot = "0.12"
 windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpu-interop.workspace = true
+block2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-video-toolbox = "0.3"
 
 [features]
 # Link FFmpeg statically (Windows release builds via vcpkg).

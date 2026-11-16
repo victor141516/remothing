@@ -1,0 +1,149 @@
+# macOS build (Apple Silicon): the client, a static FFmpeg with Opus for the
+# sound, the server, the VideoToolbox test and a smoke test of capture and
+# streaming on the runner itself. The binary is the `remothing-macos-arm64`
+# artifact.
+name: macos
+
+on:
+  push:
+    branches: [master, "macos-*"]
+  workflow_dispatch:
+
+env:
+  # ScreenCaptureKit's system sound needs macOS 13.
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+  OPUS_VERSION: "1.5.2"
+  FFMPEG_VERSION: "9.0.2"
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache FFmpeg and Opus
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ~/deps
+          key: deps-${{ runner.os }}-${{ runner.arch }}-opus${{ env.OPUS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-${{ hashFiles('.github/workflows/macos.yml') }}
+
+      # Static libraries only, in their own prefix: the binary links them in
+      # and needs nothing installed on the Mac it runs on.
+      - name: Build Opus and FFmpeg
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          P="$HOME/deps"
+          mkdir -p "$P" build && cd build
+          curl -fsSL "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" | tar xz
+          (cd "opus-${OPUS_VERSION}" && ./configure --prefix="$P" --disable-shared --enable-static --disable-doc --disable-extra-programs && make -j"$(sysctl -n hw.ncpu)" install)
+          curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${FFMPEG_VERSION}.tar.gz" | tar xz
+          cd "FFmpeg-n${FFMPEG_VERSION}"
+          # Sound only: video goes through VideoToolbox directly (crates/encoder/src/videotoolbox.rs).
+          PKG_CONFIG_PATH="$P/lib/pkgconfig" ./configure --prefix="$P" --cc=clang \
+            --enable-static --disable-shared --disable-programs --disable-doc --disable-network \
+            --disable-autodetect --disable-everything --disable-avdevice --disable-avfilter --disable-swresample \
+            --enable-libopus --enable-encoder=libopus,aac --enable-decoder=opus \
+            --pkg-config-flags=--static
+          make -j"$(sysctl -n hw.ncpu)" install
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Client
+        run: cd client && npm ci && npm run build
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          export FFMPEG_DIR="$HOME/deps"
+          # Opus is FFmpeg's dependency; linked at the final link only.
+          export RUSTFLAGS="-C link-arg=-L$HOME/deps/lib -C link-arg=-lopus"
+          cargo build --release -p remothing
+          otool -L target/release/remothing
+
+      - name: Tests
+        run: |
+          set -euo pipefail
+          export FFMPEG_DIR="$HOME/deps"
+          export RUSTFLAGS="-C link-arg=-L$HOME/deps/lib -C link-arg=-lopus"
+          cargo test --release -p remothing-encoder
+          cargo test --release -p remothing-core
+
+      # The server against the runner's own display, as a client would use it:
+      # picture, cursor, a pointer move, the clipboard both ways and sound.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/rt"
+          mkdir -p "$D"
+          printf '[server]\nlisten = "127.0.0.1:9080"\nadmin_listen = "127.0.0.1:9081"\n[auth]\nstream_token = "ci"\nadmin_token = "ci-admin"\n' > "$D/config.toml"
+          ./target/release/remothing --config "$D/config.toml" > "$D/server.log" 2>&1 &
+          SERVER=$!
+          sleep 5
+          curl -fsS -H "Authorization: Bearer ci-admin" http://127.0.0.1:9081/api/status | head -c 3000; echo
+          cat > "$D/client.mjs" <<'EOF'
+          const ws = new WebSocket("ws://127.0.0.1:9080/ws?token=ci&codecs=hevc");
+          ws.binaryType = "arraybuffer";
+          const seen = { hello: null, frames: 0, video: 0, cursor: 0, clipboard: [], audioInfo: null, audio: 0 };
+          const send = (bytes) => ws.send(new Uint8Array(bytes));
+          ws.onopen = () => {
+            send([17, 1]); // C_AUDIO on
+            send([9, ...new TextEncoder().encode("remothing-ci-to-mac")]); // C_CLIPBOARD
+            send([10, 0, 100, 0, 200, 0]); // C_MOVE to (100, 200)
+            // A live client pings every second; the server drops one silent for 5 s.
+            setInterval(() => send([1, 0, 0, 0, 0, 0, 0, 0, ...new Uint8Array(new Float64Array([0]).buffer)]), 1000);
+          };
+          ws.onmessage = (ev) => {
+            const b = new Uint8Array(ev.data);
+            const text = () => new TextDecoder().decode(b.subarray(1));
+            if (b[0] === 1) { const v = new DataView(ev.data); seen.hello = [v.getUint32(4, true), v.getUint32(8, true)]; send([6]); }
+            if (b[0] === 2) { seen.frames++; if (b[1] & 1) seen.video++; }
+            if (b[0] === 3) seen.cursor++;
+            if (b[0] === 7) seen.clipboard.push(text());
+            if (b[0] === 9) seen.audioInfo = text();
+            if (b[0] === 10) seen.audio++;
+          };
+          setTimeout(() => { console.log(JSON.stringify(seen)); process.exit(0); }, 12000);
+          EOF
+          node "$D/client.mjs" > "$D/client.json" &
+          CLIENT=$!
+          sleep 4
+          afplay /System/Library/Sounds/Glass.aiff || echo "afplay failed"
+          PASTED=$(pbpaste)
+          printf 'remothing-ci-from-mac' | pbcopy
+          MOUSE=$(swift - <<'EOF'
+          import CoreGraphics
+          let p = CGEvent(source: nil)!.location
+          print("\(Int(p.x)),\(Int(p.y))")
+          EOF
+          )
+          wait $CLIENT
+          kill $SERVER || true
+          cat "$D/server.log"
+          echo "client: $(cat "$D/client.json")"
+          echo "pasteboard: $PASTED; mouse: $MOUSE"
+          node -e '
+            const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            const fail = [];
+            if (!s.hello || s.frames === 0) fail.push("no picture");
+            if (s.cursor === 0) fail.push("no cursor message");
+            if (!s.clipboard.includes("remothing-ci-from-mac")) fail.push("Mac clipboard not seen by the client");
+            if (process.argv[2] !== "remothing-ci-to-mac") fail.push("client clipboard not on the Mac: " + process.argv[2]);
+            if (process.argv[3] !== "100,200") fail.push("pointer not moved: " + process.argv[3]);
+            if (!s.audioInfo) fail.push("no sound status");
+            if (fail.length) { console.log("FAILED: " + fail.join("; ")); process.exit(1); }
+            console.log("ok");
+          ' "$D/client.json" "$PASTED" "$MOUSE"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf dist/remothing-macos-arm64.tar.gz remothing
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remothing-macos-arm64
+          path: dist/remothing-macos-arm64.tar.gz

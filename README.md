@@ -3,7 +3,8 @@
 Low-latency desktop / application streaming to a browser. Static content is
 sent losslessly (pixel-exact), moving areas automatically switch to video
 (AV1, HEVC or H.264, the best the browser decodes in hardware) and
-are refined back to lossless when they stop. One native binary per platform.
+are refined back to lossless when they stop. One native binary per platform:
+Linux (X11), Windows, macOS (Apple Silicon).
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Measurements: [docs/RESULTS.md](docs/RESULTS.md)
@@ -63,17 +64,41 @@ powershell -ExecutionPolicy Bypass -File scripts/windows-deps.ps1   # once: libc
 cargo build --release -p remothing --features static-ffmpeg
 ```
 
+### macOS
+
+Apple Silicon, macOS 13 or later. `.github/workflows/macos.yml` builds it on
+GitHub's Macs and publishes `remothing-macos-arm64` (a `.tar.gz` with the
+binary). To build by hand: Xcode's command line tools, Rust, Node, and Opus
+plus a static FFmpeg built as in the workflow into `~/deps`, then
+
+```sh
+export FFMPEG_DIR=~/deps MACOSX_DEPLOYMENT_TARGET=13.0 RUSTFLAGS="-C link-arg=-L$HOME/deps/lib -C link-arg=-lopus"
+cargo build --release -p remothing
+```
+
+A binary downloaded with a browser carries Gatekeeper's quarantine; remove
+it once with `xattr -d com.apple.quarantine remothing`.
+
 ## Run
 
 ```sh
 remothing [--config PATH] [--display ID] [--virtual WxH] [--session-command CMD]
 remothing set-admin-password PASSWORD
-remothing service install|uninstall|start|stop     # Windows, as administrator
+remothing service install|uninstall|start|stop     # Windows, as administrator; macOS, as the logged-in user
 ```
 
 On first start a config file is created (Linux: `/etc/remothing/config.toml`
 as root, else `~/.config/remothing/config.toml`; Windows:
-`%ProgramData%\remothing\config.toml`) with random admin and stream tokens.
+`%ProgramData%\remothing\config.toml`; macOS:
+`~/Library/Application Support/remothing/config.toml`) with random admin and
+stream tokens.
+
+On macOS the server needs two permissions in System Settings > Privacy &
+Security, asked for on the first start: Screen & System Audio Recording
+(picture and sound) and Accessibility (input; without it macOS drops the
+remote input silently). Started from a terminal, they are the terminal's;
+`service install` makes a launch agent that starts with the user's session,
+and then they are remothing's own. Restart the server after granting them.
 
 - Streaming client: `http://HOST:8080/?token=STREAM_TOKEN`. A remote screen
   larger than the window is scaled down to fit (`&scale=1`: 1:1 pixels);
@@ -107,8 +132,9 @@ as root, else `~/.config/remothing/config.toml`; Windows:
 - Scrolling keeps the device's steps: a mouse wheel scrolls by notches,
   a trackpad (a Mac's included, with its momentum) or two fingers on a
   touch screen scroll as finely as they move. Windows programs that read
-  fine scrolling (browsers, Office…) follow it; on Linux (X11) it adds up
-  to whole notches.
+  fine scrolling (browsers, Office…) follow it; on macOS it goes as smooth
+  (pixel) scrolling, as a trackpad's; on Linux (X11) it adds up to whole
+  notches.
 - Games and full-screen video: when the whole screen has been moving for
   ten seconds the stream turns into plain video of everything that changes
   (motion mode; `&stats` and the admin UI show it). It sharpens to the
@@ -123,12 +149,14 @@ as root, else `~/.config/remothing/config.toml`; Windows:
   of the `&stats` overlay, and the admin UI lists what the server tried).
   Windows: whatever plays on the default playback device. Linux: the
   PulseAudio or PipeWire server in use, or one started by remothing for
-  the programs of its simulated displays.
+  the programs of its simulated displays. macOS: whatever the Mac plays,
+  through ScreenCaptureKit (no driver needed).
 - Microphone: `Mic` in the controls (pages served over HTTPS or localhost)
   sends this device's microphone to the remote session, where programs
   hear it as their microphone. One client talks at a time; for the others
   the button is disabled meanwhile. Linux: a virtual source
-  `remothing-mic` in the sound server. Windows: through
+  `remothing-mic` in the sound server. macOS: not available (it would need a
+  third-party virtual audio driver). Windows: through
   [VB-CABLE](https://www.vb-cable.com), a virtual audio cable by VB-Audio
   (donationware: free to use, donations to its author welcome). If it is
   not installed, the client offers to install it: remothing downloads the

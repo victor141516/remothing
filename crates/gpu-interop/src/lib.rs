@@ -49,3 +49,40 @@ pub mod d3d11 {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+pub mod macos {
+    use std::sync::Mutex;
+
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_video::CVPixelBuffer;
+
+    /// One captured frame: an IOSurface-backed BGRA pixel buffer.
+    #[derive(Clone)]
+    pub struct PixelBuffer(pub CFRetained<CVPixelBuffer>);
+
+    // SAFETY: CoreVideo buffers are reference counted atomically, and nobody
+    // writes into a captured frame: the capture thread reads it locked
+    // read-only, VideoToolbox reads it to encode.
+    unsafe impl Send for PixelBuffer {}
+    unsafe impl Sync for PixelBuffer {}
+
+    /// The newest captured frame of a display. ScreenCaptureKit hands over a
+    /// new buffer for every frame, so the capture thread replaces it here
+    /// instead of writing into it; an encoder takes the one current when it
+    /// encodes.
+    #[derive(Default)]
+    pub struct PixelBufferFrame {
+        latest: Mutex<Option<PixelBuffer>>,
+    }
+
+    impl PixelBufferFrame {
+        pub fn set(&self, buffer: PixelBuffer) {
+            *self.latest.lock().unwrap() = Some(buffer);
+        }
+
+        pub fn latest(&self) -> Option<PixelBuffer> {
+            self.latest.lock().unwrap().clone()
+        }
+    }
+}

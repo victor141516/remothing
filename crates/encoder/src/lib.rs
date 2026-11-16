@@ -1,7 +1,8 @@
-//! FFmpeg-based `EncoderProvider`: NVENC, AMF, QuickSync and x264 behind one
-//! low-latency configuration, with zero-copy GPU input where the platform
-//! offers it (CUDA on Linux, D3D11 on Windows) and system memory otherwise;
-//! H.264 everywhere, HEVC and AV1 with NVENC; Opus or AAC for sound.
+//! The `EncoderProvider`: NVENC, AMF, QuickSync and x264 through FFmpeg
+//! behind one low-latency configuration, with zero-copy GPU input where the
+//! platform offers it (CUDA on Linux, D3D11 on Windows) and system memory
+//! otherwise; H.264 everywhere, HEVC and AV1 with NVENC. On macOS,
+//! VideoToolbox driven directly (H.264, HEVC). Opus or AAC for sound.
 
 mod audio;
 
@@ -10,12 +11,17 @@ mod cuda;
 #[cfg(windows)]
 mod d3d11;
 mod ffmpeg;
+#[cfg(target_os = "macos")]
+mod videotoolbox;
 
 use anyhow::{anyhow, Result};
 use ffmpeg_next as ff;
 use remothing_core::encode::{AudioDecoder, AudioEncoder, Codec, EncoderProvider, EncoderRequest, VideoEncoder};
 
 use crate::ffmpeg::{FfmpegEncoder, InputKind};
+
+/// Backend name of VideoToolbox (macOS) in the config and the status.
+const VIDEOTOOLBOX: &str = "videotoolbox";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -93,6 +99,8 @@ type Options = Vec<(String, String)>;
 pub struct FfmpegEncoders {
     /// Backends and codecs that passed the startup probe, in preference order.
     available: Vec<(Backend, Codec)>,
+    /// Codecs VideoToolbox encodes here (macOS; tried before FFmpeg's backends).
+    videotoolbox: Vec<Codec>,
     /// Compiled-in backends and codecs that failed the startup probe, with the reason.
     unavailable: Vec<(String, String)>,
     /// Option overrides applied over a backend's defaults for one codec.
@@ -122,7 +130,16 @@ impl FfmpegEncoders {
             }
         }
         ff::util::log::set_level(ff::util::log::Level::Error);
-        Ok(Self { available, unavailable, overrides: Vec::new() })
+        #[allow(unused_mut)]
+        let mut videotoolbox = Vec::new();
+        #[cfg(target_os = "macos")]
+        for codec in [Codec::H264, Codec::Hevc] {
+            match videotoolbox::VtEncoder::open(codec, (256, 256), (256, 256), None, 1_000_000, 60) {
+                Ok(_) => videotoolbox.push(codec),
+                Err(e) => unavailable.push((format!("{VIDEOTOOLBOX} {}", codec.name()), format!("{e:#}"))),
+            }
+        }
+        Ok(Self { available, videotoolbox, unavailable, overrides: Vec::new() })
     }
 
     /// Replaces the option overrides of `backend` ("nvenc", "amf", "qsv",
@@ -147,6 +164,9 @@ impl FfmpegEncoders {
 impl EncoderProvider for FfmpegEncoders {
     fn backends(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = Vec::new();
+        if !self.videotoolbox.is_empty() {
+            names.push(VIDEOTOOLBOX);
+        }
         for (b, _) in &self.available {
             if !names.contains(&b.name()) {
                 names.push(b.name());
@@ -156,7 +176,10 @@ impl EncoderProvider for FfmpegEncoders {
     }
 
     fn codecs(&self) -> Vec<Codec> {
-        Codec::ALL.into_iter().filter(|c| self.available.iter().any(|(_, a)| a == c)).collect()
+        Codec::ALL
+            .into_iter()
+            .filter(|c| self.videotoolbox.contains(c) || self.available.iter().any(|(_, a)| a == c))
+            .collect()
     }
 
     fn unavailable(&self) -> Vec<(String, String)> {
@@ -172,6 +195,18 @@ impl EncoderProvider for FfmpegEncoders {
             }
         }
         let mut skipped = Vec::new();
+        // VideoToolbox first, unless an FFmpeg backend is preferred by name.
+        #[cfg(target_os = "macos")]
+        if self.videotoolbox.contains(&req.codec) && !order.first().is_some_and(|b| req.preferred.as_deref() == Some(b.name())) {
+            let input = (req.width, req.height);
+            match videotoolbox::VtEncoder::open(req.codec, input, req.output, req.surface.as_ref(), req.max_bitrate, req.fps) {
+                Ok(e) => {
+                    eprintln!("video encoder: {}", e.name());
+                    return Ok(Box::new(e));
+                }
+                Err(err) => skipped.push(format!("{VIDEOTOOLBOX}: {err:#}")),
+            }
+        }
         for backend in order {
             let opts = self.overrides.iter().find(|(b, c, _)| (*b, *c) == (backend, req.codec)).map_or(&[][..], |(_, _, o)| o);
             for kind in backend.inputs(req.surface.is_some()) {

@@ -1,15 +1,16 @@
 # remothing — architecture
 
 Low-latency streaming of a desktop (or one application) to a browser. One native
-binary per platform (`remothing` / `remothing.exe`), built from one Cargo
-workspace; OS specifics live in providers selected with `cfg(target_os)`.
+binary per platform (Linux, Windows, macOS: `remothing` / `remothing.exe`),
+built from one Cargo workspace; OS specifics live in providers selected with
+`cfg(target_os)`.
 
 ```mermaid
 flowchart LR
   subgraph Provider["Platform provider (per OS)"]
     D[DisplayProvider] --> C[CaptureSession<br/>dirty/moved rects, pixels, GPU surface, cursor]
     D --> I[InputProvider]
-    E[EncoderProvider<br/>FFmpeg: nvenc / amf / qsv / x264]
+    E[EncoderProvider<br/>FFmpeg: nvenc / amf / qsv / x264<br/>VideoToolbox on macOS]
     M[SystemMonitor]
   end
   subgraph Core["remothing-core (OS independent)"]
@@ -32,10 +33,11 @@ flowchart LR
 | crate | role |
 |---|---|
 | `crates/core` | traits (`platform.rs`, `encode.rs`), tile diff + motion classification + policy (`shared.rs`), capture loop (`capture.rs`), wire protocol (`proto.rs`), transport (`stream.rs`), sound hub (`audio.rs`), admin API (`admin.rs`), config/auth (`config.rs`), embedded web assets, server wiring (`app.rs`) |
-| `crates/encoder` | FFmpeg `EncoderProvider`: H.264 with NVENC / AMF / QuickSync / x264, HEVC and AV1 with NVENC, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; Opus (libopus) or AAC for sound |
-| `crates/gpu-interop` | GPU surface types shared by capture and encoder of one platform (`D3D11Frame`) |
+| `crates/encoder` | `EncoderProvider`: through FFmpeg H.264 with NVENC / AMF / QuickSync / x264, HEVC and AV1 with NVENC, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; on macOS VideoToolbox directly (H.264, HEVC) with IOSurface input; Opus (libopus) or AAC for sound |
+| `crates/gpu-interop` | GPU surface types shared by capture and encoder of one platform (`D3D11Frame`, macOS `PixelBufferFrame`) |
 | `crates/platform-linux` | Xvfb manager (simulated displays, shared-memory framebuffer + XDamage), real X11 displays (RandR outputs, XShm + XDamage), XTest input, XFixes cursor, X selections (clipboard), sound through PulseAudio / PipeWire / ALSA loopback helpers, NVML/DRM GPU info |
 | `crates/platform-windows` | DXGI Desktop Duplication (dirty + move rects, D3D11 texture), SendInput, cursor from duplication, clipboard, WASAPI loopback sound, desktop switching, Windows service supervising the session process |
+| `crates/platform-macos` | ScreenCaptureKit capture (changed areas from the frame info, IOSurface frames) and system sound, Quartz event injection, system cursor, general pasteboard, permission checks, launch agent |
 | `crates/server` | the `remothing` binary: CLI, config path, picks the platform |
 | `testapp` | `rt-testapp`: latency probe app (barcode with timestamp + input marker), X11 and Win32 backends |
 | `client` | browser client (`index.html`, `main.ts`, `worker.ts`; input and touch `input.ts`, controls `ui.ts`, `keyboard.ts`, `textentry.ts`, sound `audio.ts`) and admin UI (`admin.html`, `admin.ts`) |
@@ -692,3 +694,57 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
   needs the elevated/service process (UIPI). Windows drops such input without
   telling SendInput, so a non-elevated server checks the foreground window's
   integrity level and reports the blocked episode once (log and admin UI).
+- **macOS** (`crates/platform-macos`, Apple Silicon, macOS 13 or later):
+  - **Capture**: ScreenCaptureKit, one SCStream per open display, BGRA in
+    sRGB at the display's pixel size (twice the points each way on Retina),
+    at most the display's refresh rate. A frame comes only when something
+    changed, with the changed areas in its frame info, so the tiles are
+    compared only there; frames with another status (idle, blank) are
+    skipped. Whether those areas are in points or pixels is not
+    documented: they are scaled up as points (over-reporting is harmless,
+    the tiles are compared anyway) until one reaches beyond the display's
+    points, from then on taken as pixels. The newest frame stays locked
+    for the tile comparison until the next one replaces it, and is handed
+    as it is to the encoder (`PixelBufferFrame`). CGDisplayStream, the
+    older API, is deprecated. No HDR picture: ScreenCaptureKit is asked
+    for 8-bit sRGB.
+  - **Video**: VideoToolbox driven directly (`encoder/src/videotoolbox.rs`),
+    not through FFmpeg, whose wrapper returns each frame only when the next
+    one is sent: a frame of delay, and a desktop that went still would hold
+    its last frame back. Each frame is completed before `encode` returns.
+    Low-latency rate control where the encoder offers it, no reordering,
+    keyframes only on demand, BT.709, QP floor 20 like the other
+    backends. The bitrate cap changes in place, without a keyframe.
+    VideoToolbox converts the BGRA frame to YUV and scales it to a smaller
+    encoded size (motion mode) itself. No AV1 encoder on the Mac.
+  - **Cursor**: the shape from NSCursor's current system cursor, rendered at
+    the display's scale and looked at every 30 ms. Apple marks that call as
+    going away; where it returns nothing the cursor is drawn into the
+    picture by ScreenCaptureKit and the clients show none. Whether a program
+    hid the cursor is no longer public (CGCursorIsVisible "no longer
+    supported"), so a hidden cursor is still sent.
+  - **Input**: Quartz events posted at the HID level, in points: moves
+    become drags while a button is held (apps expect them), presses carry a
+    click count (double clicks), modifiers are flag changes and every event
+    carries the held modifiers, relative moves carry their deltas (games read
+    those), whole wheel notches go as lines and fractions as continuous
+    pixel scrolling. Keys map evdev codes to virtual keycodes, so the Mac's
+    layout decides the character; typed text goes as Unicode key events.
+  - **Clipboard**: the general pasteboard's change count polled every
+    250 ms (macOS has no notification).
+  - **Sound**: ScreenCaptureKit's audio capture, every program's sound
+    without a driver. No virtual microphone: macOS has none without a
+    third-party audio driver.
+  - **While streaming**: the display is kept awake (a sleeping display
+    gives nothing to capture) and the process is a latency-critical
+    activity; the streaming threads run in the user-interactive QoS class.
+  - **Permissions**: Screen & System Audio Recording (picture and sound)
+    and Accessibility (input; without it macOS drops events silently).
+    Missing ones are asked for at start and logged. They belong to the
+    terminal the server is started from, or to the binary itself when it
+    runs as the launch agent (`service install`): an agent of the logged-in
+    user, not a system daemon, because capture and event posting work only
+    in the user's session. No virtual displays, no login window.
+  - **Build**: `.github/workflows/macos.yml` builds a static FFmpeg with only
+    Opus, AAC and the Opus decoder (video does not go through FFmpeg), so the
+    binary needs nothing installed.

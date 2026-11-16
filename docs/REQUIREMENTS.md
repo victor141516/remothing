@@ -4,7 +4,7 @@
 |---|---|---|
 | R1.1 one native binary per platform, Docker optional | `crates/server` → `remothing` / `remothing.exe`; web clients embedded (rust-embed); Windows links FFmpeg and the CRT statically (only system DLLs); `Dockerfile` optional | done |
 | R1.2 OS-independent core | `crates/core`: `pixels.rs` (tile diff, scroll detection), `shared.rs` (motion classification, lossless/video policy, LZ4, moves), `stream.rs` (ACK flow control, WS), `proto.rs`, `admin.rs`, `assets.rs` | done |
-| R1.3 OS specifics behind traits | `crates/core/src/platform.rs`, `encode.rs`; providers in `crates/platform-linux`, `crates/platform-windows`, encoders in `crates/encoder` | done |
+| R1.3 OS specifics behind traits | `crates/core/src/platform.rs`, `encode.rs`; providers in `crates/platform-linux`, `crates/platform-windows`, `crates/platform-macos`, encoders in `crates/encoder` | done |
 | R1.4 identical client and wire protocol | `client/` + `proto.rs` have no platform branches | done |
 | R2.1 DisplayProvider | `DisplayProvider::{list, open, virtual_displays}`, `DisplayInfo{id,name,size,refresh,position,primary,kind}` | done |
 | R2.2 CaptureSession | `FrameInfo{dirty, moved, capture_us}`, `read()` (CPU BGRX), `mapped()`, `gpu_surface()` | done |
@@ -33,3 +33,7 @@
 | R6.2 same probe + harness | `rt-testapp` (X11 + Win32), client `?bench=N` | done |
 | R6.3 one workspace, cfg providers | root `Cargo.toml` | done |
 | R6.4 graceful degradation | encoder fallback chain with reasons (status + per client), lossless-only when no encoder, capture reopen with errors in status | done |
+| R7.1 macOS capture | `platform-macos/src/sck.rs`: ScreenCaptureKit, changed areas from the frame info, IOSurface frames shared with the encoder | verified in CI (GitHub macOS 15 VM, 1024x768): display listed, HELLO and frames reach a client; not on a Retina display or macOS 26 |
+| R7.2 macOS video | `encoder/src/videotoolbox.rs`: VideoToolbox driven directly, H.264 / HEVC, IOSurface or memory input, scaling, bitrate changed in place | verified in CI with VideoToolbox's software encoder (no hardware in the VM): keyframes with parameter sets, P-frames, forced keyframes, scaled input, HEVC from the capture surface to a client; hardware encoder not run |
+| R7.3 macOS input, cursor, clipboard, sound | `input.rs` (Quartz events), `cursor.rs` (NSCursor), `clipboard.rs` (NSPasteboard), `audio.rs` (ScreenCaptureKit sound) | verified in CI: pointer moved to the exact position, cursor shape sent, clipboard both ways, system sound as Opus; keys, clicks, scrolling and typing not run |
+| R7.4 macOS launch agent | `service.rs`: install/uninstall/start/stop through launchctl | not run |

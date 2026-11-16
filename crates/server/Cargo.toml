@@ -17,6 +17,9 @@ toml = "0.8"
 libc.workspace = true
 remothing-platform-linux = { path = "../platform-linux" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+remothing-platform-macos = { path = "../platform-macos" }
+
 [target.'cfg(windows)'.dependencies]
 remothing-platform-windows = { path = "../platform-windows" }
 

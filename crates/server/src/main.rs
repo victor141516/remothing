@@ -4,7 +4,7 @@ const USAGE: &str = "\
 usage:
   remothing [--config PATH] [--display ID] [--virtual WxH] [--session-command CMD]   run the server
   remothing [--config PATH] set-admin-password PASSWORD
-  remothing [--config PATH] service install|uninstall|start|stop|run   (Windows)";
+  remothing [--config PATH] service install|uninstall|start|stop|run   (Windows; macOS: install|uninstall|start|stop)";
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +31,11 @@ fn default_config_path() -> PathBuf {
             .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
             .unwrap_or_else(|_| PathBuf::from("."));
         base.join("remothing").join("config.toml")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        home.join("Library/Application Support/remothing/config.toml")
     }
 }
 
@@ -73,6 +78,11 @@ fn main() -> Result<()> {
             let sub = command.get(1).context("service install|uninstall|start|stop|run")?;
             return remothing_platform_windows::service::command(sub, &config_path);
         }
+        #[cfg(target_os = "macos")]
+        Some("service") => {
+            let sub = command.get(1).context("service install|uninstall|start|stop")?;
+            return remothing_platform_macos::service::command(sub, &config_path);
+        }
         Some(other) => bail!("unknown command {other}"),
     }
 
@@ -99,4 +109,9 @@ fn build_platform(table: &toml::Table, encoders: Box<dyn EncoderProvider>) -> Re
 #[cfg(windows)]
 fn build_platform(table: &toml::Table, encoders: Box<dyn EncoderProvider>) -> Result<Arc<dyn Platform>> {
     Ok(Arc::new(remothing_platform_windows::WindowsPlatform::new(table, encoders)?))
+}
+
+#[cfg(target_os = "macos")]
+fn build_platform(_table: &toml::Table, encoders: Box<dyn EncoderProvider>) -> Result<Arc<dyn Platform>> {
+    Ok(Arc::new(remothing_platform_macos::MacPlatform::new(encoders)?))
 }

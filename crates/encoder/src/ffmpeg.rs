@@ -94,8 +94,8 @@ impl InputKind {
 
 /// Bitrate cap range: below the floor pictures fall apart; the ceiling sits
 /// within H.264 High level 5.2 and above what QP 20 needs for screen content.
-const MIN_BITRATE: u64 = 500_000;
-const MAX_BITRATE: u64 = 200_000_000;
+pub(crate) const MIN_BITRATE: u64 = 500_000;
+pub(crate) const MAX_BITRATE: u64 = 200_000_000;
 /// Quality floor: the QP of the former constant-QP mode, so an unconstrained
 /// cap yields the same pictures and no wasted bits. AV1's scale runs to 255:
 /// measured at constant QP on recordings of rt-testapp (`full`, `scroll`),
@@ -445,7 +445,7 @@ pub(crate) fn has_option(codec: ff::Codec, name: &str) -> bool {
 /// bitstream restrictions the spec then infers max_num_reorder_frames = 0, so
 /// decoders (Chromium's included) output each picture as soon as it is decoded
 /// instead of holding it in the DPB waiting for possible reordering.
-fn mark_no_reorder(annexb: &mut [u8]) {
+pub(crate) fn mark_no_reorder(annexb: &mut [u8]) {
     let mut i = 0;
     while i + 4 < annexb.len() {
         if annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 1 {
