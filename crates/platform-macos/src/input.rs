@@ -66,7 +66,7 @@ impl QuartzInput {
     }
 
     /// Where the pointer is now, desktop points.
-    fn pointer() -> Option<CGPoint> {
+    fn desktop_pointer() -> Option<CGPoint> {
         CGEvent::new(None).map(|e| CGEvent::location(Some(&e)))
     }
 
@@ -107,16 +107,20 @@ impl InputProvider for QuartzInput {
 
     fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        let from = Self::pointer().or(s.position).unwrap_or(self.geometry.bounds.origin);
+        let from = Self::desktop_pointer().or(s.position).unwrap_or(self.geometry.bounds.origin);
         let (sx, sy) = self.geometry.scale();
         // Counts are display pixels of movement; the pointer moves in points.
         let to = self.geometry.clamp(CGPoint::new(from.x + dx as f64 / sx, from.y + dy as f64 / sy));
         self.move_to(&mut s, to, Some((dx, dy)))
     }
 
+    fn pointer(&self) -> Result<Option<(u32, u32)>> {
+        Ok(Self::desktop_pointer().map(|p| self.geometry.display_pixel(p)))
+    }
+
     fn button(&self, button: Button, down: bool) -> Result<()> {
         let mut s = self.state.lock().unwrap();
-        let at = s.position.or_else(Self::pointer).unwrap_or(self.geometry.bounds.origin);
+        let at = s.position.or_else(Self::desktop_pointer).unwrap_or(self.geometry.bounds.origin);
         let (press, release, cg_button, number) = button_types(button);
         let count = if down {
             let interval = objc2_app_kit::NSEvent::doubleClickInterval();

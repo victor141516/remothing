@@ -128,7 +128,10 @@ and then they are remothing's own. Restart the server after granting them.
   picture after a click on it, so it never leaves the window. Esc frees it
   in a window (the browser insists), and a click traps it again; the same
   shortcut or button turns capture off. A game that needs Esc: use
-  `Fullscreen` too, where Esc reaches the remote side.
+  `Fullscreen` too, where Esc reaches the remote side. `&capturemoves=positions`
+  in the address makes the server move the remote cursor to positions,
+  as without capture, instead of sending mouse movement: for comparing how
+  a game reacts to each.
 - Scrolling keeps the device's steps: a mouse wheel scrolls by notches,
   a trackpad (a Mac's included, with its momentum) or two fingers on a
   touch screen scroll as finely as they move. Windows programs that read

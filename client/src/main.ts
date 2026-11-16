@@ -76,6 +76,7 @@ const input = new Input(
     showPointer();
   },
 );
+input.movesAsPositions = params.get('capturemoves') === 'positions';
 
 const stats = new Stats();
 let pingRtt = NaN;

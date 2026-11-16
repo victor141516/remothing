@@ -1,5 +1,5 @@
 import { EVDEV } from './keymap';
-import { C_BUTTON, C_KEY, C_MOVE, C_MOVE_REL, C_TEXT, C_WHEEL, WHEEL_NOTCH } from './proto';
+import { C_BUTTON, C_KEY, C_MOVE, C_MOVE_REL, C_TEXT, C_WHEEL, MOVE_AS_POSITION, WHEEL_NOTCH } from './proto';
 
 // Browser MouseEvent.button -> X button.
 const BUTTONS = [1, 2, 3, 8, 9];
@@ -67,6 +67,10 @@ export class Input {
   private relY = 0;
   /** Buttons still held from the click that trapped the mouse (not sent). */
   private ignored = 0;
+  /** While the mouse is trapped, the server injects its counts as positions
+   * (`?capturemoves=positions`), as without capture: for comparing how a
+   * program takes either. */
+  movesAsPositions = false;
 
   /** `pointerChanged`: `touch` changed, or the pointer moved by touch.
    * `captureChanged`: the capture mode, or whether the mouse is trapped, changed. */
@@ -209,6 +213,7 @@ export class Input {
     const m = new Uint8Array(6);
     const v = new DataView(m.buffer);
     m[0] = C_MOVE_REL;
+    m[1] = this.movesAsPositions ? MOVE_AS_POSITION : 0;
     v.setInt16(2, sx, true);
     v.setInt16(4, sy, true);
     this.send(m);

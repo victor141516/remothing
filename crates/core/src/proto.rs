@@ -150,9 +150,13 @@ pub const C_NACK: u8 = 20;
 /// VIEW_HDR, the client can show an HDR picture where it is now.
 pub const C_VIEW: u8 = 21;
 pub const VIEW_HDR: u8 = 1;
-/// pad u8, dx i16, dy i16: move the pointer by that many mouse counts
-/// (the client captured the mouse; a game reads them as they are).
+/// flags u8, dx i16, dy i16: move the pointer by that many mouse counts
+/// (the client captured the mouse; a game reads them as they are). With
+/// MOVE_AS_POSITION the server puts the pointer where it is now plus the
+/// counts, as the absolute move of an uncaptured mouse (to compare how
+/// programs take either).
 pub const C_MOVE_REL: u8 = 22;
+pub const MOVE_AS_POSITION: u8 = 1;
 /// on u8: the client has the mouse captured (1) or not (0); while it has,
 /// it gets S_CURSOR_POS.
 pub const C_CAPTURE: u8 = 23;

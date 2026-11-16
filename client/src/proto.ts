@@ -86,8 +86,10 @@ export const C_NACK = 20;
 export const C_VIEW = 21;
 /** C_VIEW flag: this page can show an HDR picture where it is now. */
 export const VIEW_HDR = 1;
-/** pad u8, dx i16, dy i16: mouse counts, while the mouse is captured. */
+/** flags u8, dx i16, dy i16: mouse counts, while the mouse is captured. */
 export const C_MOVE_REL = 22;
+/** C_MOVE_REL flag: the server injects the counts as a position (see proto.rs). */
+export const MOVE_AS_POSITION = 1;
 /** on u8: this client captured the mouse (it then gets S_CURSOR_POS). */
 export const C_CAPTURE = 23;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */

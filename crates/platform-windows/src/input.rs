@@ -276,6 +276,17 @@ impl InputProvider for SendInputProvider {
         self.motion(x.max(0) as u32, y.max(0) as u32)
     }
 
+    fn pointer(&self) -> Result<Option<(u32, u32)>> {
+        let mut p = POINT::default();
+        // SAFETY: valid out pointer. Fails on a desktop this thread cannot read.
+        if unsafe { GetCursorPos(&mut p) }.is_err() {
+            return Ok(None);
+        }
+        let x = (p.x - self.x).clamp(0, self.width as i32 - 1) as u32;
+        let y = (p.y - self.y).clamp(0, self.height as i32 - 1) as u32;
+        Ok(Some((x, y)))
+    }
+
     fn button(&self, button: Button, down: bool) -> Result<()> {
         let (flags, data) = match (button, down) {
             (Button::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),

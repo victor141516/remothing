@@ -113,6 +113,14 @@ impl InputProvider for XTestInput {
         self.motion(x.clamp(0, w - 1) as u32, y.clamp(0, h - 1) as u32)
     }
 
+    fn pointer(&self) -> Result<Option<(u32, u32)>> {
+        let p = self.conn.query_pointer(self.root)?.reply()?;
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let x = (p.root_x as i32 - self.origin.0).clamp(0, w - 1) as u32;
+        let y = (p.root_y as i32 - self.origin.1).clamp(0, h - 1) as u32;
+        Ok(Some((x, y)))
+    }
+
     fn button(&self, button: Button, down: bool) -> Result<()> {
         let detail = match button {
             Button::Left => 1,

@@ -1283,7 +1283,16 @@ fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
     let Some(input) = app.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
-        (Some(proto::C_MOVE_REL), 6..) => input.motion_relative(u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32)?,
+        (Some(proto::C_MOVE_REL), 6..) => {
+            let (dx, dy) = (u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32);
+            if b[1] & proto::MOVE_AS_POSITION == 0 {
+                input.motion_relative(dx, dy)?
+            } else if let (Some((x, y)), Some(d)) = (input.pointer()?, app.control.current()) {
+                let x = (x as i32 + dx).clamp(0, d.width as i32 - 1) as u32;
+                let y = (y as i32 + dy).clamp(0, d.height as i32 - 1) as u32;
+                input.motion(x, y)?
+            }
+        }
         (Some(proto::C_BUTTON), 3..) => {
             // Wire format uses X button numbers.
             let button = match b[1] {

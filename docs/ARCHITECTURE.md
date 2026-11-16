@@ -362,6 +362,11 @@ coordinates, evdev key codes on the wire).
   window, Alt+Tab or another tab free the mouse (the browser decides); the
   mode stays on and the next click traps it again. In fullscreen with the
   keyboard lock Esc reaches the game.
+  With `?capturemoves=positions` the counts carry `MOVE_AS_POSITION` and
+  the server injects where the pointer is now plus the counts as an
+  absolute move, as without capture: for comparing how a program takes
+  either (a game may react differently to raw relative counts and to
+  absolute moves).
 - **Scrolling** (`C_WHEEL`) travels in wheel units, 120 per notch
   (Windows' `WHEEL_DELTA`), so nothing has to guess the device: a mouse
   wheel arrives in whole notches (Chromium reports 100 px each, Firefox
