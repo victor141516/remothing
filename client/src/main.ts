@@ -24,8 +24,10 @@ const benchSeconds = Number(params.get('bench') ?? 0);
 const probeEnabled = benchSeconds > 0 || params.has('probe');
 // Relative to the page, so the client also works behind a reverse proxy under a path prefix.
 const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${new URL('.', location.href).pathname}`;
-// Stream access token, given in the page URL (`?token=`).
-const auth = `?token=${encodeURIComponent(params.get('token') ?? '')}`;
+// Stream access token, given in the page URL (`?token=`), and this page's
+// key on both sockets: its input goes to the display its stream shows.
+const sessionKey = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+const auth = `?token=${encodeURIComponent(params.get('token') ?? '')}&session=${sessionKey}`;
 
 const canvas = document.getElementById('screen') as HTMLCanvasElement;
 const statsEl = document.getElementById('stats') as HTMLDivElement;
@@ -321,6 +323,12 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case 'displays': {
       const list = JSON.parse(m.json) as DisplaysMessage;
       ui.displays(list);
+      // The address names the display this window streams: a reload, or
+      // the address opened elsewhere, comes back to it.
+      if (list.current && params.get('display') !== list.current) {
+        params.set('display', list.current);
+        history.replaceState(null, '', `${location.pathname}?${params}${location.hash}`);
+      }
       break;
     }
     case 'audioinfo':
@@ -346,6 +354,8 @@ toWorker(
     type: 'init',
     canvas: offscreen,
     url: `${wsBase}ws${auth}`,
+    // `?display=`: the display to stream, if it exists (else the server's default).
+    display: params.get('display') ?? '',
     probe: readBarcode,
     forceDc: transport === 'webrtc',
     wt: transport !== 'ws' && transport !== 'webrtc',

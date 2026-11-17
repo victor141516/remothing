@@ -403,9 +403,32 @@ selection notifications on `CLIPBOARD`, `UTF8_STRING` conversion (INCR for
 large texts), and ownership of the selection, answering requests, when a
 client sets it.
 
-`C_DISPLAYS` asks for the display list (`S_DISPLAYS`, JSON with the current
-one), `C_DISPLAY` selects one, the same hot switch as the admin UI: every
-client gets a new HELLO.
+Each client streams its own display, so windows of the same browser (or
+different devices) can show different displays at once:
+
+- **Captures** (`capture.rs`, `Streams`): one capture thread, tile state
+  (`Shared`) and display state (`DisplayControl`: input, clipboard, cursor)
+  per display some client watches. Clients on the same display share them.
+  A capture starts with its first client and stops 10 s after its last left
+  (a reload or a quick switch back finds it running). A display missing
+  from the list for 10 s, or removed on purpose (a virtual one), moves its
+  clients to the default display; not at once, because a Windows virtual
+  display changing mode is removed and added again.
+- **Choosing**: a client starts on the display it names (`?display=` in the
+  page's address, sent on the stream socket) when it exists, else the
+  default (`server.display`, set from the admin UI), else the primary.
+  `C_DISPLAY` moves only that client: it leaves the old display's `Shared`
+  and joins the new one's, its frame sequence continuing so frames of the
+  old display still in flight never pass for new ones, and its first pull
+  there is a HELLO. `S_DISPLAYS` tells it which display it streams; the
+  page writes it into its address, and a reconnect asks for that one.
+- **Input**: the input socket belongs to no session by itself; the page
+  gives both sockets the same random key, and input goes to the display the
+  stream socket with that key watches. The host still has one pointer and
+  one keyboard focus: using a window moves the real cursor to its display.
+- **Sound** is the host's, one stream for all: the newest window of a
+  browser plays it and the older ones go quiet (a `BroadcastChannel`),
+  which their Sound button undoes.
 
 ## Virtual displays
 
@@ -737,10 +760,11 @@ keyframe requests, and the stutters the client saw — frames drawn more than
 200 ms after their change, with the split of the worst one: on the server
 waiting until the frame was built (link window, pacing), encoder upload,
 encoding and the rest until sent; network; client), mode and size
-changes, the view each client reports, display selection
-(hot switch), simulated display create/destroy (Linux), live settings
-(bandwidth budget, lossless limit, encoder preference, keyboard layout, stream
-token, admin password). Settings persist in the TOML config file.
+changes, the view each client reports, which displays are streamed and the
+default display new clients start on, virtual display create/destroy, live
+settings (bandwidth budget, lossless limit, encoder preference, keyboard
+layout, stream token, admin password). Settings persist in the TOML config
+file.
 TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
 
 ## Platform notes and limitations

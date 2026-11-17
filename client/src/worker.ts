@@ -30,7 +30,7 @@ import { Recorder, type Batch } from './stats';
 
 export type ToWorker =
   /** `hdr`: the page started on an HDR screen (see `Renderer`). */
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null; hdr: boolean }
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; display: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null; hdr: boolean }
   | { type: 'report'; json: string }
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
@@ -273,6 +273,12 @@ let audioOn = false;
 let viewMessage: Uint8Array | null = null;
 /** The mouse is trapped (told again on every connection). */
 let captureOn = false;
+/** The display to stream: the page's address at first, then the one streamed. */
+let display = '';
+/** The part of S_DISPLAYS the worker reads. */
+interface ShownDisplay {
+  current: string | null;
+}
 function sendAudio(): void {
   send(new Uint8Array([C_AUDIO, audioOn ? 1 : 0]));
 }
@@ -779,11 +785,14 @@ function reportLate(): void {
 }
 
 function connect(url: string): void {
-  ws = new WebSocket(offered.length ? `${url}&codecs=${offered.join(',')}` : url);
+  const codecs = offered.length ? `&codecs=${offered.join(',')}` : '';
+  ws = new WebSocket(`${url}${codecs}&display=${encodeURIComponent(display)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
     syncSamples.length = 0;
     for (let i = 0; i < 20; i++) setTimeout(ping, i * 25);
+    // Which display the server chose (the page's address shows it).
+    send(new Uint8Array([C_DISPLAYS]));
     if (!visible) sendVisible();
     if (audioOn) sendAudio();
     if (viewMessage) send(viewMessage);
@@ -826,9 +835,13 @@ function connect(url: string): void {
       case S_CLIPBOARD:
         post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 1)) });
         break;
-      case S_DISPLAYS:
-        post({ type: 'displays', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
+      case S_DISPLAYS: {
+        const json = new TextDecoder().decode(new Uint8Array(buf, 1));
+        // A reconnect comes back to the display streamed now.
+        display = (JSON.parse(json) as ShownDisplay).current ?? display;
+        post({ type: 'displays', json });
         break;
+      }
       case S_AUDIO_INFO:
         post({ type: 'audioinfo', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
         break;
@@ -885,6 +898,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       // this worker, delaying video output and ACKs). Ready before any frame.
       void Promise.all([zstd.init(), hardwareCodecs(m.codec)]).then(([, codecs]) => {
         offered = codecs;
+        display = m.display;
         connect(m.url);
       });
       setInterval(() => {

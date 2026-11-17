@@ -103,10 +103,15 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
     Ok(Json(json!({
         "platform": p.name(),
         "provider": p.displays().provider_name(),
-        "display": app.control.current(),
-        "motion": app.shared.motion(),
-        // Above 0: the picture is HDR, up to that many times SDR white.
-        "hdr_max": app.shared.hdr_max(),
+        // Every display being captured: who watches it, whether it moves as
+        // a whole (motion mode), and above 0 an HDR picture up to that many
+        // times SDR white.
+        "streams": app.streams.active().iter().map(|s| json!({
+            "display": s.control.current(),
+            "clients": s.watchers(),
+            "motion": s.shared.motion(),
+            "hdr_max": s.shared.hdr_max(),
+        })).collect::<Vec<_>>(),
         "scheduling": app.streaming.lock().unwrap().notes,
         "encoders": p.encoders().backends(),
         "encoders_unavailable": p.encoders().unavailable(),
@@ -165,8 +170,8 @@ async fn install_virtual(State(app): State<Arc<App>>, headers: HeaderMap) -> Api
 
 async fn destroy_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult {
     check(&app, &headers)?;
-    let v = app.platform.displays().virtual_displays().ok_or_else(|| bad("virtual displays unsupported here"))?;
-    v.destroy(&id).map_err(bad)?;
+    // Its clients move to the default display at once.
+    app.virtual_request(VirtualRequest::Destroy { id }).map_err(bad)?;
     Ok(Json(json!({"ok": true})).into_response())
 }
 
@@ -219,11 +224,7 @@ async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): 
     let mut warnings = Vec::new();
     if let Some(layout) = &p.keyboard_layout {
         *app.keyboard_layout.write().unwrap() = layout.clone();
-        if let Some(input) = app.control.input() {
-            if let Err(e) = input.set_keyboard_layout(layout) {
-                warnings.push(format!("keyboard layout: {e:#}"));
-            }
-        }
+        warnings.extend(app.streams.set_keyboard_layout(layout).into_iter().map(|e| format!("keyboard layout: {e}")));
     }
     // Tuning and encoder preference are picked up live by the client threads.
     app.update_settings(|s| {

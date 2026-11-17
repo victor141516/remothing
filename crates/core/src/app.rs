@@ -1,8 +1,9 @@
-//! Process wiring: capture thread, streaming listener and admin listener.
+//! Process wiring: display captures, streaming listener and admin listener.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{bail, Context, Result};
@@ -15,18 +16,22 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::assets;
 use crate::audio::AudioHub;
-use crate::capture::{CaptureLoop, DisplayControl};
+use crate::capture::{DisplayStream, Streams};
 use crate::config::{ConfigFile, Settings};
 use crate::mic::MicHub;
 use crate::platform::{DisplayMode, Platform, ThreadRole};
-use crate::shared::Shared;
 use crate::stream;
 use crate::telemetry::Telemetry;
 
 pub struct App {
     pub platform: Arc<dyn Platform>,
-    pub shared: Arc<Shared>,
-    pub control: Arc<DisplayControl>,
+    /// The displays being captured, one per display some client watches.
+    pub streams: Arc<Streams>,
+    /// Client ids, unique across displays.
+    pub next_client: AtomicU64,
+    /// The display each page's input socket acts on, by the page's session
+    /// key (`/ws` and `/input` give the same one).
+    pub input_routes: Mutex<HashMap<String, Watching>>,
     pub telemetry: Arc<Telemetry>,
     pub audio: Arc<AudioHub>,
     pub mic: Arc<MicHub>,
@@ -42,6 +47,10 @@ pub struct App {
     /// Clients connected, and what the OS was asked for while they stream.
     pub streaming: Mutex<Streaming>,
 }
+
+/// The display a client streams, shared by its stream and input sockets;
+/// replaced when the client switches.
+pub type Watching = Arc<RwLock<Arc<DisplayStream>>>;
 
 #[derive(Default)]
 pub struct Streaming {
@@ -68,38 +77,51 @@ impl App {
         self.config.save(&s)
     }
 
-    /// Streams display `id` from now on (every client follows) and
-    /// remembers it for the next start.
+    /// Makes display `id` the one new clients start on, also after a restart.
+    /// Clients streaming another display stay there.
     pub fn select_display(&self, id: &str) -> Result<()> {
         if !self.platform.displays().list()?.iter().any(|d| d.id == id) {
             bail!("unknown display {id}");
         }
-        self.control.select(id);
         self.update_settings(|s| s.server.display = id.to_string())
     }
 
+    /// The display a client starts on: `wanted` when it is listed, else the
+    /// default (`server.display`), else the primary, else the first.
+    pub fn resolve_display(&self, wanted: Option<&str>) -> Result<String> {
+        let list = self.platform.displays().list()?;
+        let default = self.settings.read().unwrap().server.display.clone();
+        let listed = |id: &str| list.iter().any(|d| d.id == id);
+        let chosen = wanted.filter(|w| listed(w)).or(Some(default.as_str()).filter(|d| listed(d)));
+        chosen
+            .map(String::from)
+            .or_else(|| list.iter().find(|d| d.primary).or(list.first()).map(|d| d.id.clone()))
+            .context("no display available")
+    }
+
     /// The display list as clients and the admin UI get it (see
-    /// `proto::S_DISPLAYS`). `current`: the display being switched to, when
-    /// the capture thread has not switched yet.
-    pub fn displays_json(&self, current: Option<String>) -> Result<serde_json::Value> {
+    /// `proto::S_DISPLAYS`): `current` is the display the asking client
+    /// streams; `default` the one new clients start on; `streamed` the
+    /// displays being captured, with how many clients watch each.
+    pub fn displays_json(&self, current: Option<&str>) -> Result<serde_json::Value> {
         let d = self.platform.displays();
         let list = d.list()?;
         let virt = d.virtual_displays().map(|v| json!({ "setup": v.setup(), "capabilities": v.capabilities() }));
-        let current = current.or_else(|| self.control.current().map(|c| c.id));
-        Ok(json!({ "displays": list, "current": current, "virtual": virt }))
+        let streamed: serde_json::Map<String, serde_json::Value> =
+            self.streams.active().iter().map(|s| (s.id.clone(), json!(s.watchers()))).collect();
+        let default = self.resolve_display(None).ok();
+        Ok(json!({ "displays": list, "current": current, "default": default, "streamed": streamed, "virtual": virt }))
     }
 
-    /// Carries out a virtual display request. A new display is streamed at
-    /// once; returns the display being switched to, if any.
+    /// Carries out a virtual display request. Returns a new display, which
+    /// the asking client streams from then on.
     pub fn virtual_request(&self, req: VirtualRequest) -> Result<Option<String>> {
         let v = self.platform.displays().virtual_displays().context("virtual displays are not supported here")?;
         match req {
             VirtualRequest::Install => v.install().map(|()| None),
             VirtualRequest::Create { mode } => {
                 mode.check(&v.capabilities())?;
-                let info = v.create(mode)?;
-                self.select_display(&info.id)?;
-                Ok(Some(info.id))
+                Ok(Some(v.create(mode)?.id))
             }
             VirtualRequest::Set { id, mode } => {
                 let caps = v.capabilities();
@@ -108,14 +130,15 @@ impl App {
                 }
                 mode.check(&caps)?;
                 v.set_mode(&id, mode)?;
-                // Streamed now: opened again at its new size.
-                if self.control.current().is_some_and(|c| c.id == id) {
-                    self.control.select(&id);
-                    return Ok(Some(id));
-                }
+                // Opened again at its new size, if it is streamed.
+                self.streams.reopen(&id);
                 Ok(None)
             }
-            VirtualRequest::Destroy { id } => v.destroy(&id).map(|()| None),
+            VirtualRequest::Destroy { id } => {
+                v.destroy(&id)?;
+                self.streams.gone(&id);
+                Ok(None)
+            }
         }
     }
 
@@ -176,14 +199,16 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
             .ok(),
         false => None,
     };
+    let keyboard_layout = Arc::new(RwLock::new(settings.input.keyboard_layout.clone()));
     let app = Arc::new(App {
         platform: platform.clone(),
-        shared: Arc::new(Shared::new(settings.server.tile)),
-        control: Arc::new(DisplayControl::default()),
+        streams: Streams::new(platform.clone(), telemetry.clone(), keyboard_layout.clone(), settings.server.tile),
+        next_client: AtomicU64::new(1),
+        input_routes: Mutex::default(),
         telemetry: telemetry.clone(),
         audio: AudioHub::new(platform.clone(), telemetry.clone()),
-        mic: MicHub::new(platform.clone(), telemetry.clone()),
-        keyboard_layout: Arc::new(RwLock::new(settings.input.keyboard_layout.clone())),
+        mic: MicHub::new(platform, telemetry),
+        keyboard_layout,
         settings: RwLock::new(settings.clone()),
         config,
         admin_sessions: Mutex::new(HashSet::new()),
@@ -192,16 +217,6 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
         wt,
         streaming: Mutex::default(),
     });
-
-    let capture = CaptureLoop {
-        platform,
-        shared: app.shared.clone(),
-        control: app.control.clone(),
-        telemetry,
-        keyboard_layout: app.keyboard_layout.clone(),
-    };
-    let initial = settings.server.display.clone();
-    std::thread::Builder::new().name("capture".into()).spawn(move || capture.run(initial))?;
 
     // Cross-origin isolation gives the client 5 µs timer resolution instead of 100 µs.
     let stream_router = Router::new()

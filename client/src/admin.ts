@@ -40,9 +40,15 @@ interface ClientStatus {
 interface Status {
   platform: string;
   provider: string;
-  display: DisplayInfo | null;
-  /** The screen moves as a whole and is streamed as video (motion mode). */
-  motion: boolean;
+  /** Every display being captured. */
+  streams: {
+    display: DisplayInfo | null;
+    clients: number;
+    /** It moves as a whole and is streamed as video (motion mode). */
+    motion: boolean;
+    /** Above 0: an HDR picture, up to that many times SDR white. */
+    hdr_max: number;
+  }[];
   encoders: string[];
   /** Compiled-in backends that failed the startup probe: [name, reason]. */
   encoders_unavailable: [string, string][];
@@ -61,7 +67,10 @@ interface Status {
 
 interface Displays {
   displays: DisplayInfo[];
-  current: string | null;
+  /** The display new clients start on. */
+  default: string | null;
+  /** Displays being streamed, with how many clients watch each. */
+  streamed: Record<string, number>;
   virtual: DisplaysMessage['virtual'];
 }
 
@@ -288,7 +297,6 @@ const LATENCIES: [string, string][] = [
 ];
 
 function renderStatus(s: Status) {
-  const d = s.display;
   const overview = h(
     'section',
     {},
@@ -300,10 +308,24 @@ function renderStatus(s: Status) {
       h('dd', {}, s.platform),
       h('dt', {}, 'Display provider'),
       h('dd', {}, s.provider),
-      h('dt', {}, 'Current display'),
-      h('dd', {}, d ? `${d.name} (${d.id}) ${fmtRes(d)} @ ${fmtHz(d.refresh_hz)}` : h('span', { class: 'dim' }, 'none')),
-      h('dt', {}, 'Mode'),
-      h('dd', {}, s.motion ? 'motion (the screen moves as a whole: what changes goes as video)' : 'tiles'),
+      h('dt', {}, 'Streamed displays'),
+      h(
+        'dd',
+        {},
+        s.streams.length
+          ? h(
+              'ul',
+              { class: 'plain' },
+              ...s.streams.map((st) => {
+                const x = st.display;
+                const name = x ? `${x.name} (${x.id}) ${fmtRes(x)} @ ${fmtHz(x.refresh_hz)}` : 'opening';
+                const mode = st.motion ? 'motion (moves as a whole: what changes goes as video)' : 'tiles';
+                const hdr = st.hdr_max > 0 ? `, HDR up to ${st.hdr_max.toFixed(1)}x SDR white` : '';
+                return h('li', {}, h('b', {}, name), `: ${st.clients} client(s), ${mode}${hdr}`);
+              }),
+            )
+          : h('span', { class: 'dim' }, 'none (no client connected)'),
+      ),
       h('dt', {}, 'Encoders'),
       h('dd', {}, s.encoders.length ? s.encoders.join(', ') : h('span', { class: 'dim' }, 'none (lossless tiles only)')),
       h('dt', {}, 'Unavailable encoders'),
@@ -413,7 +435,7 @@ async function loadDisplays() {
 
 function renderDisplays(d: Displays) {
   const rows = d.displays.map((x) => {
-    const current = x.id === d.current;
+    const isDefault = x.id === d.default;
     return [
       td(h('span', { class: 'mono' }, x.id)),
       td(x.name),
@@ -421,18 +443,25 @@ function renderDisplays(d: Displays) {
       tdNum(fmtHz(x.refresh_hz)),
       tdNum(`${x.x}, ${x.y}`),
       td(x.primary ? 'yes' : ''),
-      td(badge(x.kind, x.kind), ' ', current && badge('current', 'streaming')),
+      td(
+        badge(x.kind, x.kind),
+        ' ',
+        isDefault && badge('current', 'default'),
+        ' ',
+        (d.streamed[x.id] ?? 0) > 0 && badge('current', `${d.streamed[x.id]} streaming`),
+      ),
       td(
         h('div', { class: 'row' },
           h('button', {
-            disabled: current,
+            disabled: isDefault,
+            title: 'The display new windows start on',
             onclick: () =>
               action(async () => {
                 await api('POST', 'api/displays/select', { id: x.id });
-                banner('info', `Streaming ${x.name}.`);
+                banner('info', `New windows start on ${x.name}.`);
                 await loadDisplays();
               }),
-          }, 'Stream this'),
+          }, 'Make default'),
           x.mode &&
             h('button', {
               class: 'danger',

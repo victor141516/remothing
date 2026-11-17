@@ -45,9 +45,10 @@ pub const CHUNK_PAYLOAD: usize = 60 * 1024;
 pub const S_CLIPBOARD: u8 = 7;
 /// UTF-8 JSON answering C_DISPLAYS, C_DISPLAY or C_VIRTUAL: `{"displays":[{"id",
 /// "name","width","height","primary","kind","mode"?,...}],"current":id,
-/// "virtual":null|{"setup":{"state":"ready"|"install"|"unavailable",
-/// "notice"|"reason"},"capabilities":{...}},"error"?:text}`. `error` is the
-/// failure of this client's last C_VIRTUAL.
+/// "default":id,"streamed":{id:clients},"virtual":null|{"setup":{"state":
+/// "ready"|"install"|"unavailable","notice"|"reason"},"capabilities":{...}},
+/// "error"?:text}`. `current` is the display this client streams; `error`
+/// the failure of its last C_VIRTUAL.
 pub const S_DISPLAYS: u8 = 8;
 /// UTF-8 JSON, after C_AUDIO and whenever it changes: the sound stream
 /// `{"active":true,"codec","rate","channels","description":hex,"source"}`
@@ -127,7 +128,7 @@ pub const WHEEL_NOTCH: i32 = 120;
 pub const C_KEY: u8 = 13;
 /// Asks for the display list (answered with S_DISPLAYS).
 pub const C_DISPLAYS: u8 = 14;
-/// UTF-8 display id: stream that display (for every client).
+/// UTF-8 display id: this client streams that display from now on.
 pub const C_DISPLAY: u8 = 15;
 /// UTF-8 text to type as characters, whatever the remote keyboard layout
 /// (a phone's keyboard gives text, not keys). `\n` is the Enter key.

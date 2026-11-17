@@ -111,6 +111,14 @@ and then they are remothing's own. Restart the server after granting them.
   typed or pasted in it is copied there), an on-screen keyboard, and the
   stats overlay. A held key repeats on the remote side, and everything a
   client holds is released if it disconnects.
+- Several displays at once: each window streams its own display. The
+  display selector in the controls changes only that window, and the
+  address carries it (`&display=ID`): a reload, or the address opened in
+  another window, streams the same display; one that no longer exists
+  gives the default display, and the address follows. The host still has
+  one pointer and one keyboard: using a window moves the real cursor to
+  its display. Sound plays in the newest window; `Sound` turns it on in
+  the others too.
 - On a phone or tablet the screen works as a trackpad: one finger moves the
   pointer, a tap clicks, a tap with two fingers is the right button, two
   fingers dragged scroll (and keep sliding when let go quickly), and a tap
@@ -190,7 +198,8 @@ and then they are remothing's own. Restart the server after granting them.
   clients are connected (high process class, realtime GPU scheduling, a
   1 ms timer, the compositor as multimedia).
 
-Main config keys: `server.listen`, `server.admin_listen`, `server.display`,
+Main config keys: `server.listen`, `server.admin_listen`, `server.display`
+(the display new windows start on; "Make default" in the admin UI sets it),
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
 below it), `tuning.max_lossless_frame_kb`,
 `encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `encoder.codec`

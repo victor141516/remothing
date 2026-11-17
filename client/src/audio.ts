@@ -2,7 +2,8 @@
 // packets on the WebSocket; WebCodecs decodes them and an AudioContext
 // plays each piece right after the previous one, a little behind its
 // arrival so that uneven delivery leaves no gaps. Browsers only let a page
-// play after a click or a key, so the sound starts with the first one.
+// play after a click or a key, so the sound starts with the first one. Of
+// several windows only the newest starts it.
 
 /** S_AUDIO_INFO. */
 interface StreamInfo {
@@ -59,6 +60,20 @@ export class Sound {
       if (this.wanted) this.ask();
     };
     for (const type of types) window.addEventListener(type, unlock, true);
+    // With several windows open the newest one plays the sound; the older
+    // ones go quiet, and their Sound button turns it on there too.
+    const windows = new BroadcastChannel('remothing-sound');
+    windows.onmessage = () => {
+      if (this.wanted) this.quiet();
+    };
+    windows.postMessage('opened');
+  }
+
+  /** Another window took the sound. */
+  private quiet(): void {
+    this.wanted = false;
+    if (this.context?.state === 'running') this.actions.request(false);
+    this.stop('off: a newer window plays it (Sound turns it on here too)');
   }
 
   /** The user's switch. */

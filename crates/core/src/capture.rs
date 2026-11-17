@@ -1,8 +1,11 @@
-//! Capture thread: drives the selected display's `CaptureSession`, feeds the
-//! tile state and handles hot display switching.
+//! Capture threads: one per display some client watches. Each drives its
+//! display's `CaptureSession`, feeds that display's tile state (`Shared`) and
+//! stops a while after its last client left.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use tokio::sync::watch;
@@ -19,11 +22,19 @@ const FRAME_WAIT: Duration = Duration::from_millis(50);
 const REOPEN_DELAY: Duration = Duration::from_millis(250);
 /// Longest clipboard text relayed between the session and the clients.
 const MAX_CLIPBOARD: usize = 1 << 20;
+/// A display stays captured this long after its last client left: a reload
+/// or a quick switch back finds it running.
+const IDLE_STOP: Duration = Duration::from_secs(10);
+/// A display missing from the list this long is gone and its clients move
+/// to the default one. Not at once: a virtual display changing mode on
+/// Windows is removed and added again.
+const GONE_AFTER: Duration = Duration::from_secs(10);
 
 /// Clipboard text as last seen, and the client that set it (None: the session itself).
 pub type ClipboardText = (Option<u64>, Arc<str>);
 
-/// Selected display, shared between the capture thread, the input socket and the admin API.
+/// A captured display's state, shared between its capture thread, the
+/// clients watching it and the admin API.
 pub struct DisplayControl {
     /// Display id the capture thread should switch to.
     request: Mutex<Option<String>>,
@@ -98,62 +109,197 @@ impl DisplayControl {
     }
 }
 
-pub struct CaptureLoop {
-    pub platform: Arc<dyn Platform>,
+/// One display captured for the clients watching it.
+pub struct DisplayStream {
+    /// The display's id (what clients asked for).
+    pub id: String,
     pub shared: Arc<Shared>,
     pub control: Arc<DisplayControl>,
-    pub telemetry: Arc<Telemetry>,
+    /// Clients watching; changed under `Streams::map`'s lock.
+    watchers: AtomicUsize,
+    /// The display went away: its clients move to the default display.
+    gone: AtomicBool,
+}
+
+impl DisplayStream {
+    pub fn gone(&self) -> bool {
+        self.gone.load(Ordering::Acquire)
+    }
+
+    pub fn watchers(&self) -> usize {
+        self.watchers.load(Ordering::Acquire)
+    }
+
+    fn set_gone(&self) {
+        self.gone.store(true, Ordering::Release);
+        self.shared.wake_clients();
+    }
+}
+
+/// The displays being captured, by id.
+pub struct Streams {
+    platform: Arc<dyn Platform>,
+    telemetry: Arc<Telemetry>,
     /// Applied to each newly opened display's input provider.
-    pub keyboard_layout: Arc<RwLock<String>>,
+    keyboard_layout: Arc<RwLock<String>>,
+    tile: u32,
+    map: Mutex<HashMap<String, Arc<DisplayStream>>>,
+}
+
+impl Streams {
+    pub fn new(platform: Arc<dyn Platform>, telemetry: Arc<Telemetry>, keyboard_layout: Arc<RwLock<String>>, tile: u32) -> Arc<Self> {
+        Arc::new(Self { platform, telemetry, keyboard_layout, tile, map: Mutex::default() })
+    }
+
+    /// One more client watches display `id`; its capture starts with the
+    /// first. Each call is matched by an `unwatch`.
+    pub fn watch(self: &Arc<Self>, id: &str) -> Arc<DisplayStream> {
+        let mut map = self.map.lock().unwrap();
+        if let Some(s) = map.get(id).filter(|s| !s.gone()) {
+            s.watchers.fetch_add(1, Ordering::AcqRel);
+            return s.clone();
+        }
+        let stream = Arc::new(DisplayStream {
+            id: id.to_string(),
+            shared: Arc::new(Shared::new(self.tile)),
+            control: Arc::new(DisplayControl::default()),
+            watchers: AtomicUsize::new(1),
+            gone: AtomicBool::new(false),
+        });
+        map.insert(id.to_string(), stream.clone());
+        let capture = CaptureLoop { streams: self.clone(), stream: stream.clone() };
+        if let Err(e) = std::thread::Builder::new().name(format!("capture {id}")).spawn(move || capture.run()) {
+            self.telemetry.error("capture thread", anyhow::Error::new(e));
+        }
+        stream
+    }
+
+    pub fn unwatch(&self, stream: &DisplayStream) {
+        let _map = self.map.lock().unwrap();
+        stream.watchers.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// The displays being captured.
+    pub fn active(&self) -> Vec<Arc<DisplayStream>> {
+        let mut list: Vec<_> = self.map.lock().unwrap().values().cloned().collect();
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        list
+    }
+
+    /// Display `id` changed (its mode): opened again if it is captured.
+    pub fn reopen(&self, id: &str) {
+        if let Some(s) = self.map.lock().unwrap().get(id) {
+            s.control.select(id);
+        }
+    }
+
+    /// Display `id` was removed: its clients move on now.
+    pub fn gone(&self, id: &str) {
+        if let Some(s) = self.map.lock().unwrap().remove(id) {
+            s.set_gone();
+        }
+    }
+
+    /// Applies a keyboard layout to every captured display; the failures.
+    pub fn set_keyboard_layout(&self, layout: &str) -> Vec<String> {
+        let mut errors = Vec::new();
+        for s in self.active() {
+            if let Some(input) = s.control.input() {
+                if let Err(e) = input.set_keyboard_layout(layout) {
+                    errors.push(format!("{}: {e:#}", s.id));
+                }
+            }
+        }
+        errors
+    }
+
+    /// Ends `stream`'s capture if nobody watches it (checked under the lock
+    /// `watch` takes, so no client joins a stream that is ending).
+    fn finish(&self, stream: &Arc<DisplayStream>) -> bool {
+        let mut map = self.map.lock().unwrap();
+        if stream.watchers() > 0 {
+            return false;
+        }
+        if map.get(&stream.id).is_some_and(|s| Arc::ptr_eq(s, stream)) {
+            map.remove(&stream.id);
+        }
+        true
+    }
+}
+
+struct CaptureLoop {
+    streams: Arc<Streams>,
+    stream: Arc<DisplayStream>,
 }
 
 impl CaptureLoop {
-    /// Runs forever. `initial` empty = primary display, else first listed.
-    pub fn run(self, initial: String) {
-        // Every client waits for this thread.
-        self.platform.thread_priority(ThreadRole::Capture);
-        let mut wanted = initial;
+    /// Runs until nobody watched the display for `IDLE_STOP`, or it is gone.
+    fn run(self) {
+        // Every client of this display waits for this thread.
+        self.streams.platform.thread_priority(ThreadRole::Capture);
+        let id = self.stream.id.clone();
         // The picture every client can show (see `Shared::hdr_wanted`).
         let mut hdr = false;
+        let mut idle_since = None;
+        let mut missing_since: Option<Instant> = None;
         loop {
-            if let Some(id) = self.control.take_request() {
-                wanted = id;
+            if self.stream.gone() {
+                return;
             }
-            hdr = self.shared.hdr_wanted().unwrap_or(hdr);
-            let opened = match self.open(&wanted, hdr) {
-                Ok(o) => o,
-                Err(e) => {
-                    self.telemetry.error("capture: open display", e);
-                    std::thread::sleep(Duration::from_secs(1));
-                    continue;
+            if self.idle(&mut idle_since) && self.streams.finish(&self.stream) {
+                eprintln!("display {id}: no clients, capture stopped");
+                return;
+            }
+            self.stream.control.take_request();
+            hdr = self.stream.shared.hdr_wanted().unwrap_or(hdr);
+            match self.open(&id, hdr) {
+                Ok(Some(opened)) => {
+                    missing_since = None;
+                    if let Err(e) = self.stream_display(opened, hdr, &mut idle_since) {
+                        self.streams.telemetry.error("capture", e);
+                        std::thread::sleep(REOPEN_DELAY);
+                    }
                 }
-            };
-            wanted = opened.info.id.clone();
-            if let Err(e) = self.stream(opened, hdr) {
-                self.telemetry.error("capture", e);
-                std::thread::sleep(REOPEN_DELAY);
+                Ok(None) => {
+                    if missing_since.get_or_insert_with(Instant::now).elapsed() >= GONE_AFTER {
+                        eprintln!("display {id} is gone; its clients move to the default display");
+                        self.streams.gone(&id);
+                        return;
+                    }
+                    std::thread::sleep(REOPEN_DELAY);
+                }
+                Err(e) => {
+                    self.streams.telemetry.error("capture: open display", e);
+                    std::thread::sleep(Duration::from_secs(1));
+                }
             }
         }
     }
 
-    fn open(&self, wanted: &str, hdr: bool) -> Result<OpenedDisplay> {
-        let displays = self.platform.displays();
-        let list = displays.list().context("list displays")?;
-        let id = list
-            .iter()
-            .find(|d| d.id == wanted)
-            .or_else(|| list.iter().find(|d| d.primary))
-            .or(list.first())
-            .map(|d| d.id.clone())
-            .context("no display available")?;
-        displays.open(&id, hdr).with_context(|| format!("open display {id}"))
+    /// Nobody has watched the display for `IDLE_STOP`.
+    fn idle(&self, since: &mut Option<Instant>) -> bool {
+        if self.stream.watchers() > 0 {
+            *since = None;
+            return false;
+        }
+        since.get_or_insert_with(Instant::now).elapsed() >= IDLE_STOP
     }
 
-    /// Streams one display until a switch is requested, or the clients now
-    /// want the other picture of an HDR display (Ok), or the session fails (Err).
-    fn stream(&self, opened: OpenedDisplay, hdr: bool) -> Result<()> {
+    /// None while the display is not listed.
+    fn open(&self, id: &str, hdr: bool) -> Result<Option<OpenedDisplay>> {
+        let displays = self.streams.platform.displays();
+        if !displays.list().context("list displays")?.iter().any(|d| d.id == id) {
+            return Ok(None);
+        }
+        displays.open(id, hdr).with_context(|| format!("open display {id}")).map(Some)
+    }
+
+    /// Streams the opened display until it is to be opened again, the
+    /// clients now want the other picture of an HDR display or nobody watched
+    /// it for a while (Ok), or the session fails (Err).
+    fn stream_display(&self, opened: OpenedDisplay, hdr: bool, idle_since: &mut Option<Instant>) -> Result<()> {
         let OpenedDisplay { info, mut capture, input, clipboard } = opened;
-        let layout = self.keyboard_layout.read().unwrap().clone();
+        let layout = self.streams.keyboard_layout.read().unwrap().clone();
         if let Err(e) = input.set_keyboard_layout(&layout) {
             eprintln!("keyboard layout {layout}: {e:#}");
         }
@@ -167,15 +313,15 @@ impl CaptureLoop {
         eprintln!("streaming display {} ({}x{}{kind})", info.id, width, height);
         // GPU-based sessions can skip CPU readback of tiles shown only from video.
         let gpu = capture.gpu_surface().is_some();
-        let pixels = self.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
-        *self.control.input.write().unwrap() = Some(input);
-        *self.control.current.write().unwrap() = Some(info);
+        let pixels = self.stream.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
+        *self.stream.control.input.write().unwrap() = Some(input);
+        *self.stream.control.current.write().unwrap() = Some(info);
         if let Some(c) = &clipboard {
-            let control = self.control.clone();
+            let control = self.stream.control.clone();
             c.watch(Box::new(move |text| control.clipboard_changed(None, &text)));
         }
         // The previous display's clipboard (and its watcher) ends here.
-        *self.control.clipboard.write().unwrap() = clipboard;
+        *self.stream.control.clipboard.write().unwrap() = clipboard;
 
         let stride = width as usize * 4;
         let mut diff = Differ::new(pixels.geometry);
@@ -198,25 +344,25 @@ impl CaptureLoop {
             }
             Ok(())
         };
-        while !self.control.has_request() {
+        while !self.stream.control.has_request() && !self.stream.gone() && !self.idle(idle_since) {
             // Another picture: the clients' wish changed for an HDR display,
             // or the session found the display's own picture changed.
-            let wish = self.shared.hdr_wanted().unwrap_or(hdr);
+            let wish = self.stream.shared.hdr_wanted().unwrap_or(hdr);
             if (wish != hdr && picture.hdr_display) || capture.picture() != picture {
                 return Ok(());
             }
-            self.shared.tick(proto::now_us());
+            self.stream.shared.tick(proto::now_us());
             if let Some(state) = capture.cursor_change()? {
-                self.shared.set_cursor(proto::cursor(&state));
+                self.stream.shared.set_cursor(proto::cursor(&state));
             }
             // Asked only while a client captures the mouse (it costs a query on X11).
-            if self.shared.wants_cursor_pos() {
+            if self.stream.shared.wants_cursor_pos() {
                 if let Some(pos) = capture.cursor_position()? {
-                    self.shared.set_cursor_pos(pos);
+                    self.stream.shared.set_cursor_pos(pos);
                 }
             }
             let frame = capture.next_frame(FRAME_WAIT)?;
-            let hints = gpu.then(|| self.shared.capture_hints(proto::now_us()));
+            let hints = gpu.then(|| self.stream.shared.capture_hints(proto::now_us()));
             if let Some(h) = &hints {
                 // CPU copies skipped while a tile was video-only catch up once it
                 // settles or is shown losslessly again, before its lossless refine.
@@ -224,7 +370,7 @@ impl CaptureLoop {
                 if !stale.is_empty() {
                     diff.changed.clear();
                     read_and_diff(&mut capture, &mut diff, &stale, &[], false)?;
-                    self.shared.commit(&diff, proto::now_us(), true);
+                    self.stream.shared.commit(&diff, proto::now_us(), true);
                 }
             }
             let Some(frame) = frame else { continue };
@@ -237,7 +383,7 @@ impl CaptureLoop {
             // `mark_rects` lists the skipped tiles as changed; `diff` appends the read ones.
             let tiles = diff.mark_rects(&rects, hints.as_ref().map_or(&[][..], |h| &h.skip));
             read_and_diff(&mut capture, &mut diff, &tiles, &frame.moved, true)?;
-            self.shared.commit(&diff, frame.capture_us, false);
+            self.stream.shared.commit(&diff, frame.capture_us, false);
         }
         Ok(())
     }

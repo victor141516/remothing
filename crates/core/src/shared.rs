@@ -12,7 +12,6 @@
 //! stop changing they are re-sent losslessly, so anything that stands still
 //! ends up pixel-exact.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::Thread;
 
@@ -99,7 +98,6 @@ impl MotionDetector {
 
 pub struct Shared {
     inner: Mutex<Inner>,
-    next_id: AtomicU64,
 }
 
 struct Inner {
@@ -250,7 +248,6 @@ impl Shared {
                 cursor_pos: None,
                 clients: Vec::new(),
             }),
-            next_id: AtomicU64::new(1),
         }
     }
 
@@ -282,12 +279,10 @@ impl Shared {
         self.inner.lock().unwrap().hdr_max
     }
 
-    pub fn new_client_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
     /// Registers a client; its first pull reports the geometry (`Pull::Reset`).
-    pub fn add_client(&self, id: u64, waker: Thread) {
+    /// `seq`: its last frame's sequence number on the display it watched
+    /// before, so frames of that one still in flight never pass for new ones.
+    pub fn add_client(&self, id: u64, waker: Thread, seq: u32) {
         let mut g = self.inner.lock().unwrap();
         let cursor_dirty = g.cursor.is_some();
         g.clients.push(ClientState {
@@ -310,7 +305,7 @@ impl Shared {
             cursor_dirty,
             capture: false,
             cursor_pos_dirty: false,
-            seq: 0,
+            seq,
             waker: waker.clone(),
         });
         waker.unpark();
@@ -342,8 +337,20 @@ impl Shared {
         c.waker.unpark();
     }
 
-    pub fn remove_client(&self, id: u64) {
-        self.inner.lock().unwrap().clients.retain(|c| c.id != id);
+    /// Unregisters a client; returns the sequence number of its last frame,
+    /// which continues on the next display it watches (`add_client`).
+    pub fn remove_client(&self, id: u64) -> u32 {
+        let mut g = self.inner.lock().unwrap();
+        let seq = g.clients.iter().find(|c| c.id == id).map_or(0, |c| c.seq);
+        g.clients.retain(|c| c.id != id);
+        seq
+    }
+
+    /// Wakes every client (its display went away: it moves to another).
+    pub fn wake_clients(&self) {
+        for c in &self.inner.lock().unwrap().clients {
+            c.waker.unpark();
+        }
     }
 
     /// Whether the client can show an HDR picture where it is now.

@@ -47,7 +47,7 @@ export const WHEEL_NOTCH = 120;
 export const C_KEY = 13;
 /** Asks for the display list. */
 export const C_DISPLAYS = 14;
-/** UTF-8 display id to stream. */
+/** UTF-8 display id this client streams from now on. */
 export const C_DISPLAY = 15;
 /** UTF-8 text to type as characters (`\n` is Enter). */
 export const C_TEXT = 16;

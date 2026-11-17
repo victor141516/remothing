@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,7 +24,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::app::{App, VirtualRequest};
+use crate::app::{App, VirtualRequest, Watching};
+use crate::capture::DisplayStream;
 use crate::config::constant_time_eq;
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
@@ -33,7 +34,7 @@ use crate::platform::{Button, ThreadRole};
 use crate::proto;
 use crate::recovery::SentLog;
 use crate::rtc::PeerEvent;
-use crate::shared::{ClientCodec, Link, Pull, Tuning, VIDEO_SHARE};
+use crate::shared::{ClientCodec, Link, Pull, Shared, Tuning, VIDEO_SHARE};
 
 /// Where frames go: the WebSocket, the WebRTC frames channel, or
 /// WebTransport datagrams.
@@ -91,6 +92,13 @@ pub struct TokenQuery {
     /// comma-separated ("hevc,av1").
     #[serde(default)]
     codecs: String,
+    /// Stream socket: the display to start on (the page's address keeps it).
+    #[serde(default)]
+    display: String,
+    /// The page's key on both sockets: input goes to the display its stream
+    /// socket shows.
+    #[serde(default)]
+    session: String,
 }
 
 /// C_MIC_INFO.
@@ -135,7 +143,7 @@ pub async fn stream_handler(
     }
     let mut codecs = vec![Codec::H264];
     codecs.extend(q.codecs.split(',').filter_map(Codec::from_name).filter(|c| *c != Codec::H264));
-    ws.write_buffer_size(0).on_upgrade(move |socket| session(socket, app, addr, codecs))
+    ws.write_buffer_size(0).on_upgrade(move |socket| session(socket, app, addr, codecs, q.display, q.session))
 }
 
 /// Input gets its own socket so events never queue behind frame data or ACKs.
@@ -151,6 +159,9 @@ pub async fn input_handler(
     }
     ws.on_upgrade(move |mut socket| async move {
         let mut held = Held::default();
+        // The display input last went to: what is held there is let go
+        // there when the page moves on or leaves.
+        let mut last: Option<Arc<DisplayStream>> = None;
         // The client pings every second: silence means it is gone, whatever
         // the socket says, and what it held down must not stay down.
         while let Ok(Some(Ok(msg))) = tokio::time::timeout(CLIENT_SILENCE, socket.recv()).await {
@@ -160,11 +171,22 @@ pub async fn input_handler(
                 if socket.send(Message::Binary(pong.into())).await.is_err() {
                     break;
                 }
-            } else if let Err(e) = handle_input(&b, &app, &mut held) {
+                continue;
+            }
+            // Before the stream socket registered the page there is nowhere to send it.
+            let route = app.input_routes.lock().unwrap().get(&q.session).cloned();
+            let Some(stream) = route.map(|w| w.read().unwrap().clone()) else { continue };
+            if let Some(previous) = last.as_ref().filter(|l| !Arc::ptr_eq(l, &stream)) {
+                held.release(previous);
+            }
+            if let Err(e) = handle_input(&b, &stream, &mut held) {
                 app.telemetry.error("input", e);
             }
+            last = Some(stream);
         }
-        held.release(&app);
+        if let Some(stream) = &last {
+            held.release(stream);
+        }
     })
 }
 
@@ -178,8 +200,8 @@ struct Held {
 }
 
 impl Held {
-    fn release(&mut self, app: &App) {
-        let Some(input) = app.control.input() else { return };
+    fn release(&mut self, stream: &DisplayStream) {
+        let Some(input) = stream.control.input() else { return };
         for key in self.keys.drain(..) {
             let _ = input.key(key, false);
         }
@@ -191,6 +213,13 @@ impl Held {
 
 struct ClientLink {
     id: u64,
+    /// The display it streams (shared with its input socket's route).
+    watching: Watching,
+    /// Bumped when it switches display (the clipboard follows).
+    switched: watch::Sender<()>,
+    /// Its last wishes, kept for the next display it switches to.
+    hdr: AtomicBool,
+    captured: AtomicBool,
     pacer: Mutex<Pacer>,
     /// Frames in flight with what they change (repairs after a loss).
     sent: Mutex<SentLog>,
@@ -219,6 +248,27 @@ struct ClientLink {
     codecs: Vec<Codec>,
 }
 
+/// Moves the client to `stream`, which it already watches (`Streams::watch`):
+/// its frames continue the old display's sequence, and the first pull there
+/// is a HELLO.
+fn switch_display(app: &App, link: &ClientLink, waker: &std::thread::Thread, stream: Arc<DisplayStream>) {
+    let mut watching = link.watching.write().unwrap();
+    if Arc::ptr_eq(&watching, &stream) {
+        app.streams.unwatch(&stream);
+        return;
+    }
+    let seq = watching.shared.remove_client(link.id);
+    link.held.lock().unwrap().release(&watching);
+    stream.shared.add_client(link.id, waker.clone(), seq);
+    stream.shared.set_client_hdr(link.id, link.hdr.load(Ordering::Acquire));
+    stream.shared.set_client_capture(link.id, link.captured.load(Ordering::Acquire));
+    let old = std::mem::replace(&mut *watching, stream);
+    drop(watching);
+    app.streams.unwatch(&old);
+    link.switched.send_replace(());
+    app.telemetry.event(link.id, &format!("streams display {}", link.watching.read().unwrap().id));
+}
+
 /// The picture's size in the client's window, in device pixels, and the
 /// client's refresh rate (0: not reported).
 #[derive(Clone, Copy, Default)]
@@ -228,10 +278,20 @@ struct View {
     hz: u32,
 }
 
-async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec<Codec>) {
+/// `display`: the display the client asks for (else the default); `route`:
+/// the page's key, which its input socket gives too.
+async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec<Codec>, display: String, route: String) {
     let (mut tx, mut rx) = socket.split();
+    let display = app.resolve_display(Some(display.as_str()).filter(|d| !d.is_empty())).unwrap_or_else(|e| {
+        app.telemetry.error("list displays", e);
+        app.settings.read().unwrap().server.display.clone()
+    });
     let link = Arc::new(ClientLink {
-        id: app.shared.new_client_id(),
+        id: app.next_client.fetch_add(1, Ordering::Relaxed),
+        watching: Arc::new(RwLock::new(app.streams.watch(&display))),
+        switched: watch::channel(()).0,
+        hdr: AtomicBool::new(false),
+        captured: AtomicBool::new(false),
         pacer: Mutex::new(Pacer::default()),
         sent: Mutex::new(SentLog::default()),
         rtc_open: AtomicBool::new(false),
@@ -261,7 +321,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
     app.telemetry.client_connected(link.id, addr);
     app.client_joined();
     app.telemetry.event(link.id, &format!("connected from {addr}"));
-    app.shared.add_client(link.id, waker.clone());
+    let stream = link.watching.read().unwrap().clone();
+    stream.shared.add_client(link.id, waker.clone(), 0);
+    if !route.is_empty() {
+        app.input_routes.lock().unwrap().insert(route.clone(), link.watching.clone());
+    }
     if let Some(hub) = &app.rtc {
         // The browser offers a peer connection with these STUN servers.
         let ice: Vec<serde_json::Value> = hub.ice_servers.iter().map(|u| json!({ "urls": u })).collect();
@@ -319,16 +383,27 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
 
     let peer_out = out_tx.clone();
     let clipboard = {
-        let (mut text, out_tx, id) = (app.control.clipboard_text(), out_tx.clone(), link.id);
+        let (link, out_tx) = (link.clone(), out_tx.clone());
+        let mut switched = link.switched.subscribe();
         async move {
-            // What is there on connect, then every change this client did not make.
+            // The clipboard of the display the client streams: what is there
+            // on connect and after a switch, then every change this client
+            // did not make.
             loop {
-                let (by, now) = text.borrow_and_update().clone();
-                if by != Some(id) && !now.is_empty() {
-                    let _ = out_tx.send(proto::text(proto::S_CLIPBOARD, &now));
-                }
-                if text.changed().await.is_err() {
-                    return;
+                let mut text = link.watching.read().unwrap().control.clipboard_text();
+                loop {
+                    let (by, now) = text.borrow_and_update().clone();
+                    if by != Some(link.id) && !now.is_empty() {
+                        let _ = out_tx.send(proto::text(proto::S_CLIPBOARD, &now));
+                    }
+                    tokio::select! {
+                        changed = text.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                        _ = switched.changed() => break,
+                    }
                 }
             }
         }
@@ -430,7 +505,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     }
                     (Some(proto::C_EVENT), _) => app.telemetry.event(link.id, &String::from_utf8_lossy(&b[1..])),
                     (Some(proto::C_CLIPBOARD), _) => {
-                        if let Err(e) = app.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])) {
+                        let stream = link.watching.read().unwrap().clone();
+                        if let Err(e) = stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])) {
                             app.telemetry.error("clipboard", e);
                         }
                     }
@@ -465,33 +541,39 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                             microphone = None;
                         }
                     }
-                    (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, None, None),
+                    (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, &link, None),
                     (Some(proto::C_DISPLAY), _) => {
                         let id = String::from_utf8_lossy(&b[1..]).into_owned();
-                        match app.select_display(&id) {
-                            Ok(()) => {
-                                app.telemetry.event(link.id, &format!("display {id} selected"));
-                                // The capture thread switches a moment later.
-                                send_displays(&app, &out_tx, Some(id), None);
+                        match app.platform.displays().list() {
+                            Ok(list) if list.iter().any(|d| d.id == id) => {
+                                switch_display(&app, &link, &waker, app.streams.watch(&id));
+                                send_displays(&app, &out_tx, &link, None);
                             }
-                            Err(e) => app.telemetry.error("select display", e),
+                            Ok(_) => app.telemetry.event(link.id, &format!("asked for display {id}, which is not there")),
+                            Err(e) => app.telemetry.error("list displays", e),
                         }
                     }
                     (Some(proto::C_VIRTUAL), _) => {
                         let request = serde_json::from_slice::<VirtualRequest>(&b[1..]);
-                        let (app, out, id) = (app.clone(), out_tx.clone(), link.id);
+                        let (app, out, link, waker) = (app.clone(), out_tx.clone(), link.clone(), waker.clone());
                         // Installing a driver or adding a display takes seconds:
                         // not on the reader, which carries ACKs and input.
                         tokio::task::spawn_blocking(move || {
                             let done = request.map_err(anyhow::Error::from).and_then(|r| {
-                                app.telemetry.event(id, &format!("virtual display: {r:?}"));
+                                app.telemetry.event(link.id, &format!("virtual display: {r:?}"));
                                 app.virtual_request(r)
                             });
                             match done {
-                                Ok(current) => send_displays(&app, &out, current, None),
+                                Ok(created) => {
+                                    // A new display: this client streams it.
+                                    if let Some(id) = created {
+                                        switch_display(&app, &link, &waker, app.streams.watch(&id));
+                                    }
+                                    send_displays(&app, &out, &link, None);
+                                }
                                 Err(e) => {
-                                    app.telemetry.event(id, &format!("virtual display request failed: {e:#}"));
-                                    send_displays(&app, &out, None, Some(format!("{e:#}")));
+                                    app.telemetry.event(link.id, &format!("virtual display request failed: {e:#}"));
+                                    send_displays(&app, &out, &link, Some(format!("{e:#}")));
                                 }
                             }
                         });
@@ -507,13 +589,15 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         let shows = if hdr { ", HDR" } else { "" };
                         app.telemetry.event(link.id, &format!("view {}x{} at {} Hz{shows}", view.width, view.height, view.hz));
                         *link.view.lock().unwrap() = view;
-                        app.shared.set_client_hdr(link.id, hdr);
+                        link.hdr.store(hdr, Ordering::Release);
+                        link.watching.read().unwrap().shared.set_client_hdr(link.id, hdr);
                         waker.unpark();
                     }
                     (Some(proto::C_CAPTURE), 2..) => {
                         let on = b[1] != 0;
                         app.telemetry.event(link.id, if on { "mouse captured" } else { "mouse released" });
-                        app.shared.set_client_capture(link.id, on);
+                        link.captured.store(on, Ordering::Release);
+                        link.watching.read().unwrap().shared.set_client_capture(link.id, on);
                     }
                     (Some(proto::C_HELLO_ACK), _) => {
                         link.hello_acked.store(true, Ordering::Release);
@@ -521,7 +605,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     }
                     (Some(proto::C_SIGNAL), _) => on_signal(&b[1..], &app, &link, &out_tx, &peer_tx).await,
                     _ => {
-                        if let Err(e) = handle_input(&b, &app, &mut link.held.lock().unwrap()) {
+                        let stream = link.watching.read().unwrap().clone();
+                        if let Err(e) = handle_input(&b, &stream, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -549,7 +634,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         _ => {}
                     },
                     PeerEvent::Input(b) => {
-                        if let Err(e) = handle_input(&b, &app, &mut link.held.lock().unwrap()) {
+                        let stream = link.watching.read().unwrap().clone();
+                        if let Err(e) = handle_input(&b, &stream, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -593,7 +679,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         _ = wt => {}
     }
     link.stop.store(true, Ordering::Release);
-    link.held.lock().unwrap().release(&app);
+    link.held.lock().unwrap().release(&link.watching.read().unwrap());
     waker.unpark();
     if let Some(hub) = &app.rtc {
         hub.close(link.id);
@@ -604,7 +690,15 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
     if let Some(conn) = link.wt.lock().unwrap().take() {
         conn.close(0u32.into(), b"session ended");
     }
-    app.shared.remove_client(link.id);
+    // A reconnect of the same page may have registered its route already.
+    let mut routes = app.input_routes.lock().unwrap();
+    if routes.get(&route).is_some_and(|w| Arc::ptr_eq(w, &link.watching)) {
+        routes.remove(&route);
+    }
+    drop(routes);
+    let stream = link.watching.read().unwrap().clone();
+    stream.shared.remove_client(link.id);
+    app.streams.unwatch(&stream);
     app.telemetry.client_disconnected(link.id);
     app.client_left();
     app.telemetry.event(link.id, "disconnected");
@@ -730,7 +824,8 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
                 if stream.read_exact(&mut msg).await.is_err() {
                     break;
                 }
-                if let Err(e) = handle_input(&msg, app, &mut link.held.lock().unwrap()) {
+                let stream = link.watching.read().unwrap().clone();
+                if let Err(e) = handle_input(&msg, &stream, &mut link.held.lock().unwrap()) {
                     app.telemetry.error("input", e);
                 }
             }
@@ -748,7 +843,7 @@ fn repair(app: &App, link: &ClientLink, seqs: &[u32]) {
     if seqs.is_empty() {
         return;
     }
-    let geometry = app.shared.geometry();
+    let geometry = link.watching.read().unwrap().shared.geometry();
     let (mut frames, mut tiles, mut layers, mut keyframe) = (0, BTreeSet::new(), BTreeSet::new(), false);
     for &seq in seqs {
         let Some(r) = link.sent.lock().unwrap().lost(seq, &geometry) else { continue };
@@ -763,7 +858,7 @@ fn repair(app: &App, link: &ClientLink, seqs: &[u32]) {
         return;
     }
     let (tiles, layers): (Vec<u32>, Vec<u32>) = (tiles.into_iter().collect(), layers.into_iter().collect());
-    app.shared.resync(link.id, &tiles, &layers);
+    link.watching.read().unwrap().shared.resync(link.id, &tiles, &layers);
     if keyframe {
         link.key_request.store(true, Ordering::Release);
     }
@@ -827,7 +922,6 @@ fn transport_name(path: u8) -> &'static str {
 /// Client thread: pulls frames whenever the link window allows, parks otherwise.
 fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     app.platform.thread_priority(ThreadRole::Stream);
-    let shared = &app.shared;
     let mut codec = ClientCodec::new(app.settings.read().unwrap().tuning);
     // Encoder settings the current encoder was made with: backend preference and codec.
     let mut encoder_conf = (String::new(), String::new());
@@ -850,6 +944,12 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     // (0: not there, or already found slower).
     let mut ws_rate = 0.0;
     while !link.stop.load(Ordering::Acquire) {
+        let stream = link.watching.read().unwrap().clone();
+        if stream.gone() {
+            leave_gone_display(app, link, out);
+            continue;
+        }
+        let shared = &*stream.shared;
         let current = link.path.load(Ordering::Acquire);
         if current != path {
             // Another path is another link, measured afresh from what the
@@ -901,7 +1001,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 drop(s);
                 video_cap.reset(video_rate(model, &codec.tuning), fps);
                 let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
+                create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                 pending = None;
                 shared.drop_video(link.id);
                 need_key = true;
@@ -936,7 +1036,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 let state = if want { "on" } else { "off" };
                 let text = format!("two-pass {state} (video cap {:.1} Mbit/s, round trip {} ms)", video_cap.bps as f64 / 1e6, rtt_us / 1000);
                 app.telemetry.event(link.id, &text);
-                let req = encoder_request(app, current, size, encoded, &encoder_conf.0, &video_cap, want);
+                let req = encoder_request(shared, current, size, encoded, &encoder_conf.0, &video_cap, want);
                 pending = Some(PendingEncoder::open(app, req));
             }
         }
@@ -947,7 +1047,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     if cap != (video_cap.bps, video_cap.fps) {
                         e.set_max_bitrate(video_cap.bps, video_cap.fps);
                     }
-                    install_encoder(app, link.id, &mut codec, e);
+                    install_encoder(app, shared, link.id, &mut codec, e);
                     // The new encoder's input is blank: everything is copied in again.
                     shared.encoder_reset(link.id);
                     need_key = true;
@@ -982,7 +1082,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 room_since = 0;
                 pending = None;
                 let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
+                create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                 // The new encoder's input is blank: everything is copied in again.
                 shared.encoder_reset(link.id);
                 need_key = true;
@@ -1033,11 +1133,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     let s = app.settings.read().unwrap();
                     encoder_conf = (s.encoder.preferred.clone(), s.encoder.codec.clone());
                     drop(s);
-                    display_hz = app.control.current().map_or(0, |d| d.refresh_hz.round() as u32);
+                    display_hz = stream.control.current().map_or(0, |d| d.refresh_hz.round() as u32);
                     video_cap.reset(video_rate(model, &codec.tuning), video_fps(view, display_hz));
                     pending = None;
                     let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
-                    create_encoder(app, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
+                    create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                     need_key = true;
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
@@ -1198,6 +1298,7 @@ fn next_two_pass(codec: &ClientCodec, cap_bps: u64, rtt_us: u64) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn create_encoder(
     app: &App,
+    shared: &Shared,
     link: &ClientLink,
     codec: &mut ClientCodec,
     size: (u32, u32),
@@ -1208,11 +1309,11 @@ fn create_encoder(
 ) {
     let id = link.id;
     codec.encoder = None;
-    app.shared.set_gpu_input(id, false);
+    shared.set_gpu_input(id, false);
     let encoders = app.platform.encoders();
     let (pref, setting) = conf;
     let chosen = pick_codec(setting, &link.codecs, &encoders.codecs());
-    let mut req = encoder_request(app, chosen, size, output, pref, cap, two_pass);
+    let mut req = encoder_request(shared, chosen, size, output, pref, cap, two_pass);
     let mut created = encoders.create(&req);
     if let Err(e) = &created {
         if req.codec != Codec::H264 {
@@ -1222,7 +1323,7 @@ fn create_encoder(
         }
     }
     match created {
-        Ok(e) => install_encoder(app, id, codec, e),
+        Ok(e) => install_encoder(app, shared, id, codec, e),
         Err(e) => {
             app.telemetry.client_encoder(id, None, Some(format!("{e:#}")));
             app.telemetry.error("video encoder unavailable, lossless only", e);
@@ -1231,7 +1332,7 @@ fn create_encoder(
 }
 
 fn encoder_request(
-    app: &App,
+    shared: &Shared,
     codec: Codec,
     size: (u32, u32),
     output: (u32, u32),
@@ -1245,16 +1346,16 @@ fn encoder_request(
         height: size.1,
         output,
         preferred: (pref != "auto" && !pref.is_empty()).then(|| pref.to_string()),
-        surface: app.shared.surface(),
+        surface: shared.surface(),
         max_bitrate: cap.bps,
         fps: cap.fps,
         two_pass,
     }
 }
 
-fn install_encoder(app: &App, id: u64, codec: &mut ClientCodec, e: Box<dyn VideoEncoder>) {
+fn install_encoder(app: &App, shared: &Shared, id: u64, codec: &mut ClientCodec, e: Box<dyn VideoEncoder>) {
     app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
-    app.shared.set_gpu_input(id, e.gpu_input());
+    shared.set_gpu_input(id, e.gpu_input());
     codec.encoder = Some(e);
 }
 
@@ -1298,15 +1399,15 @@ fn u16_at(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[i], b[i + 1]])
 }
 
-fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
-    let Some(input) = app.control.input() else { return Ok(()) };
+fn handle_input(b: &[u8], stream: &DisplayStream, held: &mut Held) -> Result<()> {
+    let Some(input) = stream.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
         (Some(proto::C_MOVE_REL), 6..) => {
             let (dx, dy) = (u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32);
             if b[1] & proto::MOVE_AS_POSITION == 0 {
                 input.motion_relative(dx, dy)?
-            } else if let (Some((x, y)), Some(d)) = (input.pointer()?, app.control.current()) {
+            } else if let (Some((x, y)), Some(d)) = (input.pointer()?, stream.control.current()) {
                 let x = (x as i32 + dx).clamp(0, d.width as i32 - 1) as u32;
                 let y = (y as i32 + dy).clamp(0, d.height as i32 - 1) as u32;
                 input.motion(x, y)?
@@ -1344,10 +1445,11 @@ fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
     Ok(())
 }
 
-/// The display list for the client's menu (`proto::S_DISPLAYS`); `current`
-/// as in `App::displays_json`, `error` the failure of its last request.
-fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Option<String>, error: Option<String>) {
-    match app.displays_json(current) {
+/// The display list for the client's menu (`proto::S_DISPLAYS`), with the
+/// display it streams; `error` the failure of its last request.
+fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, link: &ClientLink, error: Option<String>) {
+    let current = link.watching.read().unwrap().id.clone();
+    match app.displays_json(Some(&current)) {
         Ok(mut v) => {
             if let Some(e) = error {
                 v["error"] = json!(e);
@@ -1355,6 +1457,20 @@ fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Optio
             let _ = out.send(proto::text(proto::S_DISPLAYS, &v.to_string()));
         }
         Err(e) => app.telemetry.error("list displays", e),
+    }
+}
+
+/// The client's display went away: it moves to the default one.
+fn leave_gone_display(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
+    match app.resolve_display(None) {
+        Ok(id) => {
+            switch_display(app, link, &std::thread::current(), app.streams.watch(&id));
+            send_displays(app, out, link, None);
+        }
+        Err(e) => {
+            app.telemetry.error("list displays", e);
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 }
 
