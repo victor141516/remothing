@@ -353,8 +353,11 @@ coordinates, evdev key codes on the wire).
   click is not sent. While trapped the client sends counts (`C_MOVE_REL`)
   instead of positions: Windows injects them as a relative `SendInput`
   (the remote pointer speed applies to the cursor, games reading raw
-  input get the counts), X11 as relative XTEST motion. A move that would
-  take the cursor off the streamed display puts it back on its edge. The
+  input get the counts), X11 as relative XTEST motion. The cursor may move
+  on to another display some client shows (another window), as a real
+  mouse goes from one monitor to the next; a move that would take it to a
+  display nobody sees puts it back on the streamed display's edge.
+  `Streams::shown` keeps that list ready, since every count reads it. The
   browser hides the local cursor, so the client says it captured
   (`C_CAPTURE`) and gets the remote hot spot's position (`S_CURSOR_POS`,
   from DXGI's pointer position, or QueryPointer on X11, asked only while a

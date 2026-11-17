@@ -273,9 +273,10 @@ pub enum Button {
 pub trait InputProvider: Send + Sync {
     fn motion(&self, x: u32, y: u32) -> Result<()>;
     /// Moves the pointer by `dx`, `dy` mouse counts, as a mouse does (a game
-    /// reads them as they are). The pointer stays on this display: a move
-    /// that would leave it ends on its edge.
-    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()>;
+    /// reads them as they are). It may go on to one of `shown` (displays
+    /// some client shows, so the user still sees it); a move that would take
+    /// it anywhere else ends on this display's edge.
+    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()>;
     /// Where the pointer is now, display pixels, clamped to this display;
     /// None where it cannot be read (Windows' secure desktop).
     fn pointer(&self) -> Result<Option<(u32, u32)>>;

@@ -11,10 +11,10 @@ use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType,
     CGMouseButton, CGScrollEventUnit,
 };
-use remothing_core::platform::{Button, InputProvider};
+use remothing_core::platform::{Button, DisplayInfo, InputProvider};
 use remothing_core::proto::WHEEL_NOTCH;
 
-use crate::display::Geometry;
+use crate::display::{self, Geometry};
 use crate::keymap::{self, Modifier};
 
 /// Pixels per wheel notch for fractions of a notch (trackpads, touch).
@@ -105,12 +105,21 @@ impl InputProvider for QuartzInput {
         self.move_to(&mut s, to, None)
     }
 
-    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
+    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         let from = Self::desktop_pointer().or(s.position).unwrap_or(self.geometry.bounds.origin);
         let (sx, sy) = self.geometry.scale();
         // Counts are display pixels of movement; the pointer moves in points.
-        let to = self.geometry.clamp(CGPoint::new(from.x + dx as f64 / sx, from.y + dy as f64 / sy));
+        let to = CGPoint::new(from.x + dx as f64 / sx, from.y + dy as f64 / sy);
+        // On another display some client shows it may go; anywhere else,
+        // where nobody would see it, it stays on this display's edge.
+        let elsewhere = || {
+            shown
+                .iter()
+                .filter_map(|d| display::parse_id(&d.id).and_then(Geometry::of).ok())
+                .any(|g| g.contains(to))
+        };
+        let to = if self.geometry.contains(to) || elsewhere() { to } else { self.geometry.clamp(to) };
         self.move_to(&mut s, to, Some((dx, dy)))
     }
 

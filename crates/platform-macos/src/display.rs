@@ -73,6 +73,12 @@ impl Geometry {
         CGPoint::new(p.x.clamp(o.x, o.x + s.width - 1.0), p.y.clamp(o.y, o.y + s.height - 1.0))
     }
 
+    /// `p` (desktop points) is on the display.
+    pub fn contains(&self, p: CGPoint) -> bool {
+        let (o, s) = (self.bounds.origin, self.bounds.size);
+        (o.x..o.x + s.width).contains(&p.x) && (o.y..o.y + s.height).contains(&p.y)
+    }
+
     pub fn info(&self) -> DisplayInfo {
         let name = if CGDisplayIsBuiltin(self.id) { "Built-in display".to_string() } else { format!("Display {}", self.id) };
         DisplayInfo {
