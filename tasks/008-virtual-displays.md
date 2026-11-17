@@ -17,38 +17,37 @@ A virtual display is a real display for the system: programs and games
 can be moved to it and run at its resolution, and it is streamed like any
 other. Linux, Windows and macOS.
 
+## Decided (2026-11-17)
+
+- **Changing the resolution on Windows**: remove the display and add it
+  again (its windows jump, a full-screen game loses its output). No driver
+  change.
+- **macOS**: the private `CGVirtualDisplay` API is accepted.
+- **Lifetime**: virtual displays go away when the server stops.
+- **"Fit my window"**: yes, a client can ask for a display of exactly its
+  own size.
+- **Who**: every client with the stream token.
+- **HDR** on Windows virtual displays: yes, optional, chosen in the client's
+  menu.
+- **Testing on Windows**: first on a GitHub Windows runner, then on this PC.
+- **Linux**: the main display keeps its size; the displays added from the
+  client are the ones that change, by being recreated. Each simulated
+  display is its own X server with its own session (`session_command`), so
+  recreating one ends only that display's programs.
+
 ## Open questions
 
-1. **Windows driver** (see Windows): our own build of SudoVDA (or its
-   fork LuzVDA) with its own device IDs and our own self-signed
-   certificate, installed by the service; or Virtual Display Driver, signed
-   by a trusted CA but configured through an XML file and a driver reload.
-   Recommendation: SudoVDA fork.
-2. **Changing the resolution on Windows**: with SudoVDA as it is, a new
-   resolution means removing the display and adding it again (Windows moves
-   its windows away and back; full-screen games lose their output). Extending
-   the driver with a "new modes" request (`IddCxMonitorUpdateModes2`) avoids
-   that, at the cost of maintaining a driver change. Which one?
-3. **Linux**: replace Xvfb by Xvnc (TigerVNC, without its VNC port) for
-   every simulated display, so that all of them can change size in place;
-   or keep Xvfb and recreate the display (and its programs) on a resize.
-   Recommendation: Xvnc, once its capture cost is measured against Xvfb's.
-4. **macOS**: Apple has no public API for virtual displays; the private
-   `CGVirtualDisplay` is what BetterDisplay, DeskPad and others use. Accept a
-   private API that a macOS release may break?
-5. **Lifetime**: virtual displays exist while the server runs and go away
-   with it (all three platforms do this naturally)? Or are they remembered
-   and created again at start?
-6. **"Fit my window"**: should a client be able to ask for a display of
-   exactly its own size (no scaling at all), or only pick sizes by hand?
-7. **Who may do it**: every client with the stream token (as for choosing the
-   display today), or the admin UI only (as for creating one on Linux today).
-8. **HDR on virtual displays** (Windows only): offered or not. This PC's
-   Sunshine virtual display crashed when HDR was switched on for it
-   (2026-11-11).
-9. **Testing on Windows**: the demo is the user's live desktop. Installing a
-   display driver there needs the user's go-ahead; GitHub's Windows runners
-   (no GPU) may do for the driver's mechanics, not for HDR or performance.
+1. **Windows driver**: SudoVDA has no published build of its own; Apollo's
+   installer carries one, signed with Apollo's self-signed certificate
+   (`CN=sudovda@su.mk`), and that is what this PC has (driver 1.10.9.289,
+   hardware ID `root\sudomaker\sudovda`, certificate in the machine's Root
+   store). Use that one (installed with or taken from Apollo) or our own
+   build (own hardware ID, own certificate)? See "Windows".
+2. **Linux, what an added display is**: today every simulated display is a
+   separate desktop (its own X server and session; windows cannot move
+   between them). Is that what the user wants from "another display", or a
+   second monitor of the same desktop (one X server with several outputs,
+   windows moved between them), which is a different design?
 
 ## What exists today
 
