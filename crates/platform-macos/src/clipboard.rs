@@ -42,7 +42,15 @@ impl Clipboard for Pasteboard {
     fn watch(&self, on_change: ClipboardSink) {
         let (own, stop) = (self.own.clone(), self.stop.clone());
         let spawned = std::thread::Builder::new().name("clipboard".into()).spawn(move || {
-            let mut seen = autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount());
+            // What is there now is the first report.
+            let (mut seen, found) = autoreleasepool(|_| {
+                let pb = NSPasteboard::generalPasteboard();
+                // SAFETY: framework constant.
+                (pb.changeCount(), pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string()))
+            });
+            if let Some(text) = found {
+                on_change(text, false);
+            }
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(POLL);
                 let text = autoreleasepool(|_| {
@@ -59,7 +67,7 @@ impl Clipboard for Pasteboard {
                     pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
                 });
                 if let Some(text) = text {
-                    on_change(text);
+                    on_change(text, true);
                 }
             }
         });

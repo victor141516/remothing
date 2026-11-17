@@ -40,9 +40,13 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// Chunk payload: data channel messages must stay within 64 KiB, the size
 /// every browser accepts without negotiation.
 pub const CHUNK_PAYLOAD: usize = 60 * 1024;
-/// UTF-8 text now on the session's clipboard (on connect when not empty,
-/// then on every change another client or the session itself makes).
+/// flags u8, UTF-8 text now on the session's clipboard: on connect and after
+/// a display switch when not empty (flags 0), then on every change another
+/// client or the session itself makes (CLIPBOARD_CHANGED), which the client
+/// copies to its own computer's clipboard; what was there before it came is
+/// left alone.
 pub const S_CLIPBOARD: u8 = 7;
+pub const CLIPBOARD_CHANGED: u8 = 1;
 /// UTF-8 JSON answering C_DISPLAYS, C_DISPLAY or C_VIRTUAL: `{"displays":[{"id",
 /// "name","width","height","primary","kind","mode"?,...}],"current":id,
 /// "default":id,"streamed":{id:clients},"virtual":null|{"setup":{"state":

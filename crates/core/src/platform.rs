@@ -170,14 +170,15 @@ pub struct OpenedDisplay {
     pub clipboard: Option<Arc<dyn Clipboard>>,
 }
 
-/// Receives the clipboard text each time it changes.
-pub type ClipboardSink = Box<dyn Fn(String) + Send + Sync>;
+/// Receives the clipboard text: once what is there when watching starts
+/// (`false`; may be skipped when there is none), then each change (`true`).
+pub type ClipboardSink = Box<dyn Fn(String, bool) + Send + Sync>;
 
 /// Text clipboard of the session a display belongs to.
 pub trait Clipboard: Send + Sync {
     fn set_text(&self, text: &str) -> Result<()>;
-    /// Reports the text every time something else puts text on the
-    /// clipboard, from now on (called once).
+    /// Reports the text on the clipboard now, then every time something
+    /// else puts text on it (called once).
     fn watch(&self, on_change: ClipboardSink);
 }
 

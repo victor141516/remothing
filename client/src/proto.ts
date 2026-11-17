@@ -15,8 +15,10 @@ export const S_SIGNAL = 5;
 /** Data-channel piece of a FRAME: flags u8, part u16, parts u16, pad u16, seq u32. */
 export const S_CHUNK = 6;
 export const CHUNK_HEADER_LEN = 12;
-/** UTF-8 text now on the remote clipboard. */
+/** flags u8, UTF-8 text now on the remote clipboard (see proto.rs). */
 export const S_CLIPBOARD = 7;
+/** The remote clipboard changed since the client connected: copy it to this computer's too. */
+export const CLIPBOARD_CHANGED = 1;
 /** UTF-8 JSON: `{displays: [...], current}`. */
 export const S_DISPLAYS = 8;
 /** UTF-8 JSON: the sound stream (`codec`, `rate`, `channels`, `description`) or why there is none. */

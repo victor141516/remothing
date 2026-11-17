@@ -30,8 +30,22 @@ const IDLE_STOP: Duration = Duration::from_secs(10);
 /// Windows is removed and added again.
 const GONE_AFTER: Duration = Duration::from_secs(10);
 
-/// Clipboard text as last seen, and the client that set it (None: the session itself).
-pub type ClipboardText = (Option<u64>, Arc<str>);
+/// Clipboard text as last seen.
+#[derive(Clone)]
+pub struct ClipboardText {
+    /// The client that set it (None: the session itself).
+    pub by: Option<u64>,
+    pub text: Arc<str>,
+    /// Copied while the display was open, not what was there when it opened:
+    /// clients copy only such changes to their own computer's clipboard.
+    pub changed: bool,
+}
+
+impl Default for ClipboardText {
+    fn default() -> Self {
+        Self { by: None, text: Arc::from(""), changed: false }
+    }
+}
 
 /// A captured display's state, shared between its capture thread, the
 /// clients watching it and the admin API.
@@ -51,7 +65,7 @@ impl Default for DisplayControl {
             current: RwLock::default(),
             input: RwLock::default(),
             clipboard: RwLock::default(),
-            clipboard_text: watch::channel((None, Arc::from(""))).0,
+            clipboard_text: watch::channel(ClipboardText::default()).0,
         }
     }
 }
@@ -81,22 +95,23 @@ impl DisplayControl {
         }
         let clipboard = self.clipboard.read().unwrap().clone().context("no clipboard access on this display")?;
         clipboard.set_text(text)?;
-        self.clipboard_changed(Some(client), text);
+        self.clipboard_changed(Some(client), text, true);
         Ok(())
     }
 
     /// Publishes the text unless it is what was last seen (the session
-    /// reports a client's own change back).
-    fn clipboard_changed(&self, client: Option<u64>, text: &str) {
+    /// reports a client's own change back). `changed`: not the text found
+    /// when the display was opened.
+    fn clipboard_changed(&self, client: Option<u64>, text: &str, changed: bool) {
         if text.len() > MAX_CLIPBOARD {
             return;
         }
-        self.clipboard_text.send_if_modified(|(by, last)| {
-            let changed = **last != *text;
-            if changed {
-                (*by, *last) = (client, Arc::from(text));
+        self.clipboard_text.send_if_modified(|last| {
+            let modified = *last.text != *text;
+            if modified {
+                *last = ClipboardText { by: client, text: Arc::from(text), changed };
             }
-            changed
+            modified
         });
     }
 
@@ -385,7 +400,7 @@ impl CaptureLoop {
         self.streams.refresh_shown();
         if let Some(c) = &clipboard {
             let control = self.stream.control.clone();
-            c.watch(Box::new(move |text| control.clipboard_changed(None, &text)));
+            c.watch(Box::new(move |text, changed| control.clipboard_changed(None, &text, changed)));
         }
         // The previous display's clipboard (and its watcher) ends here.
         *self.stream.control.clipboard.write().unwrap() = clipboard;

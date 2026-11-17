@@ -10,6 +10,7 @@
 //! ours.
 
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,6 +51,8 @@ struct Pending {
 struct Shared {
     pending: Mutex<Option<Pending>>,
     on_change: Mutex<Option<ClipboardSink>>,
+    /// The next read reports what was there when watching started.
+    found: AtomicBool,
 }
 
 pub struct WindowClipboard {
@@ -122,6 +125,7 @@ impl Clipboard for WindowClipboard {
     fn watch(&self, on_change: ClipboardSink) {
         *self.shared.on_change.lock().unwrap() = Some(on_change);
         // What is on the clipboard now is the first report.
+        self.shared.found.store(true, Ordering::Relaxed);
         let _ = self.post(WM_CLIPBOARDUPDATE);
     }
 }
@@ -146,9 +150,10 @@ fn listen(hwnd: HWND, shared: &Shared) {
             WM_TIMER if msg.wParam.0 == READ_TIMER => {
                 // SAFETY: the timer set above.
                 let _ = unsafe { KillTimer(Some(hwnd), READ_TIMER) };
+                let changed = !shared.found.swap(false, Ordering::Relaxed);
                 // Our own text comes back here too; the core ignores what it already has.
                 if let (Some(text), Some(on_change)) = (read_text(hwnd), shared.on_change.lock().unwrap().as_ref()) {
-                    on_change(text);
+                    on_change(text, changed);
                 }
             }
             WM_SET_TEXT => {

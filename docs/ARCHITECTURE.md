@@ -422,6 +422,20 @@ Windows waits for its clipboard thread, X11 makes a round trip after
 taking the selection. Without permission to read the clipboard the client
 sends a plain V.
 
+The other way, what is copied on the remote side reaches this computer's
+clipboard: `S_CLIPBOARD` flags a change made after the client connected
+(`CLIPBOARD_CHANGED`), which `main.ts` writes with `navigator.clipboard`;
+the text already there on connect or after a display switch is not, so
+opening a window never overwrites what was copied here. A display's
+capture starts with its first client, so the platform's first report can
+arrive after that client connected: each `Clipboard::watch` therefore
+tells the text it found on starting (Windows, X11 and macOS all report
+it) from later changes. Only a window with the focus writes: one in the
+background would write when used later, over newer local copies. When
+the browser refuses (Firefox and Safari want a recent key or click), the
+next key or click in the window writes it, unless the window lost the
+focus first.
+
 Each client streams its own display, so windows of the same browser (or
 different devices) can show different displays at once:
 

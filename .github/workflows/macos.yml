@@ -108,7 +108,7 @@ jobs:
             }
             if (b[0] === 2) { seen.frames++; if (b[1] & 1) seen.video++; }
             if (b[0] === 3) seen.cursor++;
-            if (b[0] === 7) seen.clipboard.push(text());
+            if (b[0] === 7) seen.clipboard.push(new TextDecoder().decode(b.subarray(2))); // S_CLIPBOARD: flags, text
             if (b[0] === 9) seen.audioInfo = text();
             if (b[0] === 10) seen.audio++;
           };

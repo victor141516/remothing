@@ -390,14 +390,21 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         async move {
             // The clipboard of the display the client streams: what is there
             // on connect and after a switch, then every change this client
-            // did not make.
+            // did not make. Changes copied after that, by anyone, the client
+            // also puts on its own computer's clipboard.
             loop {
                 let mut text = link.watching.read().unwrap().control.clipboard_text();
+                let mut first = true;
                 loop {
-                    let (by, now) = text.borrow_and_update().clone();
-                    if by != Some(link.id) && !now.is_empty() {
-                        let _ = out_tx.send(proto::text(proto::S_CLIPBOARD, &now));
+                    let now = text.borrow_and_update().clone();
+                    if now.by != Some(link.id) && !now.text.is_empty() {
+                        let flags = if now.changed && !first { proto::CLIPBOARD_CHANGED } else { 0 };
+                        let mut m = Vec::with_capacity(2 + now.text.len());
+                        m.extend_from_slice(&[proto::S_CLIPBOARD, flags]);
+                        m.extend_from_slice(now.text.as_bytes());
+                        let _ = out_tx.send(m);
                     }
+                    first = false;
                     tokio::select! {
                         changed = text.changed() => {
                             if changed.is_err() {

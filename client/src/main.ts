@@ -19,6 +19,37 @@ declare global {
   }
 }
 
+/** A remote clipboard change the browser did not let this page write yet
+ * (Firefox and Safari want a key or click first). */
+let pendingCopy: string | null = null;
+
+/** Copies a remote clipboard change to this computer's clipboard (HTTPS or
+ * localhost only). Only in the window being used: one in the background
+ * would otherwise overwrite, later, what was copied here meanwhile. */
+function copyHere(text: string): void {
+  pendingCopy = null;
+  if (!window.isSecureContext || !document.hasFocus()) return;
+  navigator.clipboard.writeText(text).catch(() => {
+    pendingCopy = text;
+  });
+}
+
+// The next key or click in this window allows what was refused.
+for (const type of ['keydown', 'pointerdown']) {
+  window.addEventListener(
+    type,
+    () => {
+      if (pendingCopy === null) return;
+      void navigator.clipboard.writeText(pendingCopy).catch(() => {});
+      pendingCopy = null;
+    },
+    true,
+  );
+}
+window.addEventListener('blur', () => {
+  pendingCopy = null;
+});
+
 const params = new URLSearchParams(location.search);
 const benchSeconds = Number(params.get('bench') ?? 0);
 const probeEnabled = benchSeconds > 0 || params.has('probe');
@@ -328,6 +359,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'clipboard':
       ui.remoteClipboard(m.text);
+      if (m.changed) copyHere(m.text);
       break;
     case 'displays': {
       const list = JSON.parse(m.json) as DisplaysMessage;

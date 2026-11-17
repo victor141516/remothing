@@ -118,7 +118,10 @@ and then they are remothing's own. Restart the server after granting them.
   copied on this computer: the page sends its clipboard to the remote one
   before the V, over HTTPS or localhost once the browser is allowed to read
   the clipboard (Chromium asks the first time); otherwise, or with no text
-  copied, it pastes the remote clipboard as it is.
+  copied, it pastes the remote clipboard as it is. What is copied on the
+  remote side is copied on this computer too (HTTPS or localhost, in the
+  window being used); what the remote clipboard held before the page
+  opened is not.
 - Several displays at once: each window streams its own display. The
   `Display ›` page in the menu changes only that window, and the
   address carries it (`&display=ID`): a reload, or the address opened in

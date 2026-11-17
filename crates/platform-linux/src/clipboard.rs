@@ -43,6 +43,8 @@ struct Inner {
     /// Text we own the selection with (None: someone else owns it).
     text: Mutex<Option<String>>,
     on_change: Mutex<Option<ClipboardSink>>,
+    /// The next text received is what was there when watching started.
+    found: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -87,6 +89,7 @@ impl X11Clipboard {
             atoms,
             text: Mutex::new(None),
             on_change: Mutex::new(None),
+            found: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
         let thread_inner = inner.clone();
@@ -109,8 +112,9 @@ impl Clipboard for X11Clipboard {
     fn watch(&self, on_change: ClipboardSink) {
         let inner = &self.inner;
         *inner.on_change.lock().unwrap() = Some(on_change);
-        // What is on the clipboard now is the first report (no answer comes
-        // when nobody owns the selection).
+        // What is on the clipboard now is the first report; with no owner
+        // the answer is a SelectionNotify without a property.
+        inner.found.store(true, Ordering::Relaxed);
         let a = &inner.atoms;
         let asked = inner.conn.convert_selection(inner.window, a.clipboard, a.utf8_string, a.transfer, x11rb::CURRENT_TIME);
         if asked.is_ok() {
@@ -166,6 +170,8 @@ impl Inner {
                     self.changed(reply.value);
                 }
             }
+            // No text, or no owner: then the first report is that nothing is there.
+            Event::SelectionNotify(_) => self.found.store(false, Ordering::Relaxed),
             Event::PropertyNotify(e) if e.atom == a.transfer && e.state == Property::NEW_VALUE => {
                 let Some(text) = incoming else { return Ok(()) };
                 let piece = self.conn.get_property(true, self.window, a.transfer, AtomEnum::ANY, 0, u32::MAX)?.reply()?.value;
@@ -185,8 +191,9 @@ impl Inner {
     }
 
     fn changed(&self, text: Vec<u8>) {
+        let changed = !self.found.swap(false, Ordering::Relaxed);
         if let Some(on_change) = self.on_change.lock().unwrap().as_ref() {
-            on_change(String::from_utf8_lossy(&text).into_owned());
+            on_change(String::from_utf8_lossy(&text).into_owned(), changed);
         }
     }
 

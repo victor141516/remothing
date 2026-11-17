@@ -18,7 +18,7 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  CLOSE_UNAUTHORIZED, CURSOR_FOLLOW,
+  CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
   C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
@@ -79,8 +79,8 @@ export type FromWorker =
   | { type: 'dcsend'; buf: ArrayBuffer }
   /** Where frames (so input too) go. */
   | { type: 'path'; path: Path }
-  /** The remote clipboard's text. */
-  | { type: 'clipboard'; text: string }
+  /** The remote clipboard (S_CLIPBOARD); `changed`: since this client connected, not what was there before. */
+  | { type: 'clipboard'; text: string; changed: boolean }
   /** Display list as JSON (S_DISPLAYS). */
   | { type: 'displays'; json: string }
   /** The sound stream, or why there is none (S_AUDIO_INFO), and its packets (S_AUDIO). */
@@ -841,7 +841,7 @@ function connect(url: string): void {
         post({ type: 'cursorpos', x: v.getUint16(2, true), y: v.getUint16(4, true), follow: (v.getUint8(1) & CURSOR_FOLLOW) !== 0 });
         break;
       case S_CLIPBOARD:
-        post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 1)) });
+        post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 2)), changed: (v.getUint8(1) & CLIPBOARD_CHANGED) !== 0 });
         break;
       case S_DISPLAYS: {
         const json = new TextDecoder().decode(new Uint8Array(buf, 1));
