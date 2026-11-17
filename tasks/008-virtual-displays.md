@@ -30,24 +30,34 @@ other. Linux, Windows and macOS.
 - **HDR** on Windows virtual displays: yes, optional, chosen in the client's
   menu.
 - **Testing on Windows**: first on a GitHub Windows runner, then on this PC.
-- **Linux**: the main display keeps its size; the displays added from the
-  client are the ones that change, by being recreated. Each simulated
-  display is its own X server with its own session (`session_command`), so
-  recreating one ends only that display's programs.
+- **Windows driver**: our own build of SudoVDA (own hardware ID, own
+  certificate). Installed the first time a client asks for a virtual
+  display: the client first says what will happen (a driver, and a
+  certificate trusted by the whole machine); on consent the server installs
+  both, and whatever Windows asks must be answerable from the stream. Run as
+  the service (LocalSystem) the server needs no elevation for it; run as a
+  user it cannot, and says so.
+- **Linux**: extra displays are monitors of the same desktop (windows move
+  between them), not separate desktops; the main one keeps its size.
 
 ## Open questions
 
-1. **Windows driver**: SudoVDA has no published build of its own; Apollo's
-   installer carries one, signed with Apollo's self-signed certificate
-   (`CN=sudovda@su.mk`), and that is what this PC has (driver 1.10.9.289,
-   hardware ID `root\sudomaker\sudovda`, certificate in the machine's Root
-   store). Use that one (installed with or taken from Apollo) or our own
-   build (own hardware ID, own certificate)? See "Windows".
-2. **Linux, what an added display is**: today every simulated display is a
-   separate desktop (its own X server and session; windows cannot move
-   between them). Is that what the user wants from "another display", or a
-   second monitor of the same desktop (one X server with several outputs,
-   windows moved between them), which is a different design?
+1. **Linux, which X server**: the user wants to keep Xvfb, but Xvfb cannot
+   do this (measured 2026-11-17 in the `remothing` image):
+   - it cannot change its size after starting (RandR maximum = start size,
+     no new modes);
+   - it takes RandR 1.5 monitors (`xrandr --setmonitor`) without an error
+     but does not create them: `--listmonitors` still shows the one screen;
+   - several monitors of one desktop exist only as Xinerama screens given
+     at start (`+xinerama -screen 0 … -screen 1 …`), fixed until the server
+     and its session restart.
+
+   Xvnc (TigerVNC, no VNC port) does it: its framebuffer grows and shrinks
+   in place, and RandR 1.5 monitors work (a 4480x1440 screen showed a
+   2560x1440 and a 1920x1080 monitor side by side). Choices: Xvnc for the
+   simulated desktop; Xvfb with a fixed set of Xinerama monitors chosen at
+   start (changing them restarts the session); or separate desktops as
+   today.
 
 ## What exists today
 
