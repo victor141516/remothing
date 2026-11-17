@@ -114,7 +114,11 @@ and then they are remothing's own. Restart the server after granting them.
   `›` items open a page inside the menu, with `‹` to go back. Esc, the tab
   or a click outside closes it; that click is not sent to the remote side.
   A held key repeats on the remote side, and everything a client holds is
-  released if it disconnects.
+  released if it disconnects. Ctrl+V (Ctrl pressed first) pastes what is
+  copied on this computer: the page sends its clipboard to the remote one
+  before the V, over HTTPS or localhost once the browser is allowed to read
+  the clipboard (Chromium asks the first time); otherwise, or with no text
+  copied, it pastes the remote clipboard as it is.
 - Several displays at once: each window streams its own display. The
   `Display ›` page in the menu changes only that window, and the
   address carries it (`&display=ID`): a reload, or the address opened in

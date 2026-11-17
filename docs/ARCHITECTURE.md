@@ -411,6 +411,17 @@ selection notifications on `CLIPBOARD`, `UTF8_STRING` conversion (INCR for
 large texts), and ownership of the selection, answering requests, when a
 client sets it.
 
+Ctrl+V (Ctrl down first) carries the client's own clipboard: `input.ts`
+holds the V back, reads `navigator.clipboard`, and sends `C_PASTE` with the
+text on the stream socket (input messages are too small for a clipboard).
+The server sets it, presses V and answers `S_PASTED`; meanwhile the client
+holds back every key, so Ctrl stays down on the remote side whichever path
+its release would take (the input channel may overtake the stream socket).
+Setting the clipboard therefore returns only once the platform has it:
+Windows waits for its clipboard thread, X11 makes a round trip after
+taking the selection. Without permission to read the clipboard the client
+sends a plain V.
+
 Each client streams its own display, so windows of the same browser (or
 different devices) can show different displays at once:
 
@@ -766,7 +777,7 @@ HELLO (geometry; re-sent when the streamed display changes), FRAME (rects +
 tile layer switches + optional video access unit), CURSOR (RGBA + hotspot, 0×0 = hidden),
 CURSOR_POS (the cursor's hot spot, to a client that captured the mouse),
 PONG, SIGNAL (WebRTC and WebTransport JSON), CHUNK (data-channel piece of a
-FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), CLIPBOARD
+FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), PASTED, CLIPBOARD
 (text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
 there is no sound), AUDIO (one encoded packet), MIC_INFO (JSON: the
 microphone is free, taken, playing, needs something installed, needs a
@@ -775,7 +786,7 @@ lost frames), KEYFRAME request (with the newest frame received: requests
 the last keyframe already answers are ignored, since the client sends one
 per undecodable frame), STATS (JSON for the admin UI), SIGNAL, HELLO_ACK,
 VISIBLE (a hidden tab gets no frames; changes accumulate into one frame for
-when it shows again), EVENT (text for the event log), CLIPBOARD, DISPLAYS,
+when it shows again), EVENT (text for the event log), CLIPBOARD, PASTE, DISPLAYS,
 DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
 it, agree to install or restart), MIC (one packet), MOVE, MOVE_REL (mouse
 counts while captured), BUTTON, WHEEL, KEY, TEXT, NACK (WebTransport

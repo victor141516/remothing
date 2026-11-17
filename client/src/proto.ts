@@ -7,6 +7,8 @@ export const S_CURSOR = 3;
  * captures the mouse, or with CURSOR_FOLLOW while another client does. */
 export const S_CURSOR_POS = 13;
 export const CURSOR_FOLLOW = 1;
+/** The server set the clipboard of a C_PASTE and pressed V. */
+export const S_PASTED = 14;
 export const S_PONG = 4;
 /** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
 export const S_SIGNAL = 5;
@@ -96,6 +98,8 @@ export const MOVE_AS_POSITION = 1;
 export const C_CAPTURE = 23;
 /** UTF-8 JSON, a virtual display request (see proto.rs); answered with S_DISPLAYS. */
 export const C_VIRTUAL = 24;
+/** UTF-8 text: this computer's clipboard for a Ctrl+V; the server sets it and presses V (see proto.rs). */
+export const C_PASTE = 25;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 

@@ -100,7 +100,9 @@ impl Clipboard for X11Clipboard {
         let inner = &self.inner;
         *inner.text.lock().unwrap() = Some(text.to_string());
         inner.conn.set_selection_owner(inner.window, inner.atoms.clipboard, x11rb::CURRENT_TIME)?;
-        inner.conn.flush()?;
+        // A round trip: the X server has made us the owner before a paste
+        // pressed next (on the input connection) asks the owner.
+        inner.conn.get_selection_owner(inner.atoms.clipboard)?.reply()?;
         Ok(())
     }
 

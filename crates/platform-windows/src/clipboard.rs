@@ -37,11 +37,18 @@ const OPEN_RETRY: Duration = Duration::from_millis(10);
 /// Timer that reads the clipboard this long after its last update.
 const READ_TIMER: usize = 1;
 const READ_DELAY_MS: u32 = 100;
+/// Longest wait for the clipboard thread to write a text (it retries opening for 100 ms).
+const SET_WAIT: Duration = Duration::from_secs(1);
+
+/// Text to put on the clipboard (UTF-16, NUL-terminated), and who waits for it.
+struct Pending {
+    text: Vec<u16>,
+    done: mpsc::Sender<Result<()>>,
+}
 
 #[derive(Default)]
 struct Shared {
-    /// Text to put on the clipboard (UTF-16, NUL-terminated).
-    pending: Mutex<Option<Vec<u16>>>,
+    pending: Mutex<Option<Pending>>,
     on_change: Mutex<Option<ClipboardSink>>,
 }
 
@@ -98,10 +105,18 @@ impl WindowClipboard {
 }
 
 impl Clipboard for WindowClipboard {
+    /// Returns once the text is on the clipboard: a paste pressed next pastes it.
     fn set_text(&self, text: &str) -> Result<()> {
         let wide: Vec<u16> = text.replace("\r\n", "\n").replace('\n', "\r\n").encode_utf16().chain([0]).collect();
-        *self.shared.pending.lock().unwrap() = Some(wide);
-        self.post(WM_SET_TEXT)
+        let (done, written) = mpsc::channel();
+        *self.shared.pending.lock().unwrap() = Some(Pending { text: wide, done });
+        self.post(WM_SET_TEXT)?;
+        match written.recv_timeout(SET_WAIT) {
+            Ok(result) => result,
+            // A newer text took this one's place before it was written.
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!("the clipboard thread did not answer")),
+        }
     }
 
     fn watch(&self, on_change: ClipboardSink) {
@@ -137,10 +152,8 @@ fn listen(hwnd: HWND, shared: &Shared) {
                 }
             }
             WM_SET_TEXT => {
-                let Some(text) = shared.pending.lock().unwrap().take() else { continue };
-                if let Err(e) = write_text(hwnd, &text) {
-                    eprintln!("clipboard: set text: {e:#}");
-                }
+                let Some(Pending { text, done }) = shared.pending.lock().unwrap().take() else { continue };
+                let _ = done.send(write_text(hwnd, &text));
             }
             WM_STOP => break,
             _ => {

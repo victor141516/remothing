@@ -70,6 +70,7 @@ const input = new Input(
       inputWs.send(m);
     }
   },
+  (text) => toWorker({ type: 'paste', text }),
   showPointer,
   () => {
     // The server sends where its cursor is only while the mouse is trapped.
@@ -347,6 +348,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'micinfo':
       mic.info(m.json);
+      break;
+    case 'pasted':
+      input.pasted();
       break;
     case 'refused':
       ui.stopped(`Error ${m.code}`);

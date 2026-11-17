@@ -19,10 +19,10 @@ import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
   CLOSE_UNAUTHORIZED, CURSOR_FOLLOW,
-  C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
+  C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
-  S_SIGNAL, VIEW_HDR, now,
+  S_PASTED, S_SIGNAL, VIEW_HDR, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { WtPath, type WtOffer } from './wt';
@@ -49,6 +49,8 @@ export type ToWorker =
   | { type: 'display'; id: string }
   /** A virtual display request, JSON (C_VIRTUAL). */
   | { type: 'virtual'; json: string }
+  /** This computer's clipboard for a Ctrl+V (C_PASTE). */
+  | { type: 'paste'; text: string }
   /** Ask the server for the session's sound, or to stop sending it. */
   | { type: 'audio'; on: boolean }
   /** Text for the server's event log. */
@@ -87,7 +89,9 @@ export type FromWorker =
   /** How the server sees this client's microphone (S_MIC_INFO). */
   | { type: 'micinfo'; json: string }
   /** The server closed the stream for good with this close code. */
-  | { type: 'refused'; code: number };
+  | { type: 'refused'; code: number }
+  /** The server set the clipboard and pressed V (S_PASTED). */
+  | { type: 'pasted' };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -830,6 +834,9 @@ function connect(url: string): void {
       case S_CURSOR:
         post({ type: 'cursor', buf }, [buf]);
         break;
+      case S_PASTED:
+        post({ type: 'pasted' });
+        break;
       case S_CURSOR_POS:
         post({ type: 'cursorpos', x: v.getUint16(2, true), y: v.getUint16(4, true), follow: (v.getUint8(1) & CURSOR_FOLLOW) !== 0 });
         break;
@@ -957,6 +964,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       break;
     case 'virtual':
       sendText(C_VIRTUAL, m.json);
+      break;
+    case 'paste':
+      sendText(C_PASTE, m.text);
       break;
     case 'audio':
       audioOn = m.on;

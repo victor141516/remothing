@@ -33,6 +33,8 @@ const FLING_WINDOW_MS = 100;
 const TAP_SLOP_PX = 10;
 /** A touch this soon after a tap holds the left button: the second click of a double click, or a drag. */
 const DOUBLE_TAP_MS = 300;
+/** Longest wait for the server to confirm a paste before held-back keys go out anyway. */
+const PASTE_WAIT_MS = 2000;
 
 export class Input {
   private keys = new Set<number>();
@@ -71,12 +73,20 @@ export class Input {
    * (`?capturemoves=positions`), as without capture: for comparing how a
    * program takes either. */
   movesAsPositions = false;
+  /** A Ctrl+V waiting for this computer's clipboard to reach the remote one (`startPaste`). */
+  private paste: { done: number } | null = null;
+  /** Keys pressed or released meanwhile, sent once it is done. */
+  private queued: [number, boolean][] = [];
+  /** The V of that paste is still held. */
+  private pasteV = false;
 
   /** `pointerChanged`: `touch` changed, or the pointer moved by touch.
    * `captureChanged`: the capture mode, or whether the mouse is trapped, changed. */
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly send: (msg: Uint8Array) => void,
+    /** This computer's clipboard text for a Ctrl+V; the server sets it and presses V. */
+    private readonly sendPaste: (text: string) => void,
     private readonly pointerChanged: () => void,
     private readonly captureChanged: () => void,
   ) {
@@ -379,6 +389,22 @@ export class Input {
     const code = EVDEV[e.code];
     if (code === undefined) return;
     e.preventDefault();
+    // The V of a paste is the server's to press: its repeats and its
+    // release stay here.
+    if (code === EVDEV.KeyV && this.pasteV) {
+      if (!down) this.pasteV = false;
+      return;
+    }
+    if (this.paste) {
+      this.queued.push([code, down]);
+      return;
+    }
+    const ctrlFirst = this.keys.has(EVDEV.ControlLeft) || this.keys.has(EVDEV.ControlRight);
+    // The clipboard can be read only on HTTPS or localhost pages.
+    if (down && code === EVDEV.KeyV && ctrlFirst && !e.altKey && !e.metaKey && window.isSecureContext) {
+      this.startPaste();
+      return;
+    }
     this.setKey(code, down);
   }
 
@@ -409,8 +435,46 @@ export class Input {
   }
 
   private releaseAll(): void {
+    // A paste waiting for the clipboard (its permission prompt took the
+    // focus) is dropped with what was held back.
+    this.paste = null;
+    this.queued = [];
     for (const k of [...this.keys]) this.setKey(k, false);
     for (const b of this.buttons) this.send(new Uint8Array([C_BUTTON, b, 0]));
     this.buttons.clear();
+  }
+
+  /** Ctrl (pressed first) + V: the V is held back, this computer's clipboard
+   * goes to the remote one, and the server presses the V once it is there.
+   * Keys meanwhile wait, so Ctrl stays down on the remote side until then. */
+  private startPaste(): void {
+    const paste = { done: 0 };
+    this.paste = paste;
+    this.pasteV = true;
+    void navigator.clipboard.readText().then(
+      (text) => {
+        if (this.paste !== paste) return;
+        this.sendPaste(text);
+        // The server answers (`pasted`); if it never does, keys go on.
+        paste.done = window.setTimeout(() => this.pasted(), PASTE_WAIT_MS);
+      },
+      () => {
+        if (this.paste !== paste) return;
+        // No permission (or no text): a plain Ctrl+V of the remote clipboard.
+        this.setKey(EVDEV.KeyV, true);
+        this.setKey(EVDEV.KeyV, false);
+        this.pasted();
+      },
+    );
+  }
+
+  /** The server pressed the V (`S_PASTED`): held-back keys go out. */
+  pasted(): void {
+    if (!this.paste) return;
+    clearTimeout(this.paste.done);
+    this.paste = null;
+    const queued = this.queued;
+    this.queued = [];
+    for (const [code, down] of queued) this.setKey(code, down);
   }
 }

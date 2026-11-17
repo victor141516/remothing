@@ -80,6 +80,8 @@ pub const PIECE_HEADER_LEN: usize = 16;
 /// cursor itself. The same without CURSOR_FOLLOW ends that.
 pub const S_CURSOR_POS: u8 = 13;
 pub const CURSOR_FOLLOW: u8 = 1;
+/// Empty: the C_PASTE of this client is done (its V pressed, or failed).
+pub const S_PASTED: u8 = 14;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
@@ -174,6 +176,12 @@ pub const C_CAPTURE: u8 = 23;
 /// "height","refresh_hz","hdr"}}` (and stream it), `{"op":"set","id","mode"}`,
 /// `{"op":"destroy","id"}`. Answered with S_DISPLAYS.
 pub const C_VIRTUAL: u8 = 24;
+/// UTF-8 text: the client's own clipboard, for a Ctrl+V on its side. The
+/// server puts it on the clipboard of the display (empty: leaves that as it
+/// is), presses V there (the client already holds Ctrl, and holds back its
+/// next keys) and answers S_PASTED. It travels on this socket because a
+/// clipboard may be larger than an input message can be.
+pub const C_PASTE: u8 = 25;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server

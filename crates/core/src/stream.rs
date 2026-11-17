@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::response::Response;
@@ -41,6 +41,8 @@ use crate::shared::{ClientCodec, Link, Pull, Shared, Tuning, VIDEO_SHARE};
 const PATH_WS: u8 = 0;
 const PATH_RTC: u8 = 1;
 const PATH_WT: u8 = 2;
+/// evdev code of V, which C_PASTE presses.
+const KEY_V: u16 = 47;
 /// Frames kept for pieces the client asks for again (WebTransport); older
 /// ones are past saving and the client gives them up.
 const WT_KEEP: usize = 256;
@@ -518,9 +520,35 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     (Some(proto::C_EVENT), _) => app.telemetry.event(link.id, &String::from_utf8_lossy(&b[1..])),
                     (Some(proto::C_CLIPBOARD), _) => {
                         let stream = link.watching.read().unwrap().clone();
-                        if let Err(e) = stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])) {
+                        // Setting waits for the platform to have it: a moment,
+                        // and in order with the next one.
+                        let set = tokio::task::block_in_place(|| stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])));
+                        if let Err(e) = set {
                             app.telemetry.error("clipboard", e);
                         }
+                    }
+                    (Some(proto::C_PASTE), _) => {
+                        let stream = link.watching.read().unwrap().clone();
+                        let text = String::from_utf8_lossy(&b[1..]).into_owned();
+                        let (app, out, id) = (app.clone(), out_tx.clone(), link.id);
+                        // Setting the clipboard waits for the platform to have
+                        // it, which the reader, carrying ACKs, must not.
+                        tokio::task::spawn_blocking(move || {
+                            // Empty: this computer had no text to copy; the remote
+                            // clipboard is pasted as it is.
+                            let set = if text.is_empty() { Ok(()) } else { stream.control.set_clipboard(id, &text) };
+                            // The client still holds Ctrl down on the remote side
+                            // and waits for S_PASTED before sending more keys.
+                            let pressed = set.and_then(|()| {
+                                let input = stream.control.input().context("no input on this display")?;
+                                input.key(KEY_V, true)?;
+                                input.key(KEY_V, false)
+                            });
+                            if let Err(e) = pressed {
+                                app.telemetry.error("paste", e);
+                            }
+                            let _ = out.send(vec![proto::S_PASTED]);
+                        });
                     }
                     (Some(proto::C_AUDIO), 2..) => {
                         audio_on.send_replace(b[1] != 0);
