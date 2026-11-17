@@ -83,7 +83,9 @@ impl App {
         if !self.platform.displays().list()?.iter().any(|d| d.id == id) {
             bail!("unknown display {id}");
         }
-        self.update_settings(|s| s.server.display = id.to_string())
+        self.update_settings(|s| s.server.display = id.to_string())?;
+        self.streams.list_changed();
+        Ok(())
     }
 
     /// The display a client starts on: `wanted` when it is listed, else the
@@ -114,14 +116,15 @@ impl App {
     }
 
     /// Carries out a virtual display request. Returns a new display, which
-    /// the asking client streams from then on.
+    /// the asking client streams from then on. Every client gets the new
+    /// list (`Streams::list_changes`).
     pub fn virtual_request(&self, req: VirtualRequest) -> Result<Option<String>> {
         let v = self.platform.displays().virtual_displays().context("virtual displays are not supported here")?;
-        match req {
+        let created = match req {
             VirtualRequest::Install => v.install().map(|()| None),
             VirtualRequest::Create { mode } => {
                 mode.check(&v.capabilities())?;
-                Ok(Some(v.create(mode)?.id))
+                v.create(mode).map(|info| Some(info.id))
             }
             VirtualRequest::Set { id, mode } => {
                 let caps = v.capabilities();
@@ -129,17 +132,16 @@ impl App {
                     bail!("virtual displays keep their size here");
                 }
                 mode.check(&caps)?;
-                v.set_mode(&id, mode)?;
                 // Opened again at its new size, if it is streamed.
-                self.streams.reopen(&id);
-                Ok(None)
+                v.set_mode(&id, mode).map(|_| self.streams.reopen(&id)).map(|()| None)
             }
-            VirtualRequest::Destroy { id } => {
-                v.destroy(&id)?;
+            VirtualRequest::Destroy { id } => v.destroy(&id).map(|()| {
                 self.streams.gone(&id);
-                Ok(None)
-            }
-        }
+                None
+            }),
+        }?;
+        self.streams.list_changed();
+        Ok(created)
     }
 
     /// The first client in asks the OS to favour the stream (see `Platform::streaming`).

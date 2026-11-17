@@ -422,6 +422,9 @@ different devices) can show different displays at once:
   old display still in flight never pass for new ones, and its first pull
   there is a HELLO. `S_DISPLAYS` tells it which display it streams; the
   page writes it into its address, and a reconnect asks for that one.
+  Every client gets `S_DISPLAYS` again when displays come, change or go,
+  or the default changes (`Streams::list_changes`), so every window lists
+  them all.
 - **Input**: the input socket belongs to no session by itself; the page
   gives both sockets the same random key, and input goes to the display the
   stream socket with that key watches. The host still has one pointer and
@@ -455,8 +458,10 @@ for the system: windows move to them and programs run at their resolution.
 - **Client**: the panel offers the size, the refresh rate and HDR where the
   platform has them, and "Fit window": the window's size in device pixels
   (less the on-screen keyboard), which is the area the picture fills
-  without scaling. When the platform needs an installation first, the
-  client shows the platform's notice and installs only after a yes.
+  without scaling. It lists every virtual display, whichever window made
+  or shows it, each with its removal. When the platform needs an
+  installation first, the client shows the platform's notice and installs
+  only after a yes.
 - **Linux**: one Xvfb per display (separate X screens, each with its own
   session; not monitors of one desktop). Xvfb cannot change size, so
   `resize` is false; the display the server started with

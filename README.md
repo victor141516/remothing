@@ -143,8 +143,10 @@ and then they are remothing's own. Restart the server after granting them.
 - Virtual displays: `Displays…` in the controls adds a display to the
   host, of the size typed in or of this window's (`Fit window`: shown 1:1,
   without scaling), with a refresh rate and HDR where offered, and streams
-  it at once. For the virtual display being streamed the panel changes its
-  size (Windows, macOS) or removes it. They are displays like any other for
+  it at once. The panel lists every virtual display, whichever window made
+  it, to show it in this window or remove it (a window showing a removed
+  one goes to the default display), and changes the size of the one shown
+  here (Windows, macOS). They are displays like any other for
   the host (windows move there, programs run at their resolution) and go
   away when the server stops. Windows: they need remothing's display
   driver, which the panel offers to install when the server runs as the

@@ -48,7 +48,8 @@ pub const S_CLIPBOARD: u8 = 7;
 /// "default":id,"streamed":{id:clients},"virtual":null|{"setup":{"state":
 /// "ready"|"install"|"unavailable","notice"|"reason"},"capabilities":{...}},
 /// "error"?:text}`. `current` is the display this client streams; `error`
-/// the failure of its last C_VIRTUAL.
+/// the failure of its last C_VIRTUAL. Also sent to every client whenever
+/// displays come, change or go, or the default changes.
 pub const S_DISPLAYS: u8 = 8;
 /// UTF-8 JSON, after C_AUDIO and whenever it changes: the sound stream
 /// `{"active":true,"codec","rate","channels","description":hex,"source"}`

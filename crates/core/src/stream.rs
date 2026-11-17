@@ -445,6 +445,18 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
             }
         }
     };
+    // The display list again whenever displays come, change or go (another
+    // window made one, say): every window's menu lists them all.
+    let display_list = {
+        let (app, link, out_tx) = (app.clone(), link.clone(), out_tx.clone());
+        let mut changes = app.streams.list_changes();
+        async move {
+            while changes.changed().await.is_ok() {
+                send_displays(&app, &out_tx, &link, None);
+            }
+            std::future::pending::<()>().await
+        }
+    };
     // Whether the microphone is free or another client has it. What happens
     // to this client's own request goes to it directly (`MicHub::start`).
     let mic_state = {
@@ -675,6 +687,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         _ = clipboard => {}
         _ = audio => {}
         _ = mic_state => {}
+        _ = display_list => {}
         _ = wt_offer => {}
         _ = wt => {}
     }

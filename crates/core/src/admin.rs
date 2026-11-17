@@ -148,6 +148,7 @@ async fn create_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Json(mo
     let v = app.platform.displays().virtual_displays().ok_or_else(|| bad("virtual displays unsupported here"))?;
     mode.check(&v.capabilities()).map_err(bad)?;
     let info = v.create(mode).map_err(bad)?;
+    app.streams.list_changed();
     Ok(Json(info).into_response())
 }
 

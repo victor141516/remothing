@@ -144,11 +144,13 @@ pub struct Streams {
     keyboard_layout: Arc<RwLock<String>>,
     tile: u32,
     map: Mutex<HashMap<String, Arc<DisplayStream>>>,
+    /// See `list_changes`.
+    list: watch::Sender<()>,
 }
 
 impl Streams {
     pub fn new(platform: Arc<dyn Platform>, telemetry: Arc<Telemetry>, keyboard_layout: Arc<RwLock<String>>, tile: u32) -> Arc<Self> {
-        Arc::new(Self { platform, telemetry, keyboard_layout, tile, map: Mutex::default() })
+        Arc::new(Self { platform, telemetry, keyboard_layout, tile, map: Mutex::default(), list: watch::channel(()).0 })
     }
 
     /// One more client watches display `id`; its capture starts with the
@@ -198,6 +200,17 @@ impl Streams {
         if let Some(s) = self.map.lock().unwrap().remove(id) {
             s.set_gone();
         }
+        self.list_changed();
+    }
+
+    /// Fires when displays were added, changed or removed, or the default
+    /// changed: every client gets the list again.
+    pub fn list_changes(&self) -> watch::Receiver<()> {
+        self.list.subscribe()
+    }
+
+    pub fn list_changed(&self) {
+        self.list.send_replace(());
     }
 
     /// Applies a keyboard layout to every captured display; the failures.
