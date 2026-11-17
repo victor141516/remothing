@@ -71,6 +71,13 @@ impl Cursor {
             return None;
         }
         self.checked = Some(Instant::now());
+        // On another display the pointer shows nothing here, as DXGI tells
+        // per output on Windows: a client following the cursor from another
+        // window draws it only where it is.
+        let here = CGEvent::new(None).is_some_and(|e| self.geometry.contains(CGEvent::location(Some(&e))));
+        if !here {
+            return self.shape.take().map(|_| CursorState::Hidden);
+        }
         // Whether a program hid the cursor is not public on macOS any more
         // (CGCursorIsVisible is "no longer supported"): only the shape is sent.
         let shape = autoreleasepool(|_| self.render())?;

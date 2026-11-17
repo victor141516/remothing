@@ -73,9 +73,13 @@ pub const S_MIC_INFO: u8 = 11;
 /// be rebuilt, and a run of up to `parity` lost in a row too.
 pub const S_PIECE: u8 = 12;
 pub const PIECE_HEADER_LEN: usize = 16;
-/// pad u8, x u16, y u16: where the remote cursor's hot spot is, display
-/// pixels. Only to a client that captured the mouse (C_CAPTURE), when it moves.
+/// flags u8, x u16, y u16: where the remote cursor's hot spot is, display
+/// pixels, when it moves. To a client that captured the mouse (C_CAPTURE),
+/// and while another client has it captured to every other client, with
+/// CURSOR_FOLLOW: its user's mouse is in that other window, so it draws the
+/// cursor itself. The same without CURSOR_FOLLOW ends that.
 pub const S_CURSOR_POS: u8 = 13;
+pub const CURSOR_FOLLOW: u8 = 1;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
@@ -313,8 +317,8 @@ pub fn cursor(state: &CursorState) -> Vec<u8> {
     m
 }
 
-pub fn cursor_pos(x: u32, y: u32) -> Vec<u8> {
-    let mut m = vec![S_CURSOR_POS, 0];
+pub fn cursor_pos(x: u32, y: u32, flags: u8) -> Vec<u8> {
+    let mut m = vec![S_CURSOR_POS, flags];
     m.extend_from_slice(&(x.min(0xffff) as u16).to_le_bytes());
     m.extend_from_slice(&(y.min(0xffff) as u16).to_le_bytes());
     m

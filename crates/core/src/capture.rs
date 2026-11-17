@@ -2,7 +2,7 @@
 //! display's `CaptureSession`, feeds that display's tile state (`Shared`) and
 //! stops a while after its last client left.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -148,6 +148,8 @@ pub struct Streams {
     list: watch::Sender<()>,
     /// See `shown`.
     shown: RwLock<Arc<Vec<DisplayInfo>>>,
+    /// Clients with the mouse captured (see `set_capturing`).
+    capturing: Mutex<HashSet<u64>>,
 }
 
 impl Streams {
@@ -160,6 +162,7 @@ impl Streams {
             map: Mutex::default(),
             list: watch::channel(()).0,
             shown: RwLock::default(),
+            capturing: Mutex::default(),
         })
     }
 
@@ -180,6 +183,7 @@ impl Streams {
             watchers: AtomicUsize::new(1),
             gone: AtomicBool::new(false),
         });
+        stream.shared.set_follow(!self.capturing.lock().unwrap().is_empty());
         map.insert(id.to_string(), stream.clone());
         let capture = CaptureLoop { streams: self.clone(), stream: stream.clone() };
         if let Err(e) = std::thread::Builder::new().name(format!("capture {id}")).spawn(move || capture.run()) {
@@ -192,6 +196,23 @@ impl Streams {
         let map = self.map.lock().unwrap();
         stream.watchers.fetch_sub(1, Ordering::AcqRel);
         self.publish_shown(&map);
+    }
+
+    /// Client `id` captured the mouse or let it go: while any client has it
+    /// captured, every other client draws the cursor (`Shared::set_follow`).
+    pub fn set_capturing(&self, id: u64, on: bool) {
+        let any = {
+            let mut capturing = self.capturing.lock().unwrap();
+            if on {
+                capturing.insert(id);
+            } else {
+                capturing.remove(&id);
+            }
+            !capturing.is_empty()
+        };
+        for s in self.active() {
+            s.shared.set_follow(any);
+        }
     }
 
     /// The displays being captured.

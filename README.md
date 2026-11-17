@@ -137,6 +137,7 @@ and then they are remothing's own. Restart the server after granting them.
   cursor still goes on to another display shown in another window, as a
   mouse goes from one monitor to the next (Windows, macOS, X11 outputs of
   one screen); towards a display no window shows it stops at the edge.
+  The other windows draw the remote cursor meanwhile, where it is.
   Esc frees it in a window (the browser insists), and a click traps it
   again; the same shortcut or button turns capture off. A game that needs Esc: use
   `Fullscreen` too, where Esc reaches the remote side. `&capturemoves=positions`

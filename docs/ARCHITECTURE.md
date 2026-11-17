@@ -357,7 +357,12 @@ coordinates, evdev key codes on the wire).
   on to another display some client shows (another window), as a real
   mouse goes from one monitor to the next; a move that would take it to a
   display nobody sees puts it back on the streamed display's edge.
-  `Streams::shown` keeps that list ready, since every count reads it. The
+  `Streams::shown` keeps that list ready, since every count reads it. While
+  a client has the mouse captured, every other client (other windows, on
+  any display) gets `S_CURSOR_POS` too, with `CURSOR_FOLLOW`, and draws the
+  remote cursor where the server says, as its own mouse is not there; the
+  cursor's shape tells "hidden" on the displays it is not on (DXGI per
+  output; on macOS from the pointer's position). The
   browser hides the local cursor, so the client says it captured
   (`C_CAPTURE`) and gets the remote hot spot's position (`S_CURSOR_POS`,
   from DXGI's pointer position, or QueryPointer on X11, asked only while a

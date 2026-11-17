@@ -253,11 +253,16 @@ const pointer = document.getElementById('pointer') as HTMLCanvasElement;
 /** Hot spot of the remote cursor's shape; null while the remote side hides its cursor. */
 let hotSpot: [number, number] | null = null;
 
-/** A finger has no cursor in the browser, and a trapped mouse shows none:
- * then the remote cursor's shape is drawn over the picture, where the
- * pointer is (for a trapped mouse, where the server says it is). */
+/** The mouse is trapped in another window of this server (S_CURSOR_POS with
+ * CURSOR_FOLLOW): the remote cursor moves without this page's mouse. */
+let follow = false;
+
+/** A finger has no cursor in the browser, a trapped mouse shows none, and
+ * a mouse trapped in another window is not over this one: then the remote
+ * cursor's shape is drawn over the picture, where the pointer is (for a
+ * trapped mouse, where the server says it is). */
 function showPointer(): void {
-  pointer.hidden = !(input.touch || input.locked) || hotSpot === null || input.screenWidth === 0;
+  pointer.hidden = !(input.touch || input.locked || follow) || hotSpot === null || input.screenWidth === 0;
   if (pointer.hidden || hotSpot === null) return;
   const r = canvas.getBoundingClientRect();
   const x = r.left + (input.pointerX * r.width) / input.screenWidth - hotSpot[0];
@@ -294,11 +299,14 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       setCursor(m.buf);
       break;
     case 'cursorpos':
-      if (input.locked) {
+      // Another window has the mouse trapped: this one draws the remote
+      // cursor where the server says it is, until it says it no longer has.
+      follow = m.follow;
+      if (input.locked || follow) {
         input.pointerX = m.x;
         input.pointerY = m.y;
-        showPointer();
       }
+      showPointer();
       break;
     case 'marker':
       prober.observed(m.marker, m.at);

@@ -3,8 +3,10 @@
 export const S_HELLO = 1;
 export const S_FRAME = 2;
 export const S_CURSOR = 3;
-/** pad u8, x u16, y u16: the remote cursor's hot spot, while this client captures the mouse. */
+/** flags u8, x u16, y u16: the remote cursor's hot spot, while this client
+ * captures the mouse, or with CURSOR_FOLLOW while another client does. */
 export const S_CURSOR_POS = 13;
+export const CURSOR_FOLLOW = 1;
 export const S_PONG = 4;
 /** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
 export const S_SIGNAL = 5;

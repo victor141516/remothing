@@ -610,6 +610,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         app.telemetry.event(link.id, if on { "mouse captured" } else { "mouse released" });
                         link.captured.store(on, Ordering::Release);
                         link.watching.read().unwrap().shared.set_client_capture(link.id, on);
+                        app.streams.set_capturing(link.id, on);
                     }
                     (Some(proto::C_HELLO_ACK), _) => {
                         link.hello_acked.store(true, Ordering::Release);
@@ -712,6 +713,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
     let stream = link.watching.read().unwrap().clone();
     stream.shared.remove_client(link.id);
     app.streams.unwatch(&stream);
+    app.streams.set_capturing(link.id, false);
     app.telemetry.client_disconnected(link.id);
     app.client_left();
     app.telemetry.event(link.id, "disconnected");

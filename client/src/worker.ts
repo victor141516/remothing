@@ -18,7 +18,7 @@ import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  CLOSE_UNAUTHORIZED,
+  CLOSE_UNAUTHORIZED, CURSOR_FOLLOW,
   C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
@@ -68,8 +68,9 @@ export type FromWorker =
   /** `hdr`: the picture is HDR (the page has to be switched to HDR). */
   | { type: 'hello'; width: number; height: number; hdr: boolean }
   | { type: 'cursor'; buf: ArrayBuffer }
-  /** Where the remote cursor's hot spot is (S_CURSOR_POS). */
-  | { type: 'cursorpos'; x: number; y: number }
+  /** Where the remote cursor's hot spot is (S_CURSOR_POS); `follow`: the
+   * mouse is trapped in another window, this one draws the cursor. */
+  | { type: 'cursorpos'; x: number; y: number; follow: boolean }
   | { type: 'marker'; marker: number; at: number }
   | { type: 'stats'; batch: Batch; pipeline: string; pingRtt: number }
   | { type: 'signal'; json: string }
@@ -830,7 +831,7 @@ function connect(url: string): void {
         post({ type: 'cursor', buf }, [buf]);
         break;
       case S_CURSOR_POS:
-        post({ type: 'cursorpos', x: v.getUint16(2, true), y: v.getUint16(4, true) });
+        post({ type: 'cursorpos', x: v.getUint16(2, true), y: v.getUint16(4, true), follow: (v.getUint8(1) & CURSOR_FOLLOW) !== 0 });
         break;
       case S_CLIPBOARD:
         post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 1)) });
