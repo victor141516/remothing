@@ -313,7 +313,6 @@ impl CaptureLoop {
         eprintln!("streaming display {} ({}x{}{kind})", info.id, width, height);
         // GPU-based sessions can skip CPU readback of tiles shown only from video.
         let gpu = capture.gpu_surface().is_some();
-        let pixels = self.stream.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
         *self.stream.control.input.write().unwrap() = Some(input);
         *self.stream.control.current.write().unwrap() = Some(info);
         if let Some(c) = &clipboard {
@@ -322,6 +321,8 @@ impl CaptureLoop {
         }
         // The previous display's clipboard (and its watcher) ends here.
         *self.stream.control.clipboard.write().unwrap() = clipboard;
+        // Last: it sends the clients their HELLO, after which they may type.
+        let pixels = self.stream.shared.reconfigure(width, height, capture.gpu_surface(), picture.hdr_max);
 
         let stride = width as usize * 4;
         let mut diff = Differ::new(pixels.geometry);

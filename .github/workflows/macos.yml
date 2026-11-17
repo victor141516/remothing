@@ -91,15 +91,21 @@ jobs:
           const send = (bytes) => ws.send(new Uint8Array(bytes));
           ws.onopen = () => {
             send([17, 1]); // C_AUDIO on
-            send([9, ...new TextEncoder().encode("remothing-ci-to-mac")]); // C_CLIPBOARD
-            send([10, 0, 100, 0, 200, 0]); // C_MOVE to (100, 200)
             // A live client pings every second; the server drops one silent for 5 s.
             setInterval(() => send([1, 0, 0, 0, 0, 0, 0, 0, ...new Uint8Array(new Float64Array([0]).buffer)]), 1000);
           };
           ws.onmessage = (ev) => {
             const b = new Uint8Array(ev.data);
             const text = () => new TextDecoder().decode(b.subarray(1));
-            if (b[0] === 1) { const v = new DataView(ev.data); seen.hello = [v.getUint32(4, true), v.getUint32(8, true)]; send([6]); }
+            if (b[0] === 1) {
+              const v = new DataView(ev.data);
+              seen.hello = [v.getUint32(4, true), v.getUint32(8, true)];
+              send([6]);
+              // As a user does, once there is a picture: the display's capture
+              // (input, clipboard) starts with the first client.
+              send([9, ...new TextEncoder().encode("remothing-ci-to-mac")]); // C_CLIPBOARD
+              send([10, 0, 100, 0, 200, 0]); // C_MOVE to (100, 200)
+            }
             if (b[0] === 2) { seen.frames++; if (b[1] & 1) seen.video++; }
             if (b[0] === 3) seen.cursor++;
             if (b[0] === 7) seen.clipboard.push(text());
