@@ -38,6 +38,7 @@ before changing a subsystem:
 | `crates/server` | The `remothing` binary: CLI, config path, picks the platform |
 | `testapp` | `rt-testapp`: the latency probe application |
 | `client` | Browser client and admin UI (TypeScript, esbuild). `client/dist` is embedded into the binary at compile time |
+| `drivers/windows-vdd` | Windows virtual display driver (SudoVDA-based IddCx); its signed `package/` is embedded in the binary |
 | `Dockerfile`, `docker/` | Linux images: `remothing` (slim) and `remothing-desktop` (XFCE + Firefox) |
 | `scripts/` | Windows build dependencies and environment |
 | `.github/workflows/macos.yml` | macOS build, tests and smoke test on GitHub's Macs; the binary is the run's artifact |
@@ -84,6 +85,10 @@ docker build --target desktop -t remothing-desktop .
   into that crate's rlib, so a plain rebuild keeps linking the old ones.
 - A client change needs the Rust binary rebuilt (and the Docker image) to
   be served.
+- `drivers/windows-vdd` is built and signed only by `.github/workflows/windows-vdd.yml`
+  (no WDK here). After changing it, put that run's `remothing-vdd-package`
+  artifact into `drivers/windows-vdd/package/` and commit it. The signing key
+  is in `.tools/vdd-signing/` and in the repository secrets.
 
 ## Verifying a change
 
