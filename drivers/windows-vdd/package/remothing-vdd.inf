@@ -1,0 +1,77 @@
+;
+; remothing-vdd.inf: remothing's virtual display driver (SudoVDA with its
+; own hardware id, see README.md).
+;
+
+[Version]
+PnpLockdown=1
+Signature="$Windows NT$"
+ClassGUID = {4D36E968-E325-11CE-BFC1-08002BE10318}
+Class = Display
+ClassVer = 2.0
+Provider=%ManufacturerName%
+CatalogFile=remothing-vdd.cat
+DriverVer = 11/17/2026,13.24.29.901
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceName%=RemothingVdd_Install, Root\remothing\vdd
+
+[SourceDisksFiles]
+remothing-vdd.dll=1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+; =================== UMDF Device ==================================
+
+[RemothingVdd_Install.NT]
+CopyFiles=UMDriverCopy
+
+[RemothingVdd_Install.NT.hw]
+AddReg = MyDevice_HardwareDeviceSettings
+
+[MyDevice_HardwareDeviceSettings]
+HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "RemothingVddGroup"
+; SYSTEM and administrators only: creating displays is the server's job.
+HKR,, "Security",, "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[RemothingVdd_Install.NT.Services]
+AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+
+[RemothingVdd_Install.NT.Wdf]
+UmdfService=RemothingVdd,RemothingVdd_Install
+UmdfServiceOrder=RemothingVdd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[RemothingVdd_Install]
+UmdfLibraryVersion=2.25.0
+ServiceBinary=%12%\UMDF\remothing-vdd.dll
+UmdfExtensions = IddCx0102
+
+[WUDFRD_ServiceInstall]
+DisplayName = %WudfRdDisplayName%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\WUDFRd.sys
+
+[DestinationDirs]
+UMDriverCopy=12,UMDF ; copy to drivers\umdf
+
+[UMDriverCopy]
+remothing-vdd.dll
+
+; =================== Generic ==================================
+
+[Strings]
+ManufacturerName="remothing"
+DiskName = "remothing virtual display driver"
+DeviceName="remothing Virtual Display Adapter"
+WudfRdDisplayName="Windows Driver Foundation - User-mode Driver Framework Reflector"
+
+REG_MULTI_SZ  = 0x00010000
+REG_SZ        = 0x00000000

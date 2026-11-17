@@ -25,7 +25,7 @@
 | R4.7 only real outputs | DXGI outputs only, `virtual_displays()` = None | done |
 | R5.1 admin UI in-process, separate port | `server.admin_listen` (default 127.0.0.1:8081), `client/admin.html` | done |
 | R5.2 status | `/api/status`: platform, provider, encoders (+ unusable with reason, per-client active encoder and fallback), GPUs + utilization, CPU, clients with fps/Mbit/s/p50/p99, recent errors | done |
-| R5.3 display selection, virtual create/destroy | `/api/displays`, `/api/displays/select`, `/api/virtual` | done |
+| R5.3 display selection, virtual displays | `/api/displays`, `/api/displays/select`, `/api/virtual` (create, `PUT` mode, `DELETE`, `install`); clients through `C_VIRTUAL` and the "Displays…" panel; Linux Xvfb, Windows own IddCx driver, macOS CGVirtualDisplay | done (Linux: separate X screens, fixed size; issue #2) |
 | R5.4 live settings | `/api/settings` (bandwidth, lossless limit, codec, encoder preference, keyboard layout) applied without restart | done |
 | R5.5 auth + TLS | admin token or salted password → session cookie / bearer; stream token on `/ws` and `/input`; rustls on both listeners | done |
 | R5.6 config file | TOML (`config.rs`), written back on changes | done |

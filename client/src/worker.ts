@@ -19,7 +19,7 @@ import { BarcodeReader, barcodeAge } from './probe';
 import {
   C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
   CLOSE_UNAUTHORIZED,
-  C_STATS, C_VIEW, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
+  C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_SIGNAL, VIEW_HDR, now,
@@ -47,6 +47,8 @@ export type ToWorker =
   /** Ask for the display list; stream display `id`. */
   | { type: 'displays' }
   | { type: 'display'; id: string }
+  /** A virtual display request, JSON (C_VIRTUAL). */
+  | { type: 'virtual'; json: string }
   /** Ask the server for the session's sound, or to stop sending it. */
   | { type: 'audio'; on: boolean }
   /** Text for the server's event log. */
@@ -937,6 +939,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       break;
     case 'display':
       sendText(C_DISPLAY, m.id);
+      break;
+    case 'virtual':
+      sendText(C_VIRTUAL, m.json);
       break;
     case 'audio':
       audioOn = m.on;

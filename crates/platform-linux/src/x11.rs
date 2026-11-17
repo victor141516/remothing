@@ -34,6 +34,7 @@ pub fn list(display: &str) -> Result<Vec<DisplayInfo>> {
         y: 0,
         primary: true,
         kind: DisplayKind::Real,
+        mode: None,
     };
     if conn.randr_query_version(1, 3).ok().and_then(|c| c.reply().ok()).is_none() {
         return Ok(vec![whole()]);
@@ -64,6 +65,7 @@ pub fn list(display: &str) -> Result<Vec<DisplayInfo>> {
             y: c.y as i32,
             primary: output == primary,
             kind: DisplayKind::Real,
+            mode: None,
         });
     }
     if out.is_empty() {

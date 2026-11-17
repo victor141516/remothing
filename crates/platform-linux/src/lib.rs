@@ -139,7 +139,7 @@ impl LinuxPlatform {
             sound,
         };
         if let Some((w, h)) = options.virtual_on_start {
-            p.displays.xvfb.create(w, h)?;
+            p.displays.xvfb.create_main(w, h)?;
         }
         Ok(p)
     }

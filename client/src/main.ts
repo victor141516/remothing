@@ -10,7 +10,7 @@ import { Peer } from './peer';
 import { InputProber } from './probe';
 import { C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
 import { Stats } from './stats';
-import { Ui, type DisplayEntry } from './ui';
+import { Ui, type DisplaysMessage } from './ui';
 import type { FromWorker, Path, ToWorker } from './worker';
 
 declare global {
@@ -92,6 +92,15 @@ const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
   clipboard: (text) => toWorker({ type: 'clipboard', text }),
   listDisplays: () => toWorker({ type: 'displays' }),
   selectDisplay: (id) => toWorker({ type: 'display', id }),
+  virtualDisplay: (request) => toWorker({ type: 'virtual', json: JSON.stringify(request) }),
+  // The same area `layout` fits the picture into.
+  viewport: () => {
+    const dpr = window.devicePixelRatio || 1;
+    const view = window.visualViewport;
+    const width = Math.round((view?.width ?? window.innerWidth) * dpr);
+    const height = Math.round(((view?.height ?? window.innerHeight) - ui.reservedBottom) * dpr);
+    return { width, height, hz: refreshHz };
+  },
   toggleStats: () => (statsEl.hidden = !statsEl.hidden),
   toggleSound: () => sound.toggle(),
   toggleMic: () => void mic.toggle(),
@@ -310,8 +319,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       ui.remoteClipboard(m.text);
       break;
     case 'displays': {
-      const list = JSON.parse(m.json) as { displays: DisplayEntry[]; current: string | null };
-      ui.displays(list.displays, list.current);
+      const list = JSON.parse(m.json) as DisplaysMessage;
+      ui.displays(list);
       break;
     }
     case 'audioinfo':

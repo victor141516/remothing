@@ -5,13 +5,14 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::app::App;
+use crate::app::{App, VirtualRequest};
 use crate::config::{constant_time_eq, hash_password, random_token, verify_password};
+use crate::platform::DisplayMode;
 use crate::shared::Tuning;
 
 const COOKIE: &str = "rt_admin";
@@ -26,7 +27,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/displays", get(displays))
         .route("/api/displays/select", post(select_display))
         .route("/api/virtual", post(create_virtual))
-        .route("/api/virtual/{id}", delete(destroy_virtual))
+        .route("/api/virtual/install", post(install_virtual))
+        .route("/api/virtual/{id}", put(set_virtual).delete(destroy_virtual))
         .route("/api/settings", get(get_settings).put(put_settings))
 }
 
@@ -122,14 +124,7 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
 
 async fn displays(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
     check(&app, &headers)?;
-    let d = app.platform.displays();
-    let list = d.list().map_err(bad)?;
-    Ok(Json(json!({
-        "displays": list,
-        "current": app.control.current().map(|c| c.id),
-        "can_create_virtual": d.virtual_displays().is_some(),
-    }))
-    .into_response())
+    Ok(Json(app.displays_json(None).map_err(bad)?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -143,20 +138,29 @@ async fn select_display(State(app): State<Arc<App>>, headers: HeaderMap, Json(s)
     Ok(Json(json!({"ok": true})).into_response())
 }
 
-#[derive(Deserialize)]
-struct Create {
-    width: u32,
-    height: u32,
-}
-
-async fn create_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Json(c): Json<Create>) -> ApiResult {
+async fn create_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Json(mode): Json<DisplayMode>) -> ApiResult {
     check(&app, &headers)?;
     let v = app.platform.displays().virtual_displays().ok_or_else(|| bad("virtual displays unsupported here"))?;
-    if !(64..=7680).contains(&c.width) || !(64..=4320).contains(&c.height) {
-        return Err(bad("size out of range"));
-    }
-    let info = v.create(c.width, c.height).map_err(bad)?;
+    mode.check(&v.capabilities()).map_err(bad)?;
+    let info = v.create(mode).map_err(bad)?;
     Ok(Json(info).into_response())
+}
+
+async fn set_virtual(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mode): Json<DisplayMode>,
+) -> ApiResult {
+    check(&app, &headers)?;
+    app.virtual_request(VirtualRequest::Set { id, mode }).map_err(bad)?;
+    Ok(Json(json!({"ok": true})).into_response())
+}
+
+async fn install_virtual(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    check(&app, &headers)?;
+    app.virtual_request(VirtualRequest::Install).map_err(bad)?;
+    Ok(Json(json!({"ok": true})).into_response())
 }
 
 async fn destroy_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult {

@@ -97,6 +97,10 @@ fn main() -> Result<()> {
     eprintln!("config: {}", config_path.display());
     let encoders = Box::new(remothing_encoder::FfmpegEncoders::new()?);
     let platform: Arc<dyn Platform> = build_platform(&settings.platform, encoders)?;
+    // CoreGraphics needs the main thread's run loop (`with_main_run_loop`).
+    #[cfg(target_os = "macos")]
+    return remothing_platform_macos::with_main_run_loop(move || remothing_core::app::run(platform, file, settings));
+    #[cfg(not(target_os = "macos"))]
     remothing_core::app::run(platform, file, settings)
 }
 

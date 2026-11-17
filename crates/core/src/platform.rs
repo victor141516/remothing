@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::encode::EncoderProvider;
 use crate::geom::{MovedRect, Rect};
@@ -59,7 +59,8 @@ pub trait Platform: Send + Sync + 'static {
 pub enum DisplayKind {
     /// A physical/attached display.
     Real,
-    /// Simulated display created by this process (Linux Xvfb).
+    /// A display this process created (Linux Xvfb, Windows virtual display
+    /// driver, macOS CGVirtualDisplay); see [`VirtualDisplays`].
     Virtual,
 }
 
@@ -76,6 +77,9 @@ pub struct DisplayInfo {
     pub y: i32,
     pub primary: bool,
     pub kind: DisplayKind,
+    /// For a virtual display, the mode it was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<DisplayMode>,
 }
 
 pub trait DisplayProvider: Send + Sync {
@@ -85,15 +89,77 @@ pub trait DisplayProvider: Send + Sync {
     /// Opens display `id`; `hdr`: deliver an HDR picture if the display is
     /// in HDR (see [`Picture`]), else an SDR one.
     fn open(&self, id: &str, hdr: bool) -> Result<OpenedDisplay>;
-    /// Present only where simulated displays can be created (Linux).
+    /// Present where this process can create displays.
     fn virtual_displays(&self) -> Option<&dyn VirtualDisplays> {
         None
     }
 }
 
+/// Size, refresh rate and HDR of a virtual display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    /// Hz; 0 where the platform does not choose one (Linux).
+    #[serde(default)]
+    pub refresh_hz: u32,
+    #[serde(default)]
+    pub hdr: bool,
+}
+
+/// What virtual displays can be on this platform, for the client's menu.
+#[derive(Clone, Debug, Serialize)]
+pub struct VirtualCapabilities {
+    pub max_width: u32,
+    pub max_height: u32,
+    /// Refresh rates to choose from; empty where there is no choice.
+    pub refresh_rates: Vec<u32>,
+    pub hdr: bool,
+    /// A running display's mode can change; else it can only be removed.
+    pub resize: bool,
+}
+
+/// Whether virtual displays can be created now.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum VirtualSetup {
+    Ready,
+    /// Something has to be installed first ([`VirtualDisplays::install`]);
+    /// `notice` tells whoever decides what that means for the machine.
+    Install { notice: String },
+    /// Not possible here, and why.
+    Unavailable { reason: String },
+}
+
 pub trait VirtualDisplays: Send + Sync {
-    fn create(&self, width: u32, height: u32) -> Result<DisplayInfo>;
+    fn capabilities(&self) -> VirtualCapabilities;
+    fn setup(&self) -> VirtualSetup {
+        VirtualSetup::Ready
+    }
+    /// Installs what [`VirtualSetup::Install`] named.
+    fn install(&self) -> Result<()> {
+        bail!("nothing to install for virtual displays here")
+    }
+    fn create(&self, mode: DisplayMode) -> Result<DisplayInfo>;
+    /// Changes the mode of virtual display `id`; it keeps its id.
+    fn set_mode(&self, id: &str, mode: DisplayMode) -> Result<DisplayInfo>;
     fn destroy(&self, id: &str) -> Result<()>;
+}
+
+impl DisplayMode {
+    /// Refuses a mode the platform does not offer.
+    pub fn check(&self, caps: &VirtualCapabilities) -> Result<()> {
+        if !(64..=caps.max_width).contains(&self.width) || !(64..=caps.max_height).contains(&self.height) {
+            bail!("{}x{} is outside 64x64..{}x{}", self.width, self.height, caps.max_width, caps.max_height);
+        }
+        if !caps.refresh_rates.is_empty() && !caps.refresh_rates.contains(&self.refresh_hz) {
+            bail!("{} Hz is not offered ({:?})", self.refresh_hz, caps.refresh_rates);
+        }
+        if self.hdr && !caps.hdr {
+            bail!("virtual displays have no HDR here");
+        }
+        Ok(())
+    }
 }
 
 pub struct OpenedDisplay {

@@ -68,6 +68,8 @@ pub struct Output {
     pub adapter: IDXGIAdapter1,
     pub output: IDXGIOutput,
     pub info: DisplayInfo,
+    /// GDI device name (`\\.\DISPLAYn`), without the NUL.
+    pub gdi: Vec<u16>,
 }
 
 /// Every output attached to the desktop, on every adapter.
@@ -109,8 +111,9 @@ pub fn outputs() -> Result<Vec<Output>> {
                     y: r.top,
                     primary: r.left == 0 && r.top == 0,
                     kind: DisplayKind::Real,
+                    mode: None,
                 };
-                out.push(Output { adapter: adapter.clone(), output, info });
+                out.push(Output { adapter: adapter.clone(), output, info, gdi: device.to_vec() });
             }
         }
         Ok(out)

@@ -9,6 +9,8 @@ use anyhow::{bail, Context, Result};
 use axum::http::{HeaderName, HeaderValue};
 use axum::routing::get;
 use axum::Router;
+use serde::Deserialize;
+use serde_json::json;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::assets;
@@ -16,7 +18,7 @@ use crate::audio::AudioHub;
 use crate::capture::{CaptureLoop, DisplayControl};
 use crate::config::{ConfigFile, Settings};
 use crate::mic::MicHub;
-use crate::platform::{Platform, ThreadRole};
+use crate::platform::{DisplayMode, Platform, ThreadRole};
 use crate::shared::Shared;
 use crate::stream;
 use crate::telemetry::Telemetry;
@@ -48,6 +50,16 @@ pub struct Streaming {
     pub notes: Vec<String>,
 }
 
+/// A client's or the admin UI's virtual display request (`proto::C_VIRTUAL`).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum VirtualRequest {
+    Install,
+    Create { mode: DisplayMode },
+    Set { id: String, mode: DisplayMode },
+    Destroy { id: String },
+}
+
 impl App {
     /// Applies a change to the settings and persists the config file.
     pub fn update_settings(&self, f: impl FnOnce(&mut Settings)) -> Result<()> {
@@ -64,6 +76,47 @@ impl App {
         }
         self.control.select(id);
         self.update_settings(|s| s.server.display = id.to_string())
+    }
+
+    /// The display list as clients and the admin UI get it (see
+    /// `proto::S_DISPLAYS`). `current`: the display being switched to, when
+    /// the capture thread has not switched yet.
+    pub fn displays_json(&self, current: Option<String>) -> Result<serde_json::Value> {
+        let d = self.platform.displays();
+        let list = d.list()?;
+        let virt = d.virtual_displays().map(|v| json!({ "setup": v.setup(), "capabilities": v.capabilities() }));
+        let current = current.or_else(|| self.control.current().map(|c| c.id));
+        Ok(json!({ "displays": list, "current": current, "virtual": virt }))
+    }
+
+    /// Carries out a virtual display request. A new display is streamed at
+    /// once; returns the display being switched to, if any.
+    pub fn virtual_request(&self, req: VirtualRequest) -> Result<Option<String>> {
+        let v = self.platform.displays().virtual_displays().context("virtual displays are not supported here")?;
+        match req {
+            VirtualRequest::Install => v.install().map(|()| None),
+            VirtualRequest::Create { mode } => {
+                mode.check(&v.capabilities())?;
+                let info = v.create(mode)?;
+                self.select_display(&info.id)?;
+                Ok(Some(info.id))
+            }
+            VirtualRequest::Set { id, mode } => {
+                let caps = v.capabilities();
+                if !caps.resize {
+                    bail!("virtual displays keep their size here");
+                }
+                mode.check(&caps)?;
+                v.set_mode(&id, mode)?;
+                // Streamed now: opened again at its new size.
+                if self.control.current().is_some_and(|c| c.id == id) {
+                    self.control.select(&id);
+                    return Ok(Some(id));
+                }
+                Ok(None)
+            }
+            VirtualRequest::Destroy { id } => v.destroy(&id).map(|()| None),
+        }
     }
 
     /// The first client in asks the OS to favour the stream (see `Platform::streaming`).

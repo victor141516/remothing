@@ -43,8 +43,11 @@ pub const CHUNK_PAYLOAD: usize = 60 * 1024;
 /// UTF-8 text now on the session's clipboard (on connect when not empty,
 /// then on every change another client or the session itself makes).
 pub const S_CLIPBOARD: u8 = 7;
-/// UTF-8 JSON answering C_DISPLAYS or C_DISPLAY: `{"displays":[{"id",
-/// "name","width","height","primary",...}],"current":id}`.
+/// UTF-8 JSON answering C_DISPLAYS, C_DISPLAY or C_VIRTUAL: `{"displays":[{"id",
+/// "name","width","height","primary","kind","mode"?,...}],"current":id,
+/// "virtual":null|{"setup":{"state":"ready"|"install"|"unavailable",
+/// "notice"|"reason"},"capabilities":{...}},"error"?:text}`. `error` is the
+/// failure of this client's last C_VIRTUAL.
 pub const S_DISPLAYS: u8 = 8;
 /// UTF-8 JSON, after C_AUDIO and whenever it changes: the sound stream
 /// `{"active":true,"codec","rate","channels","description":hex,"source"}`
@@ -160,6 +163,11 @@ pub const MOVE_AS_POSITION: u8 = 1;
 /// on u8: the client has the mouse captured (1) or not (0); while it has,
 /// it gets S_CURSOR_POS.
 pub const C_CAPTURE: u8 = 23;
+/// UTF-8 JSON, a virtual display request: `{"op":"install"}` (what
+/// S_DISPLAYS' `virtual.setup` asked for), `{"op":"create","mode":{"width",
+/// "height","refresh_hz","hdr"}}` (and stream it), `{"op":"set","id","mode"}`,
+/// `{"op":"destroy","id"}`. Answered with S_DISPLAYS.
+pub const C_VIRTUAL: u8 = 24;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server

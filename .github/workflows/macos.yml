@@ -138,6 +138,85 @@ jobs:
             console.log("ok");
           ' "$D/client.json" "$PASTED" "$MOUSE"
 
+      # A client creates a virtual display, is streamed it, resizes it and
+      # removes it (C_VIRTUAL, answered with S_DISPLAYS; S_HELLO gives the
+      # streamed size).
+      - name: Virtual display test
+        run: |
+          set -euo pipefail
+          D="$RUNNER_TEMP/rt"
+          ./target/release/remothing --config "$D/config.toml" > "$D/virtual.log" 2>&1 &
+          SERVER=$!
+          sleep 5
+          cat > "$D/virtual.mjs" <<'EOF'
+          const ws = new WebSocket("ws://127.0.0.1:9080/ws?token=ci&codecs=hevc");
+          ws.binaryType = "arraybuffer";
+          const steps = [];
+          let created = null, phase = "list", size = "", framesBySize = {};
+          const send = (bytes) => ws.send(new Uint8Array(bytes));
+          const request = (r) => send([24, ...new TextEncoder().encode(JSON.stringify(r))]);
+          const finish = (ok, why) => { console.log(JSON.stringify({ ok, why, steps })); process.exit(ok ? 0 : 1); };
+          // Each step waits for a frame of the size asked for; the display
+          // list and the new picture may come in either order.
+          const advance = () => {
+            if (phase === "create" && created && framesBySize["1280x720"] > 0) {
+              phase = "resize";
+              request({ op: "set", id: created, mode: { width: 1600, height: 900, refresh_hz: 60, hdr: false } });
+            } else if (phase === "resize" && framesBySize["1600x900"] > 0) {
+              phase = "destroy";
+              request({ op: "destroy", id: created });
+            }
+          };
+          ws.onopen = () => {
+            send([14]); // C_DISPLAYS
+            setInterval(() => send([1, 0, 0, 0, 0, 0, 0, 0, ...new Uint8Array(new Float64Array([0]).buffer)]), 1000);
+          };
+          ws.onmessage = (ev) => {
+            const b = new Uint8Array(ev.data);
+            if (b[0] === 1) {
+              const v = new DataView(ev.data);
+              size = `${v.getUint32(4, true)}x${v.getUint32(8, true)}`;
+              steps.push("hello " + size);
+              send([6]);
+            }
+            if (b[0] === 2) {
+              framesBySize[size] = (framesBySize[size] ?? 0) + 1;
+              // C_ACK of the frame (seq at byte 4), as a real client sends:
+              // without them the server stops sending at its in-flight limit.
+              send([2, 0, 0, 0, ...b.subarray(4, 8), 0, 0, 0, 0]);
+              advance();
+            }
+            if (b[0] !== 8) return;
+            const m = JSON.parse(new TextDecoder().decode(b.subarray(1)));
+            steps.push("displays " + JSON.stringify({ current: m.current, ids: m.displays.map((d) => d.id + (d.mode ? "*" : "")), setup: m.virtual?.setup, error: m.error }));
+            if (m.error) finish(false, m.error);
+            if (phase === "list") {
+              if (m.virtual?.setup.state !== "ready") finish(false, "virtual displays not ready: " + JSON.stringify(m.virtual));
+              phase = "create";
+              request({ op: "create", mode: { width: 1280, height: 720, refresh_hz: 60, hdr: false } });
+            } else if (phase === "create" && !created) {
+              created = m.displays.find((d) => d.id === m.current && d.mode)?.id ?? null;
+              advance();
+            } else if (phase === "destroy" && !m.displays.some((d) => d.id === created)) {
+              finish(true, "frames " + JSON.stringify(framesBySize));
+            }
+          };
+          setTimeout(() => finish(false, "timed out in " + phase), 40000);
+          EOF
+          STATUS=0
+          node "$D/virtual.mjs" || STATUS=$?
+          if [ "$STATUS" != 0 ]; then
+            # Where each server thread is, to see what waits.
+            sample $SERVER 1 -file "$D/sample.txt" > /dev/null 2>&1 || true
+            curl -fsS -H "Authorization: Bearer ci-admin" http://127.0.0.1:9081/api/status | head -c 4000; echo
+          fi
+          kill $SERVER || true
+          cat "$D/virtual.log"
+          # A display switch must not cost the client its video encoder.
+          if grep -q "falling back to lossless" "$D/virtual.log"; then echo "FAILED: the video encoder was dropped"; STATUS=1; fi
+          if [ -f "$D/sample.txt" ]; then sed -n '/^Call graph:/,/^Total number in stack/p' "$D/sample.txt" | head -n 900; fi
+          exit $STATUS
+
       - name: Package
         run: |
           mkdir -p dist

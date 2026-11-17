@@ -1,0 +1,81 @@
+# remothing's virtual display driver (drivers/windows-vdd): built with the
+# WDK, signed with the project's certificate (secrets VDD_SIGNING_PFX, base64,
+# and VDD_SIGNING_PASSWORD; the public part is
+# drivers/windows-vdd/package/remothing-vdd.cer), then installed on the runner
+# and driven by the server's own code (examples/vdd.rs). The signed package
+# is the `remothing-vdd-package` artifact; it is committed to
+# drivers/windows-vdd/package, from where the server embeds it.
+name: windows-vdd
+
+on:
+  push:
+    branches: [master, "windows-*"]
+    paths:
+      - "drivers/windows-vdd/**"
+      - "crates/platform-windows/**"
+      - ".github/workflows/windows-vdd.yml"
+  workflow_dispatch:
+
+jobs:
+  driver:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        run: msbuild drivers/windows-vdd/remothing-vdd.vcxproj /p:Configuration=Release /p:Platform=x64 "/p:OutDir=$env:GITHUB_WORKSPACE\build\\" /v:minimal
+
+      - name: Package and sign
+        shell: pwsh
+        env:
+          PFX: ${{ secrets.VDD_SIGNING_PFX }}
+          PFX_PASSWORD: ${{ secrets.VDD_SIGNING_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem build -Recurse | ForEach-Object { $_.FullName }
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $ver = (Get-ChildItem $kits -Directory | Where-Object Name -like '10.*' | Sort-Object Name | Select-Object -Last 1).Name
+          $signtool = "$kits\$ver\x64\signtool.exe"
+          $inf2cat = "$kits\$ver\x86\Inf2Cat.exe"
+          # The INF with DriverVer and the UMDF version filled in by stampinf.
+          $inf = Get-ChildItem build -Recurse -Filter remothing-vdd.inf | Where-Object { (Get-Content $_.FullName -Raw) -match 'DriverVer\s*=\s*\S' } | Select-Object -First 1
+          if (-not $inf) { throw "no stamped remothing-vdd.inf in build" }
+          New-Item -ItemType Directory pkg | Out-Null
+          Copy-Item $inf.FullName pkg\
+          Copy-Item build\remothing-vdd.dll pkg\
+          Get-Content pkg\remothing-vdd.inf | Select-String 'DriverVer|UmdfLibraryVersion'
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\vdd.pfx", [Convert]::FromBase64String($env:PFX))
+          $sign = { param($file) & $signtool sign /fd sha256 /f "$env:RUNNER_TEMP\vdd.pfx" /p $env:PFX_PASSWORD /tr http://timestamp.digicert.com /td sha256 $file; if ($LASTEXITCODE) { throw "signtool $file" } }
+          & $sign pkg\remothing-vdd.dll
+          & $inf2cat /driver:pkg /os:10_X64 /uselocaltime
+          if ($LASTEXITCODE) { throw "Inf2Cat" }
+          & $sign pkg\remothing-vdd.cat
+          Remove-Item "$env:RUNNER_TEMP\vdd.pfx"
+          Copy-Item drivers\windows-vdd\package\remothing-vdd.cer pkg\
+          Get-ChildItem pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remothing-vdd-package
+          path: pkg/
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The package just built replaces the committed one for the test. The
+      # example serves no client, so the client's build is an empty folder.
+      - name: Test on the runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item pkg\* drivers\windows-vdd\package\ -Force
+          New-Item -ItemType Directory -Force client\dist | Out-Null
+          cargo run --release -p remothing-platform-windows --example vdd
+          if ($LASTEXITCODE) { throw "vdd example failed" }
+
+      - name: Driver state after the test
+        if: always()
+        shell: pwsh
+        run: |
+          pnputil /enum-devices /class Display /drivers
+          Get-WinEvent -LogName 'Microsoft-Windows-DriverFrameworks-UserMode/Operational' -MaxEvents 30 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message

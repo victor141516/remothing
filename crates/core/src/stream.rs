@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::app::App;
+use crate::app::{App, VirtualRequest};
 use crate::config::constant_time_eq;
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
@@ -465,17 +465,36 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                             microphone = None;
                         }
                     }
-                    (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, app.control.current().map(|d| d.id)),
+                    (Some(proto::C_DISPLAYS), _) => send_displays(&app, &out_tx, None, None),
                     (Some(proto::C_DISPLAY), _) => {
                         let id = String::from_utf8_lossy(&b[1..]).into_owned();
                         match app.select_display(&id) {
                             Ok(()) => {
                                 app.telemetry.event(link.id, &format!("display {id} selected"));
                                 // The capture thread switches a moment later.
-                                send_displays(&app, &out_tx, Some(id));
+                                send_displays(&app, &out_tx, Some(id), None);
                             }
                             Err(e) => app.telemetry.error("select display", e),
                         }
+                    }
+                    (Some(proto::C_VIRTUAL), _) => {
+                        let request = serde_json::from_slice::<VirtualRequest>(&b[1..]);
+                        let (app, out, id) = (app.clone(), out_tx.clone(), link.id);
+                        // Installing a driver or adding a display takes seconds:
+                        // not on the reader, which carries ACKs and input.
+                        tokio::task::spawn_blocking(move || {
+                            let done = request.map_err(anyhow::Error::from).and_then(|r| {
+                                app.telemetry.event(id, &format!("virtual display: {r:?}"));
+                                app.virtual_request(r)
+                            });
+                            match done {
+                                Ok(current) => send_displays(&app, &out, current, None),
+                                Err(e) => {
+                                    app.telemetry.event(id, &format!("virtual display request failed: {e:#}"));
+                                    send_displays(&app, &out, None, Some(format!("{e:#}")));
+                                }
+                            }
+                        });
                     }
                     (Some(proto::C_STATS), _) => {
                         if let Ok(v) = serde_json::from_slice(&b[1..]) {
@@ -1325,11 +1344,15 @@ fn handle_input(b: &[u8], app: &App, held: &mut Held) -> Result<()> {
     Ok(())
 }
 
-/// The display list and the one being streamed (`current`), for the client's menu.
-fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Option<String>) {
-    match app.platform.displays().list() {
-        Ok(displays) => {
-            let _ = out.send(proto::text(proto::S_DISPLAYS, &json!({ "displays": displays, "current": current }).to_string()));
+/// The display list for the client's menu (`proto::S_DISPLAYS`); `current`
+/// as in `App::displays_json`, `error` the failure of its last request.
+fn send_displays(app: &App, out: &mpsc::UnboundedSender<Vec<u8>>, current: Option<String>, error: Option<String>) {
+    match app.displays_json(current) {
+        Ok(mut v) => {
+            if let Some(e) = error {
+                v["error"] = json!(e);
+            }
+            let _ = out.send(proto::text(proto::S_DISPLAYS, &v.to_string()));
         }
         Err(e) => app.telemetry.error("list displays", e),
     }

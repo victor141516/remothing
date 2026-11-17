@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use remothing_core::platform::{DisplayInfo, DisplayKind, VirtualDisplays};
+use remothing_core::platform::{DisplayInfo, DisplayKind, DisplayMode, VirtualCapabilities, VirtualDisplays};
 
 const FIRST_DISPLAY: u32 = 10;
 
@@ -17,6 +17,9 @@ pub struct XvfbInstance {
     pub width: u32,
     pub height: u32,
     pub shmid: i32,
+    /// The display the server started with (`virtual_on_start`): the
+    /// session's main desktop, which clients cannot remove.
+    main: bool,
     children: Mutex<Vec<Child>>,
 }
 
@@ -37,6 +40,7 @@ impl XvfbInstance {
             y: 0,
             primary: false,
             kind: DisplayKind::Virtual,
+            mode: (!self.main).then_some(DisplayMode { width: self.width, height: self.height, refresh_hz: 0, hdr: false }),
         }
     }
 
@@ -94,7 +98,7 @@ impl XvfbManager {
             .expect("display numbers exhausted")
     }
 
-    fn start(&self, width: u32, height: u32) -> Result<Arc<XvfbInstance>> {
+    fn start(&self, width: u32, height: u32, main: bool) -> Result<Arc<XvfbInstance>> {
         let num = self.free_number();
         let mut cmd = Command::new("Xvfb");
         cmd.args([format!(":{num}"), "-screen".into(), "0".into(), format!("{width}x{height}x24")])
@@ -124,7 +128,7 @@ impl XvfbManager {
             }
         };
         // From here on, dropping the instance stops Xvfb.
-        let instance = Arc::new(XvfbInstance { num, width, height, shmid, children: Mutex::new(vec![xvfb]) });
+        let instance = Arc::new(XvfbInstance { num, width, height, shmid, main, children: Mutex::new(vec![xvfb]) });
 
         let deadline = Instant::now() + Duration::from_secs(10);
         while x11rb::connect(Some(&instance.display())).is_err() {
@@ -146,19 +150,41 @@ impl XvfbManager {
         eprintln!("started Xvfb :{num} ({width}x{height})");
         Ok(instance)
     }
+
+    /// Starts the session's main display (`virtual_on_start`).
+    pub fn create_main(&self, width: u32, height: u32) -> Result<()> {
+        let instance = self.start(width, height, true)?;
+        self.instances.lock().unwrap().insert(instance.num, instance);
+        Ok(())
+    }
 }
 
+/// Xvfb cannot change size once started (docs/ARCHITECTURE.md, "Virtual
+/// displays"), so a display keeps its size; no refresh rate, no HDR.
 impl VirtualDisplays for XvfbManager {
-    fn create(&self, width: u32, height: u32) -> Result<DisplayInfo> {
-        let instance = self.start(width, height)?;
+    fn capabilities(&self) -> VirtualCapabilities {
+        VirtualCapabilities { max_width: 7680, max_height: 4320, refresh_rates: Vec::new(), hdr: false, resize: false }
+    }
+
+    fn create(&self, mode: DisplayMode) -> Result<DisplayInfo> {
+        let instance = self.start(mode.width, mode.height, false)?;
         let info = instance.info();
         self.instances.lock().unwrap().insert(instance.num, instance);
         Ok(info)
     }
 
+    fn set_mode(&self, _id: &str, _mode: DisplayMode) -> Result<DisplayInfo> {
+        bail!("Xvfb displays keep the size they were created with")
+    }
+
     fn destroy(&self, id: &str) -> Result<()> {
         let num: u32 = id.strip_prefix("xvfb:").and_then(|n| n.parse().ok()).context("not a virtual display id")?;
-        let instance = self.instances.lock().unwrap().remove(&num).context("no such virtual display")?;
+        let mut instances = self.instances.lock().unwrap();
+        if instances.get(&num).context("no such virtual display")?.main {
+            bail!("the display the server started with stays");
+        }
+        let instance = instances.remove(&num).context("no such virtual display")?;
+        drop(instances);
         // Kill now even if a capture session still holds a reference; it then
         // fails and the capture loop falls back to another display.
         instance.kill();

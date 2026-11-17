@@ -3,6 +3,7 @@
 // keyboard, the phone's own keyboard and the stats overlay. A small handle
 // at the top opens it.
 
+import { DisplayPanel } from './displays';
 import { OnScreenKeyboard } from './keyboard';
 import { TextEntry } from './textentry';
 
@@ -13,12 +14,53 @@ declare global {
   }
 }
 
+/** Size, refresh rate and HDR of a virtual display (proto.rs `DisplayMode`). */
+export interface DisplayMode {
+  width: number;
+  height: number;
+  refresh_hz: number;
+  hdr: boolean;
+}
+
 export interface DisplayEntry {
   id: string;
   name: string;
   width: number;
   height: number;
+  kind: 'real' | 'virtual';
+  /** The mode of a virtual display a client may change or remove. */
+  mode?: DisplayMode;
 }
+
+interface VirtualCapabilities {
+  max_width: number;
+  max_height: number;
+  refresh_rates: number[];
+  hdr: boolean;
+  resize: boolean;
+}
+
+interface VirtualSetup {
+  state: 'ready' | 'install' | 'unavailable';
+  notice?: string;
+  reason?: string;
+}
+
+/** The display list (S_DISPLAYS). */
+export interface DisplaysMessage {
+  displays: DisplayEntry[];
+  current: string | null;
+  virtual: { setup: VirtualSetup; capabilities: VirtualCapabilities } | null;
+  /** Why this client's last virtual display request failed. */
+  error?: string;
+}
+
+/** A virtual display request (C_VIRTUAL). */
+export type VirtualRequest =
+  | { op: 'install' }
+  | { op: 'create'; mode: DisplayMode }
+  | { op: 'set'; id: string; mode: DisplayMode }
+  | { op: 'destroy'; id: string };
 
 export interface UiActions {
   key(evdev: number, down: boolean): void;
@@ -29,6 +71,9 @@ export interface UiActions {
   /** Asks for the display list (answered through `Ui.displays`). */
   listDisplays(): void;
   selectDisplay(id: string): void;
+  virtualDisplay(request: VirtualRequest): void;
+  /** The area the picture can take, in device pixels, and this screen's refresh rate (0: unknown). */
+  viewport(): { width: number; height: number; hz: number };
   toggleStats(): void;
   /** Switches the remote session's sound on or off. */
   toggleSound(): void;
@@ -53,6 +98,8 @@ export class Ui {
   private readonly micButton: HTMLButtonElement;
   private readonly captureButton: HTMLButtonElement;
   private readonly prompt = document.createElement('div');
+  private readonly displayPanel: DisplayPanel;
+  private readonly displaysButton: HTMLButtonElement;
   /** Answers the question on screen, if there is one. */
   private answer: ((yes: boolean) => void) | null = null;
   private clipboardTimer = 0;
@@ -75,6 +122,14 @@ export class Ui {
       // Keys go back to the remote screen.
       this.displaySelect.blur();
     });
+    this.displayPanel = new DisplayPanel(actions, (q) => this.ask(q), (label, title, onClick) => this.button(label, title, onClick));
+    this.displaysButton = this.button('Displays…', 'Virtual displays: create one, change or remove the one streamed', () => {
+      this.displayPanel.element.hidden = !this.displayPanel.element.hidden;
+      this.displaysButton.classList.toggle('on', !this.displayPanel.element.hidden);
+      if (!this.displayPanel.element.hidden) actions.listDisplays();
+    });
+    // Shown once the server says it can make displays.
+    this.displaysButton.hidden = true;
     const clipboardPanel = document.createElement('div');
     clipboardPanel.id = 'ui-clipboard';
     clipboardPanel.hidden = true;
@@ -115,6 +170,7 @@ export class Ui {
     this.bar.append(
       this.fullscreenButton,
       this.displaySelect,
+      this.displaysButton,
       clipboardButton,
       this.soundButton,
       this.micButton,
@@ -125,7 +181,7 @@ export class Ui {
     );
     this.prompt.id = 'ui-prompt';
     this.prompt.hidden = true;
-    root.append(handle, this.bar, clipboardPanel, this.prompt, textEntry.element, this.keyboard.element);
+    root.append(handle, this.bar, clipboardPanel, this.displayPanel.element, this.prompt, textEntry.element, this.keyboard.element);
 
     document.addEventListener('fullscreenchange', () => {
       const on = document.fullscreenElement !== null;
@@ -197,16 +253,18 @@ export class Ui {
     this.prompt.hidden = false;
   }
 
-  displays(list: DisplayEntry[], current: string | null): void {
+  displays(message: DisplaysMessage): void {
     this.displaySelect.replaceChildren(
-      ...list.map((d) => {
+      ...message.displays.map((d) => {
         const option = document.createElement('option');
         option.value = d.id;
         option.textContent = `${d.name || d.id} (${d.width}×${d.height})`;
-        option.selected = d.id === current;
+        option.selected = d.id === message.current;
         return option;
       }),
     );
+    this.displayPanel.update(message);
+    this.displaysButton.hidden = !this.displayPanel.available;
   }
 
   private button(label: string, title: string, onClick: () => void): HTMLButtonElement {

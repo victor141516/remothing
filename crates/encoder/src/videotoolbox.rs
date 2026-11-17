@@ -55,8 +55,10 @@ struct Output {
 }
 
 enum Input {
-    /// The capture's frame of the moment (`load_gpu`).
-    Surface(Option<PixelBuffer>),
+    /// The capture's frame of the moment (`load_gpu`); none yet right after
+    /// a display switch, and then black of the display's `size`, as the
+    /// server's copy of the screen is until the first capture.
+    Surface { latest: Option<PixelBuffer>, size: (u32, u32) },
     /// A BGRA buffer of the display's size, updated from memory (`load_cpu`).
     Memory(CFRetained<CVPixelBuffer>),
 }
@@ -240,7 +242,7 @@ impl VtEncoder {
         // SAFETY: framework constant.
         let hardware = read_bool(vt, unsafe { kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder });
         let input = match surface.and_then(|s| s.downcast_ref::<PixelBufferFrame>()) {
-            Some(_) => Input::Surface(None),
+            Some(_) => Input::Surface { latest: None, size: input },
             None => Input::Memory(memory_buffer(input)?),
         };
         let mut encoder = Self { session, output: boxed, input, codec, hardware, bitrate: 0, fps: 0, pts: -1, started: Instant::now() };
@@ -355,10 +357,26 @@ fn memory_buffer((w, h): (u32, u32)) -> Result<CFRetained<CVPixelBuffer>> {
     }
 }
 
+/// A black BGRA buffer of `size`.
+fn black_buffer(size: (u32, u32)) -> Result<CFRetained<CVPixelBuffer>> {
+    let buffer = memory_buffer(size)?;
+    // SAFETY: a valid buffer, unlocked below with the same flags.
+    if unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags(0)) } != 0 {
+        bail!("CVPixelBufferLockBaseAddress failed");
+    }
+    let base = CVPixelBufferGetBaseAddress(&buffer) as *mut u8;
+    let len = CVPixelBufferGetBytesPerRow(&buffer) * size.1 as usize;
+    // SAFETY: the locked buffer holds `size.1` rows of that stride.
+    unsafe { std::ptr::write_bytes(base, 0, len) };
+    // SAFETY: locked above.
+    unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags(0)) };
+    Ok(buffer)
+}
+
 impl VideoEncoder for VtEncoder {
     fn name(&self) -> String {
         let path = match self.input {
-            Input::Surface(_) => "iosurface",
+            Input::Surface { .. } => "iosurface",
             Input::Memory(_) => "system memory",
         };
         let soft = if self.hardware { "" } else { " software" };
@@ -374,7 +392,7 @@ impl VideoEncoder for VtEncoder {
     }
 
     fn gpu_input(&self) -> bool {
-        matches!(self.input, Input::Surface(_))
+        matches!(self.input, Input::Surface { .. })
     }
 
     fn load_cpu(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) -> Result<()> {
@@ -399,17 +417,19 @@ impl VideoEncoder for VtEncoder {
     }
 
     fn load_gpu(&mut self, surface: &GpuSurface, _rects: &[Rect]) -> Result<()> {
-        let Input::Surface(current) = &mut self.input else { bail!("this encoder reads from memory") };
+        let Input::Surface { latest, .. } = &mut self.input else { bail!("this encoder reads from memory") };
         let frame = surface.downcast_ref::<PixelBufferFrame>().context("capture surface is not a pixel buffer")?;
         // The whole frame is the input: VideoToolbox reads only what it needs.
-        *current = Some(frame.latest().context("no frame captured yet")?);
+        if let Some(frame) = frame.latest() {
+            *latest = Some(frame);
+        }
         Ok(())
     }
 
     fn encode(&mut self, force_key: bool) -> Result<Encoded> {
         let buffer = match &self.input {
-            Input::Surface(Some(b)) => b.0.clone(),
-            Input::Surface(None) => bail!("no frame loaded"),
+            Input::Surface { latest: Some(b), .. } => b.0.clone(),
+            Input::Surface { latest: None, size } => black_buffer(*size)?,
             Input::Memory(b) => b.clone(),
         };
         // Strictly increasing even if two frames share a microsecond.

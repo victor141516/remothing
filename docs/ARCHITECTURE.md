@@ -407,6 +407,77 @@ client sets it.
 one), `C_DISPLAY` selects one, the same hot switch as the admin UI: every
 client gets a new HELLO.
 
+## Virtual displays
+
+A client can add displays to the host, stream them, change their size and
+remove them (the "Displays…" panel of the controls). They are real displays
+for the system: windows move to them and programs run at their resolution.
+
+- **Contract** (`platform.rs`): `DisplayProvider::virtual_displays()` gives
+  a `VirtualDisplays` where the platform can make them. It says what it can
+  do (`capabilities`: largest size, refresh rates to choose from, HDR,
+  whether a running display can change mode) and whether it is ready
+  (`setup`: ready, something to install with a notice for the user, or
+  unavailable with the reason). `create`, `set_mode` and `destroy` take and
+  give a `DisplayMode` (size, refresh rate, HDR); a virtual display's
+  `DisplayInfo` carries its mode, and its id stays the same across mode
+  changes. Every display goes away with the server.
+- **Protocol**: `C_VIRTUAL` carries a JSON request (`install`, `create`,
+  `set`, `destroy`); the answer is `S_DISPLAYS`, which also carries the
+  setup state, the capabilities and, for the asking client, the error. The
+  request runs on a blocking thread (installing or adding a display takes
+  seconds; the reader carries the input meanwhile). A new display is
+  streamed at once; a changed one that is streamed is opened again. Any
+  client with the stream token may ask.
+- **Client**: the panel offers the size, the refresh rate and HDR where the
+  platform has them, and "Fit window": the window's size in device pixels
+  (less the on-screen keyboard), which is the area the picture fills
+  without scaling. When the platform needs an installation first, the
+  client shows the platform's notice and installs only after a yes.
+- **Linux**: one Xvfb per display (separate X screens, each with its own
+  session; not monitors of one desktop). Xvfb cannot change size, so
+  `resize` is false; the display the server started with
+  (`virtual_on_start`) cannot be removed. Monitors of one desktop need an X
+  server that resizes (Xvnc), measured at more than 10% extra latency
+  (issue #2), so not done yet.
+- **Windows**: remothing's own indirect display driver
+  (`drivers/windows-vdd`, SudoVDA with its own hardware id, interface and
+  signing certificate, so it does not meet an installed SudoVDA). The
+  signed package is embedded in the binary. Installing (`setup` is
+  `install` only in an elevated process, which the service's server is):
+  the certificate goes into the machine's Trusted Root and Trusted
+  Publisher stores (what makes Windows accept a self-signed driver without
+  test mode), the package to `%ProgramData%\remothing\vdd`, a
+  root-enumerated device with the hardware id is created and
+  `UpdateDriverForPlugAndPlayDevices` gives it the driver (what `devcon
+  install` does). Control: IOCTLs on the driver's interface (open to SYSTEM
+  and administrators only) add a monitor (size, refresh rate, a GUID; the
+  answer is the adapter LUID and target id) and remove it; a thread pings
+  every second, and the driver's watchdog removes every display after 3 s
+  without a request, so they go when the server goes, even killed. The
+  target leads through `QueryDisplayConfig` to the GDI name
+  (`\\.\DISPLAYn`), which gets the mode (`ChangeDisplaySettingsEx`) and HDR
+  (advanced colour), and which matches the DXGI output to capture. Ids are
+  `vdd:N`: DXGI positions (`dxgi:a:o`) shift as displays come and go. The
+  driver fixes a monitor's modes when it is added, so a mode change removes
+  it and adds it again with the same GUID (Windows keeps its settings); a
+  mode Windows refuses (HDR where it offers none) brings it back in the
+  old one. Without "Extend these displays" Windows may not put a new
+  display on the desktop; the request then fails and says so.
+- **macOS**: CoreGraphics' private `CGVirtualDisplay` classes, looked up by
+  name at run time (no public API exists; Chromium's tests, DeskPad and
+  BetterDisplay use them). A display lives while its object does; the
+  objects stay on one thread of their own. A mode change applies new
+  settings to the same display (same id). One mode per display, at one
+  pixel per point (no HiDPI), so the picture has exactly the size asked
+  for. CoreGraphics tells a process about display changes through its main
+  run loop, so on macOS the server runs on a thread of its own and the main
+  thread runs that loop (`with_main_run_loop`); without it a new display
+  had no mode in the server and a mode change never showed (measured on
+  the CI runner). Right after a switch ScreenCaptureKit may not have
+  delivered a frame yet: VideoToolbox then encodes black, as the server's
+  copy of the screen is, instead of failing. No HDR.
+
 ## Sound
 
 Best effort: video never depends on it. `audio.rs` runs one capture thread
@@ -696,9 +767,10 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
   are not a substitute (no compositor output).
 - **Linux permissions**: the process must be able to connect to the X server
   (`DISPLAY`, Xauthority) — run as the session user or root with access.
-- **Windows**: only physically connected outputs (DXGI); no virtual display
-  driver. Secure desktops (lock screen, UAC, Ctrl+Alt+Del) and other sessions
-  need the service (LocalSystem), which runs the server inside the active
+- **Windows**: the DXGI outputs: connected displays and remothing's virtual
+  ones (see "Virtual displays"). Secure desktops (lock screen, UAC,
+  Ctrl+Alt+Del) and other sessions need the service (LocalSystem), which
+  runs the server inside the active
   console session and relaunches it on session changes. Input to elevated
   windows and UIAccess tools (Magnifier, On-Screen Keyboard: high integrity)
   needs the elevated/service process (UIPI). Windows drops such input without
@@ -754,7 +826,7 @@ TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
     terminal the server is started from, or to the binary itself when it
     runs as the launch agent (`service install`): an agent of the logged-in
     user, not a system daemon, because capture and event posting work only
-    in the user's session. No virtual displays, no login window.
+    in the user's session. No login window.
   - **Build**: `.github/workflows/macos.yml` builds a static FFmpeg with only
     Opus, AAC and the Opus decoder (video does not go through FFmpeg), so the
     binary needs nothing installed.

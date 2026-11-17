@@ -1,7 +1,8 @@
 //! Windows providers: DXGI Desktop Duplication capture into a shared D3D11
-//! texture, SendInput injection, input-desktop following, clipboard, WASAPI
-//! loopback sound, DXGI/NVML GPU monitor and the Windows service. The
-//! encoder provider is injected by the binary. Built only on Windows.
+//! texture, virtual displays through remothing's own display driver,
+//! SendInput injection, input-desktop following, clipboard, WASAPI loopback
+//! sound, DXGI/NVML GPU monitor and the Windows service. The encoder
+//! provider is injected by the binary. Built only on Windows.
 #![cfg(windows)]
 
 mod audio;
@@ -18,6 +19,7 @@ mod monitor;
 mod scheduling;
 pub mod service;
 mod uipi;
+mod vdd;
 
 use std::sync::Arc;
 
@@ -25,7 +27,7 @@ use anyhow::{Context, Result};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
     AudioSink, AudioSource, Clipboard, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform,
-    SystemMonitor, ThreadRole,
+    SystemMonitor, ThreadRole, VirtualDisplays,
 };
 use windows::Win32::Foundation::E_ACCESSDENIED;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -35,8 +37,29 @@ use crate::dxgi::DxgiSession;
 use crate::input::SendInputProvider;
 use crate::monitor::WindowsMonitor;
 
-/// Real outputs of every adapter, captured with Desktop Duplication.
-pub struct WindowsDisplays;
+/// Every output of every adapter, captured with Desktop Duplication, and
+/// the virtual displays of remothing's display driver among them.
+pub struct WindowsDisplays {
+    vdd: vdd::VirtualDisplayDriver,
+}
+
+impl WindowsDisplays {
+    pub fn new() -> Self {
+        Self { vdd: vdd::VirtualDisplayDriver::default() }
+    }
+
+    fn outputs(&self) -> Result<Vec<dxgi::Output>> {
+        let mut outputs = dxgi::outputs()?;
+        self.vdd.annotate(&mut outputs);
+        Ok(outputs)
+    }
+}
+
+impl Default for WindowsDisplays {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DisplayProvider for WindowsDisplays {
     fn provider_name(&self) -> String {
@@ -44,11 +67,11 @@ impl DisplayProvider for WindowsDisplays {
     }
 
     fn list(&self) -> Result<Vec<DisplayInfo>> {
-        Ok(dxgi::outputs()?.into_iter().map(|o| o.info).collect())
+        Ok(self.outputs()?.into_iter().map(|o| o.info).collect())
     }
 
     fn open(&self, id: &str, hdr: bool) -> Result<OpenedDisplay> {
-        let out = dxgi::outputs()?.into_iter().find(|o| o.info.id == id).with_context(|| format!("display {id} not found"))?;
+        let out = self.outputs()?.into_iter().find(|o| o.info.id == id).with_context(|| format!("display {id} not found"))?;
         let capture = DxgiSession::open(&out, hdr)?;
         let input = SendInputProvider::new(&out.info);
         // Streaming works without it (e.g. no access to the window station).
@@ -57,6 +80,10 @@ impl DisplayProvider for WindowsDisplays {
             .ok()
             .map(|c| Arc::new(c) as Arc<dyn Clipboard>);
         Ok(OpenedDisplay { info: out.info, capture: Box::new(capture), input, clipboard })
+    }
+
+    fn virtual_displays(&self) -> Option<&dyn VirtualDisplays> {
+        Some(&self.vdd)
     }
 }
 
@@ -73,7 +100,7 @@ impl WindowsPlatform {
             eprintln!("[platform] {key}: not used on Windows, ignored");
         }
         set_dpi_awareness();
-        Ok(Self { displays: WindowsDisplays, encoders, monitor: WindowsMonitor::new() })
+        Ok(Self { displays: WindowsDisplays::new(), encoders, monitor: WindowsMonitor::new() })
     }
 }
 

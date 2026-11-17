@@ -92,6 +92,8 @@ export const C_MOVE_REL = 22;
 export const MOVE_AS_POSITION = 1;
 /** on u8: this client captured the mouse (it then gets S_CURSOR_POS). */
 export const C_CAPTURE = 23;
+/** UTF-8 JSON, a virtual display request (see proto.rs); answered with S_DISPLAYS. */
+export const C_VIRTUAL = 24;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 

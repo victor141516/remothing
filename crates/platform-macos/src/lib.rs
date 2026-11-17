@@ -1,9 +1,9 @@
 //! macOS providers: ScreenCaptureKit capture (changed areas from the frame
 //! info, IOSurface frames handed to the VideoToolbox encoder without a
-//! copy), Quartz event injection, the system cursor, the general pasteboard
-//! and ScreenCaptureKit's system sound. Needs the Screen Recording and
-//! Accessibility permissions. Not here: virtual displays, a virtual
-//! microphone (macOS has none without an audio driver), HDR pictures.
+//! copy), Quartz event injection, the system cursor, the general pasteboard,
+//! ScreenCaptureKit's system sound and CGVirtualDisplay virtual displays.
+//! Needs the Screen Recording and Accessibility permissions. Not here: a
+//! virtual microphone (macOS has none without an audio driver), HDR pictures.
 #![cfg(target_os = "macos")]
 
 mod audio;
@@ -17,19 +17,53 @@ mod permissions;
 mod power;
 mod sck;
 pub mod service;
+mod virtual_display;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
+use objc2_core_foundation::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
     AudioSink, AudioSource, DisplayInfo, DisplayProvider, MicUnavailable, OpenedDisplay, Platform, SystemMonitor,
-    ThreadRole,
+    ThreadRole, VirtualDisplays,
 };
 
 use crate::display::Geometry;
 
-pub struct MacDisplays;
+/// Runs `work` on a thread of its own while this thread, the main one, runs
+/// the main run loop until `work` returns. CoreGraphics learns of display
+/// changes through the main run loop: without it a display added after the
+/// start (a virtual one, a monitor plugged in) has no mode in this process
+/// and a mode change is never seen (measured on the CI runner).
+pub fn with_main_run_loop<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = mpsc::channel();
+    thread::Builder::new()
+        .name("server".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .expect("spawning the server thread");
+    // SAFETY: reading an immutable CoreFoundation constant.
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    loop {
+        match rx.try_recv() {
+            Ok(result) => return result,
+            Err(mpsc::TryRecvError::Disconnected) => panic!("the server thread ended without a result"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        // With nothing to run the loop returns at once; nothing to miss then.
+        if CFRunLoop::run_in_mode(mode, 0.25, false) == CFRunLoopRunResult::Finished {
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+pub struct MacDisplays {
+    virtuals: virtual_display::MacVirtualDisplays,
+}
 
 impl DisplayProvider for MacDisplays {
     fn provider_name(&self) -> String {
@@ -37,7 +71,13 @@ impl DisplayProvider for MacDisplays {
     }
 
     fn list(&self) -> Result<Vec<DisplayInfo>> {
-        display::list()
+        let mut list = display::list()?;
+        list.iter_mut().for_each(|info| self.virtuals.annotate(info));
+        Ok(list)
+    }
+
+    fn virtual_displays(&self) -> Option<&dyn VirtualDisplays> {
+        Some(&self.virtuals)
     }
 
     /// No HDR picture on macOS (docs/ARCHITECTURE.md, "macOS"): ScreenCaptureKit
@@ -49,7 +89,11 @@ impl DisplayProvider for MacDisplays {
             eprintln!("input: no Accessibility permission, macOS drops the remote input");
         }
         Ok(OpenedDisplay {
-            info: geometry.info(),
+            info: {
+                let mut info = geometry.info();
+                self.virtuals.annotate(&mut info);
+                info
+            },
             capture: Box::new(capture),
             input: Arc::new(input::QuartzInput::new(geometry)),
             clipboard: Some(Arc::new(clipboard::Pasteboard::new())),
@@ -67,7 +111,8 @@ pub struct MacPlatform {
 impl MacPlatform {
     pub fn new(encoders: Box<dyn EncoderProvider>) -> Result<Self> {
         permissions::check();
-        Ok(Self { displays: MacDisplays, encoders, monitor: monitor::MacMonitor::new(), awake: Mutex::new(None) })
+        let displays = MacDisplays { virtuals: virtual_display::MacVirtualDisplays::new() };
+        Ok(Self { displays, encoders, monitor: monitor::MacMonitor::new(), awake: Mutex::new(None) })
     }
 }
 

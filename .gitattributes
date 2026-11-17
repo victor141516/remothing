@@ -1,1 +1,4 @@
 * text=auto eol=lf
+drivers/windows-vdd/*.inf text eol=crlf
+drivers/windows-vdd/*.vcxproj text eol=crlf
+drivers/windows-vdd/package/** -text

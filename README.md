@@ -132,6 +132,20 @@ and then they are remothing's own. Restart the server after granting them.
   in the address makes the server move the remote cursor to positions,
   as without capture, instead of sending mouse movement: for comparing how
   a game reacts to each.
+- Virtual displays: `Displays…` in the controls adds a display to the
+  host, of the size typed in or of this window's (`Fit window`: shown 1:1,
+  without scaling), with a refresh rate and HDR where offered, and streams
+  it at once. For the virtual display being streamed the panel changes its
+  size (Windows, macOS) or removes it. They are displays like any other for
+  the host (windows move there, programs run at their resolution) and go
+  away when the server stops. Windows: they need remothing's display
+  driver, which the panel offers to install when the server runs as the
+  service (or as administrator); installing adds a "remothing Virtual
+  Display Adapter" device and remothing's driver signing certificate to the
+  computer's trusted stores (remove them in Device Manager and
+  `certlm.msc`). HDR on them needs Windows 11 24H2. macOS: through a
+  private macOS interface, which a macOS update may break. Linux: each one
+  is an X screen of its own with its own session, at a fixed size.
 - Scrolling keeps the device's steps: a mouse wheel scrolls by notches,
   a trackpad (a Mac's included, with its momentum) or two fingers on a
   touch screen scroll as finely as they move. Windows programs that read

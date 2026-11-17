@@ -1,6 +1,8 @@
 // Admin UI for the JSON API in crates/core/src/admin.rs. Dependency-free: the
 // DOM is built with `h()` (text nodes only, so server strings are never parsed as HTML).
 
+import type { DisplayMode, DisplaysMessage } from './ui';
+
 type Pair = [number, number] | null;
 
 interface DisplayInfo {
@@ -13,6 +15,8 @@ interface DisplayInfo {
   y: number;
   primary: boolean;
   kind: 'real' | 'virtual';
+  /** For a virtual display that can be removed, the mode it was given. */
+  mode?: DisplayMode;
 }
 
 interface ClientStatus {
@@ -58,7 +62,7 @@ interface Status {
 interface Displays {
   displays: DisplayInfo[];
   current: string | null;
-  can_create_virtual: boolean;
+  virtual: DisplaysMessage['virtual'];
 }
 
 interface Tuning {
@@ -429,7 +433,7 @@ function renderDisplays(d: Displays) {
                 await loadDisplays();
               }),
           }, 'Stream this'),
-          x.kind === 'virtual' && d.can_create_virtual &&
+          x.mode &&
             h('button', {
               class: 'danger',
               onclick: () =>
@@ -453,19 +457,46 @@ function renderDisplays(d: Displays) {
   );
 
   const sections: HTMLElement[] = [list];
-  if (d.can_create_virtual) {
-    const width = h('input', { type: 'number', min: 64, max: 7680, value: 1920, required: true }) as HTMLInputElement;
-    const height = h('input', { type: 'number', min: 64, max: 4320, value: 1080, required: true }) as HTMLInputElement;
+  const virt = d.virtual;
+  if (virt?.setup.state === 'unavailable') {
+    sections.push(h('section', {}, h('h2', {}, 'Virtual displays'), h('p', { class: 'dim' }, virt.setup.reason ?? '')));
+  } else if (virt?.setup.state === 'install') {
+    const notice = virt.setup.notice ?? '';
+    const install = h('button', {
+      class: 'primary',
+      onclick: () =>
+        action(async () => {
+          if (!confirm(`${notice}\n\nInstall it now?`)) return;
+          await api('POST', 'api/virtual/install');
+          banner('info', 'Installed.');
+          await loadDisplays();
+        }),
+    }, 'Install');
+    sections.push(h('section', {}, h('h2', {}, 'Virtual displays'), h('p', {}, notice), install));
+  } else if (virt) {
+    const caps = virt.capabilities;
+    const width = h('input', { type: 'number', min: 64, max: caps.max_width, step: 2, value: 1920, required: true }) as HTMLInputElement;
+    const height = h('input', { type: 'number', min: 64, max: caps.max_height, step: 2, value: 1080, required: true }) as HTMLInputElement;
+    const rate = h('select', {}, ...caps.refresh_rates.map((r) => h('option', { value: r, selected: r === 60 }, `${r} Hz`))) as HTMLSelectElement;
+    const hdr = h('input', { type: 'checkbox' }) as HTMLInputElement;
     const form = h(
       'form',
       { class: 'row' },
       'Width', width, 'Height', height,
+      caps.refresh_rates.length > 0 && rate,
+      caps.hdr && h('label', {}, hdr, ' HDR'),
       h('button', { class: 'primary', type: 'submit' }, 'Create virtual display'),
     );
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       void action(async () => {
-        const info = await api<DisplayInfo>('POST', 'api/virtual', { width: +width.value, height: +height.value });
+        const mode: DisplayMode = {
+          width: +width.value,
+          height: +height.value,
+          refresh_hz: caps.refresh_rates.length ? +rate.value : 0,
+          hdr: hdr.checked,
+        };
+        const info = await api<DisplayInfo>('POST', 'api/virtual', mode);
         banner('info', `Created ${info.name} (${info.id}) ${fmtRes(info)}.`);
         await loadDisplays();
       });
