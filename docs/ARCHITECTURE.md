@@ -40,7 +40,7 @@ flowchart LR
 | `crates/platform-macos` | ScreenCaptureKit capture (changed areas from the frame info, IOSurface frames) and system sound, Quartz event injection, system cursor, general pasteboard, permission checks, launch agent |
 | `crates/server` | the `remothing` binary: CLI, config path, picks the platform |
 | `testapp` | `rt-testapp`: latency probe app (barcode with timestamp + input marker), X11 and Win32 backends |
-| `client` | browser client (`index.html`, `main.ts`, `worker.ts`; input and touch `input.ts`, controls `ui.ts`, `keyboard.ts`, `textentry.ts`, sound `audio.ts`) and admin UI (`admin.html`, `admin.ts`) |
+| `client` | browser client (`index.html`, `main.ts`, `worker.ts`; input and touch `input.ts`, the controls menu `ui.ts` with its Displays page `displays.ts`, `keyboard.ts`, `textentry.ts`, sound `audio.ts`) and admin UI (`admin.html`, `admin.ts`) |
 
 ## Frame path
 
@@ -444,7 +444,7 @@ different devices) can show different displays at once:
 ## Virtual displays
 
 A client can add displays to the host, stream them, change their size and
-remove them (the "Displays…" panel of the controls). They are real displays
+remove them (the `Display ›` page of the menu). They are real displays
 for the system: windows move to them and programs run at their resolution.
 
 - **Contract** (`platform.rs`): `DisplayProvider::virtual_displays()` gives
@@ -463,7 +463,7 @@ for the system: windows move to them and programs run at their resolution.
   seconds; the reader carries the input meanwhile). A new display is
   streamed at once; a changed one that is streamed is opened again. Any
   client with the stream token may ask.
-- **Client**: the panel offers the size, the refresh rate and HDR where the
+- **Client**: the `Display ›` page offers the size, the refresh rate and HDR where the
   platform has them, and "Fit window": the window's size in device pixels
   (less the on-screen keyboard), which is the area the picture fills
   without scaling. It lists every virtual display, whichever window made
@@ -514,6 +514,26 @@ for the system: windows move to them and programs run at their resolution.
   delivered a frame yet: VideoToolbox then encodes black, as the server's
   copy of the screen is, instead of failing. No HDR.
 
+## Controls menu
+
+`ui.ts`: one panel pulled down from a small tab at the top centre, showing
+one view at a time (root, the `Display ›` and `Clipboard ›` pages, a
+question, the stopped message); its height follows the view, so nothing
+else ever floats over the picture or over each other. The root has three
+groups (Screen, Control, Sound); every item says its state in words on a
+second line (sound and microphone reasons included, which tooltips hid
+on phones). Drill-down and not an accordion: a phone on its side has about
+300 px of height. A choice whose effect shows on the page (fullscreen,
+stats, capture, the keyboards) closes the menu; Esc, the tab and a click
+outside close it, and that click, caught on `window` in the capture phase,
+never reaches `input.ts` (on touch it would click wherever the remote
+pointer is). Questions are pinned: only their buttons answer them. Buttons
+never take focus (keys belong to the remote side); fields do while used,
+and focus goes back to the picture after a choice. While the mouse is
+captured the tab hides; while capture waits for a click, the tab says so.
+The panel's height is limited to the visible area above the on-screen
+keyboard (`--ui-free`).
+
 ## Sound
 
 Best effort: video never depends on it. `audio.rs` runs one capture thread
@@ -522,8 +542,8 @@ gives 48 kHz stereo 16-bit samples, one encoder serves every listener, and
 each packet goes out on the clients' WebSockets (`S_AUDIO`), after an
 `S_AUDIO_INFO` that names codec and source or tells why there is no sound.
 Both the source and the encoder report everything they tried; that list is
-in the server log, in the admin status and in the client (overlay, tooltip
-of the `Sound` button, event log). A failure is tried again every 15 s.
+in the server log, in the admin status and in the client (overlay, the
+`Sound` item's state line in the menu, event log). A failure is tried again every 15 s.
 After a second of plain zeros nothing is sent until something plays.
 
 - **Encoder** (`crates/encoder/src/audio.rs`): libopus at 128 kbit/s in

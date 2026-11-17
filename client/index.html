@@ -17,47 +17,134 @@
     color: #eee; background: rgba(0,0,0,.7); white-space: pre; pointer-events: none; border-radius: 4px; }
 
   #ui { font: 13px/1.3 system-ui, sans-serif; color: #eee; }
-  #ui button, #ui select { font: inherit; color: inherit; background: #2a2d33; border: 1px solid #454a54;
-    border-radius: 4px; padding: 4px 10px; cursor: pointer; }
-  #ui button.on { background: #3b6ea8; border-color: #5a8fca; }
-  /* Barely visible until needed: it sits over the remote screen. */
-  #ui-handle { position: fixed; top: 0; left: 50%; transform: translateX(-50%); opacity: .35;
-    border-radius: 0 0 6px 6px !important; border-top: 0 !important; padding: 0 14px !important; z-index: 2; }
-  #ui-handle:hover { opacity: 1; }
-  #ui-bar { position: fixed; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px;
-    align-items: center; padding: 6px; background: rgba(24,26,30,.95); border: 1px solid #454a54;
-    border-radius: 6px; max-width: calc(100vw - 16px); flex-wrap: wrap; justify-content: center; z-index: 2; }
-  #ui-bar[hidden], #ui-clipboard[hidden], #ui-displays[hidden], #ui-keyboard[hidden], #ui-prompt[hidden] { display: none; }
-  #ui button:disabled { opacity: .4; cursor: default; }
-  /* A question to the user (see Ui.ask). */
-  #ui-prompt { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 3;
-    width: min(480px, calc(100vw - 16px)); box-sizing: border-box; padding: 12px; text-align: right;
-    background: rgba(24,26,30,.97); border: 1px solid #454a54; border-radius: 6px; }
-  #ui-prompt p { margin: 0 0 10px; text-align: left; }
-  #ui-prompt button { margin-left: 6px; }
-  #ui-bar select { max-width: 40vw; }
-  #ui-clipboard { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 2;
-    width: min(560px, calc(100vw - 16px)); }
-  #ui-clipboard textarea { display: block; box-sizing: border-box; width: 100%; height: 120px; resize: vertical;
-    font: 13px/1.35 ui-monospace, monospace; color: #eee; background: rgba(24,26,30,.95);
-    border: 1px solid #454a54; border-radius: 6px; padding: 8px; }
-  #ui-displays { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 2;
-    width: min(560px, calc(100vw - 16px)); box-sizing: border-box; padding: 10px;
-    background: rgba(24,26,30,.97); border: 1px solid #454a54; border-radius: 6px; }
-  #ui-displays h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
-  #ui-displays p { margin: 0 0 6px; }
-  #ui-displays .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-  #ui-displays input[type=number] { width: 6em; }
-  #ui-displays .error { color: #f08a8a; }
+  #ui button, #ui select, #ui input, #ui textarea { font: inherit; color: inherit; background: #2a2d33;
+    border: 1px solid #454a54; border-radius: 4px; }
+  #ui button, #ui select { padding: 4px 10px; cursor: pointer; }
+  #ui button.primary { background: #3b6ea8; border-color: #5a8fca; }
+  #ui button:disabled { cursor: default; }
+  #ui-keyboard[hidden], #ui-menu [hidden] { display: none !important; }
+
+  /* The tab: barely visible until needed, it sits over the remote picture (see ui.ts). */
+  #ui > #ui-handle { position: fixed; top: var(--ui-top, 0px); left: 50%; transform: translateX(-50%); z-index: 3;
+    min-width: 44px; height: 14px; padding: 0 12px; font-size: 10px; line-height: 12px; white-space: nowrap;
+    border-top: 0; border-radius: 0 0 6px 6px; opacity: .35; }
+  #ui-handle .hint { display: none; }
+  #ui:not([data-view=closed]) #ui-handle { opacity: 1; background: none; border-color: transparent; }
+  #ui[data-view=ask] #ui-handle, #ui[data-view=stopped] #ui-handle,
+  #ui[data-capture=locked] #ui-handle { display: none; }
+  #ui[data-view=closed][data-capture=armed] #ui-handle { opacity: .9; height: 22px; font-size: 12px;
+    line-height: 20px; border-color: #5a8fca; }
+  #ui[data-view=closed][data-capture=armed] #ui-handle .grip { display: none; }
+  #ui[data-view=closed][data-capture=armed] #ui-handle .hint { display: inline; }
+  @media (hover: hover) { #ui > #ui-handle:hover { opacity: 1; } }
+
+  /* "Mouse captured": shown by adding .show, it fades out. */
+  #ui-flash { position: fixed; top: var(--ui-top, 0px); left: 50%; transform: translateX(-50%); z-index: 2;
+    padding: 3px 10px; font-size: 12px; white-space: nowrap; pointer-events: none;
+    background: rgba(24,26,30,.9); border: 1px solid #454a54; border-top: 0; border-radius: 0 0 6px 6px;
+    opacity: 0; transition: opacity .4s; }
+  #ui-flash.show { opacity: 1; transition: none; }
+
+  /* The one panel. Its sections are the views; exactly one shows. */
+  #ui-menu { position: fixed; top: var(--ui-top, 0px); left: 50%; transform: translateX(-50%); z-index: 2;
+    box-sizing: border-box; width: min(560px, 100vw); max-height: var(--ui-free, 100vh);
+    display: flex; flex-direction: column; padding: 18px 8px 8px; overflow: hidden;
+    background: rgba(24,26,30,.97); border: 1px solid #454a54; border-top: 0; border-radius: 0 0 8px 8px;
+    animation: ui-drop .12s ease-out; }
+  @keyframes ui-drop { from { opacity: 0; margin-top: -8px; } }
+  @media (prefers-reduced-motion: reduce) { #ui-menu { animation: none; } }
+  #ui[data-view=closed] #ui-menu { display: none; }
+  #ui-menu > section { display: none; min-height: 0; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; }
+  #ui[data-view=root] #ui-root, #ui[data-view=displays] #ui-displays, #ui[data-view=clipboard] #ui-clipboard,
+  #ui[data-view=ask] #ui-ask, #ui[data-view=stopped] #ui-stopped { display: block; }
+  #ui[data-view=ask] #ui-menu { padding-top: 10px; }
+  #ui[data-view=stopped] #ui-menu { top: 50%; transform: translate(-50%, -50%); width: min(360px, 100vw - 16px);
+    padding: 12px; border-top: 1px solid #454a54; border-radius: 8px; }
+
+  #ui-menu h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  #ui-menu h3 { margin: 8px 2px 4px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: #9aa3ad; }
+  #ui-menu .group:first-child h3 { margin-top: 0; }
+  #ui-menu p { margin: 0 0 6px; }
+  #ui-menu .note { font-size: 12px; color: #9aa3ad; }
+  #ui-menu .status { flex-basis: 100%; margin: 0; }
+  #ui-menu .status:empty { display: none; }
+  #ui-menu .error { color: #f08a8a; }
+  #ui-menu .actions { display: flex; gap: 6px; justify-content: flex-end; margin-left: auto; }
+
+  /* Root: tiles, two lines each; line 2 says the state in words. */
+  #ui-menu .tiles { display: flex; flex-wrap: wrap; gap: 6px; }
+  #ui-menu .tile { flex: 1 1 150px; min-height: 44px; padding: 5px 10px; text-align: left;
+    display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-content: center; }
+  #ui-menu .tile .label { font-weight: 600; }
+  #ui-menu .tile .state { grid-column: 1 / -1; font-size: 12px; color: #9aa3ad; overflow-wrap: anywhere; }
+  #ui-menu .tile .state:empty { display: none; }
+  #ui-menu .tile .state b { font-weight: 600; color: #eee; }
+  #ui-menu .tile.on { background: #3b6ea8; border-color: #5a8fca; }
+  #ui-menu .tile.on .state { color: #e4ecf5; }
+  #ui-menu .tile.armed { border-color: #5a8fca; box-shadow: inset 3px 0 0 #3b6ea8; }
+  #ui-menu .tile.pending .state b, #ui-menu .tile.unavailable .state b { color: #e0b25a; }
+  #ui-menu .tile.unavailable { border-style: dashed; }
+  #ui-menu .tile.unavailable .label { color: #9aa3ad; }
+  #ui-menu .tile.unavailable .state { color: #eee; }
+  #ui-menu .tile.error .state { color: #f08a8a; }
+
+  /* Pages. */
+  #ui-menu .head { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center;
+    gap: 4px 8px; padding-bottom: 6px; background: #181a1e; }
+  #ui-menu .back { min-width: 32px; padding: 2px 8px; font-size: 16px; line-height: 1.2; }
+  #ui-menu .display { display: flex; gap: 6px; margin-bottom: 4px; }
+  #ui-menu .pick { flex: 1; min-width: 0; min-height: 36px; display: flex; align-items: center; gap: 8px; text-align: left; }
+  #ui-menu .pick .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #ui-menu .pick .tag, #ui-menu .pick .size { font-size: 12px; color: #9aa3ad; white-space: nowrap; }
+  #ui-menu .display.current .pick { background: #3b6ea8; border-color: #5a8fca; }
+  #ui-menu .display.current .pick .tag, #ui-menu .display.current .pick .size { color: #e4ecf5; }
+  #ui-menu .disclose { display: block; width: 100%; min-height: 36px; margin-top: 6px; text-align: left; }
+  #ui-menu .mode { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 8px;
+    margin: 2px 0 8px 10px; padding: 4px 0 4px 10px; border-left: 2px solid #3b6ea8; }
+  #ui-menu .mode label { display: grid; gap: 2px; font-size: 11px; color: #9aa3ad; }
+  #ui-menu .mode label.check { display: flex; align-items: center; gap: 4px; min-height: 28px; font-size: 13px; color: #eee; }
+  #ui-menu .mode input[type=number] { width: 5.5em; padding: 4px 6px; font-size: 13px; color: #eee; }
+  #ui-menu .mode select { font-size: 13px; color: #eee; }
+  #ui-menu .mode .x { padding-bottom: 5px; }
+  #ui-menu .mode .note { flex-basis: 100%; margin: 0; }
+  #ui #ui-clipboard-box { display: block; box-sizing: border-box; width: 100%; height: 120px; resize: vertical;
+    margin-bottom: 6px; padding: 8px; font: 13px/1.35 ui-monospace, monospace; }
+  #ui-ask-text, #ui-stopped-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  /* Fingers. 16px in fields: smaller text makes iOS zoom in on focus. */
+  @media (pointer: coarse) {
+    #ui { font-size: 14px; }
+    #ui > #ui-handle { min-width: 64px; height: 24px; font-size: 13px; line-height: 22px; opacity: .5; }
+    #ui-menu { padding-top: 28px; }
+    #ui-menu .tile { min-height: 48px; }
+    #ui-menu .pick, #ui-menu .disclose, #ui-menu .back, #ui-menu .actions button, #ui-menu .remove { min-height: 44px; }
+    #ui-menu .back { min-width: 44px; }
+    #ui-menu .mode input[type=number], #ui-menu .mode select, #ui #ui-clipboard-box { font-size: 16px; }
+    #ui #ui-clipboard-box { height: 96px; resize: none; }
+  }
+  /* Narrow: the panel is the window's width, and tiles that go deeper take a row. */
+  @media (max-width: 480px) {
+    #ui-menu { border-left: 0; border-right: 0; border-radius: 0; }
+    #ui-menu .tile.drill { flex-basis: 100%; }
+    #ui-menu .pick { flex-wrap: wrap; row-gap: 0; }
+  }
+  /* Low (a phone on its side, a keyboard open): no captions. */
+  @media (max-height: 420px) {
+    #ui-menu h3 { display: none; }
+    #ui-menu .group + .group { margin-top: 6px; }
+    #ui #ui-clipboard-box { height: 64px; }
+  }
   #ui-keyboard { position: fixed; left: 0; right: 0; bottom: 0; padding: 4px; background: #1b1d21;
     border-top: 1px solid #454a54; display: flex; flex-direction: column; gap: 3px; touch-action: none;
     user-select: none; -webkit-user-select: none; z-index: 1; }
   .kb-row { display: flex; gap: 3px; }
   #ui .kb-key { flex: 1 1 0; min-width: 0; height: min(44px, 7vh); padding: 0; overflow: hidden; }
   #ui .kb-key.down { background: #3b6ea8; border-color: #5a8fca; }
+  #ui-keyboard button:disabled { opacity: .4; }
   #ui .kb-layout { flex: 1.25 1 0; color: #9ab; }
   /* Focused to open a phone's keyboard, never seen. 16px: smaller text makes iOS zoom in on focus. */
-  #ui-text { position: fixed; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0;
+  #ui > #ui-text { position: fixed; left: 0; top: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0;
     font-size: 16px; resize: none; pointer-events: none; }
 </style>
 </head>

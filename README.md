@@ -104,15 +104,19 @@ and then they are remothing's own. Restart the server after granting them.
   larger than the window is scaled down to fit (`&scale=1`: 1:1 pixels);
   `&stats` shows the latency overlay. A hidden tab receives nothing until
   it is shown again, so spare tabs cost neither an encoder nor bandwidth.
-  The handle at the top opens the controls: fullscreen (in Chromium over
-  HTTPS it also captures Alt+Tab, the Windows key and Esc for the remote
-  side; hold Esc to leave), which display is streamed, the remote
-  clipboard as a text box (what is copied there appears in it, what is
-  typed or pasted in it is copied there), an on-screen keyboard, and the
-  stats overlay. A held key repeats on the remote side, and everything a
-  client holds is released if it disconnects.
+  The tab at the top centre (`▾`) opens the menu, one panel in three
+  groups, each item saying its state in words: Screen (`Fullscreen` —
+  in Chromium over HTTPS it also captures Alt+Tab, the Windows key and
+  Esc for the remote side; hold Esc to leave —, `Stats`, `Display ›`),
+  Control (`Capture mouse`, `Type` on touch screens, `On-screen keyboard`,
+  `Clipboard ›`: a text box where what is copied there appears and what
+  is typed or pasted is copied there) and Sound (`Sound`, `Microphone`).
+  `›` items open a page inside the menu, with `‹` to go back. Esc, the tab
+  or a click outside closes it; that click is not sent to the remote side.
+  A held key repeats on the remote side, and everything a client holds is
+  released if it disconnects.
 - Several displays at once: each window streams its own display. The
-  display selector in the controls changes only that window, and the
+  `Display ›` page in the menu changes only that window, and the
   address carries it (`&display=ID`): a reload, or the address opened in
   another window, streams the same display; one that no longer exists
   gives the default display, and the address follows. The host still has
@@ -123,7 +127,7 @@ and then they are remothing's own. Restart the server after granting them.
   pointer, a tap clicks, a tap with two fingers is the right button, two
   fingers dragged scroll (and keep sliding when let go quickly), and a tap
   followed at once by another touch holds the button for as long as that
-  touch lasts (double click, or drag). `Type` in the controls opens the
+  touch lasts (double click, or drag). `Type` in the menu opens the
   device's own keyboard.
 - HDR displays (Windows): the stream is converted to SDR relative to the
   "SDR content brightness" setting, so it looks as on the host whatever
@@ -131,7 +135,7 @@ and then they are remothing's own. Restart the server after granting them.
   can draw HDR (Chromium-based browsers), the picture is sent in HDR
   instead; `&stats` shows `HDR`, and the admin status `hdr_max` (above 0
   while the picture is HDR).
-- Games that turn the camera with the mouse: `Capture` in the controls (or
+- Games that turn the camera with the mouse: `Capture mouse` in the menu (or
   Ctrl+Alt+Shift+Z, Ctrl+Option+Shift+Z on a Mac) traps the mouse in the
   picture after a click on it, so it never leaves the window. The remote
   cursor still goes on to another display shown in another window, as a
@@ -144,16 +148,17 @@ and then they are remothing's own. Restart the server after granting them.
   in the address makes the server move the remote cursor to positions,
   as without capture, instead of sending mouse movement: for comparing how
   a game reacts to each.
-- Virtual displays: `Displays…` in the controls adds a display to the
-  host, of the size typed in or of this window's (`Fit window`: shown 1:1,
-  without scaling), with a refresh rate and HDR where offered, and streams
-  it at once. The panel lists every virtual display, whichever window made
-  it, to show it in this window or remove it (a window showing a removed
-  one goes to the default display), and changes the size of the one shown
-  here (Windows, macOS). They are displays like any other for
+- Virtual displays: the `Display ›` page of the menu lists every display
+  (a row shows it in this window), and `＋ New virtual display` adds one to
+  the host, of the size typed in or of this window's (`Fit window`: shown
+  1:1, without scaling), with a refresh rate and HDR where offered, and
+  streams it at once. Every virtual display, whichever window made
+  it, can be removed there (a window showing a removed one goes to the
+  default display), and the one shown here can change size (Windows,
+  macOS). They are displays like any other for
   the host (windows move there, programs run at their resolution) and go
   away when the server stops. Windows: they need remothing's display
-  driver, which the panel offers to install when the server runs as the
+  driver, which the menu offers to install when the server runs as the
   service (or as administrator); installing adds a "remothing Virtual
   Display Adapter" device and remothing's driver signing certificate to the
   computer's trusted stores (remove them in Device Manager and
@@ -175,14 +180,14 @@ and then they are remothing's own. Restart the server after granting them.
   link is short of room (never smaller than the window), and no client
   gets more frames per second than its screen refreshes.
 - Sound: what the remote session plays is sent along (Opus) and starts with
-  the first click or key in the page; `Sound` in the controls switches it
-  and its tooltip tells whether it plays or why not (so does the last line
+  the first click or key in the page; `Sound` in the menu switches it
+  and says whether it plays or why not (so does the last line
   of the `&stats` overlay, and the admin UI lists what the server tried).
   Windows: whatever plays on the default playback device. Linux: the
   PulseAudio or PipeWire server in use, or one started by remothing for
   the programs of its simulated displays. macOS: whatever the Mac plays,
   through ScreenCaptureKit (no driver needed).
-- Microphone: `Mic` in the controls (pages served over HTTPS or localhost)
+- Microphone: `Microphone` in the menu (pages served over HTTPS or localhost)
   sends this device's microphone to the remote session, where programs
   hear it as their microphone. One client talks at a time; for the others
   the button is disabled meanwhile. Linux: a virtual source

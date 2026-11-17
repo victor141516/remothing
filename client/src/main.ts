@@ -103,7 +103,7 @@ const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
     const height = Math.round(((view?.height ?? window.innerHeight) - ui.reservedBottom) * dpr);
     return { width, height, hz: refreshHz };
   },
-  toggleStats: () => (statsEl.hidden = !statsEl.hidden),
+  toggleStats: () => !(statsEl.hidden = !statsEl.hidden),
   toggleSound: () => sound.toggle(),
   toggleMic: () => void mic.toggle(),
   toggleCapture: () => input.setCapture(!input.capture),
@@ -374,6 +374,7 @@ toWorker(
   [offscreen],
 );
 statsEl.hidden = !(params.has('stats') || probeEnabled);
+ui.statsShown(!statsEl.hidden);
 setInterval(() => {
   if (!statsEl.hidden) statsEl.textContent = `${stats.text()}\n${pipeline}\nsound ${sound.status}`;
 }, 500);

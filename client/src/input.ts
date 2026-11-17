@@ -365,17 +365,17 @@ export class Input {
   }
 
   private onKey(e: KeyboardEvent, down: boolean): void {
-    // Text typed into the control bar's fields is theirs.
-    const t = e.target;
-    if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t instanceof HTMLInputElement) return;
     // Ctrl+Alt+Shift+Z (Ctrl+Option+Shift+Z on a Mac) turns capture mode on
-    // or off; its Z never reaches the remote side (the modifiers did, and
-    // are released there as usual).
+    // or off, also from a field of the menu; its Z never reaches the remote
+    // side (the modifiers did, and are released there as usual).
     if (e.code === 'KeyZ' && e.ctrlKey && e.altKey && e.shiftKey) {
       e.preventDefault();
       if (down && !e.repeat) this.setCapture(!this.capture);
       return;
     }
+    // Text typed into the menu's fields is theirs.
+    const t = e.target;
+    if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t instanceof HTMLInputElement) return;
     const code = EVDEV[e.code];
     if (code === undefined) return;
     e.preventDefault();
