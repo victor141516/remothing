@@ -121,7 +121,9 @@ and then they are remothing's own. Restart the server after granting them.
   copied, it pastes the remote clipboard as it is. What is copied on the
   remote side is copied on this computer too (HTTPS or localhost, in the
   window being used); what the remote clipboard held before the page
-  opened is not.
+  opened is not. The newest copy wins: Ctrl+V sends this computer's
+  clipboard only when something was copied here after the remote one last
+  changed, so an older text here never replaces files or text copied there.
 - Keys go to the remote side while the picture has the keyboard: a click
   on it gives it, a click anywhere else (the menu, the area around the
   picture) takes it away, and closing the menu gives it back.

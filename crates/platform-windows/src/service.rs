@@ -12,9 +12,9 @@ use std::cell::Cell;
 use std::ffi::{c_void, OsStr};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,20 +24,21 @@ use windows::core::{s, w, Owned, BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     SetHandleInformation, ERROR_ACCESS_DENIED, ERROR_CALL_NOT_IMPLEMENTED,
     ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
-    ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR, HANDLE, HANDLE_FLAG_INHERIT, NO_ERROR,
+    ERROR_SERVICE_NOT_ACTIVE, ERROR_SERVICE_SPECIFIC_ERROR, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, NO_ERROR,
     WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
     DuplicateTokenEx, GetTokenInformation, IsWellKnownSid, SecurityImpersonation,
     SetTokenInformation, TokenPrimary, TokenSessionId, TokenUser, WinLocalSystemSid,
-    TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
+    SECURITY_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
     RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE,
     REG_DWORD, REG_OPTION_NON_VOLATILE, RRF_RT_REG_DWORD,
 };
-use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
+use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, ChangeServiceConfigW, ControlService, CreateServiceW, DeleteService,
     OpenSCManagerW, OpenServiceW, QueryServiceStatus, RegisterServiceCtrlHandlerExW,
@@ -54,7 +55,7 @@ use windows::Win32::System::Services::{
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcess,
+    CreateEventW, CreateProcessAsUserW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, OpenProcess,
     OpenProcessToken, QueryFullProcessImageNameW, SetEvent, TerminateProcess,
     WaitForMultipleObjects, WaitForSingleObject, CREATE_NO_WINDOW, PROCESS_INFORMATION,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
@@ -76,6 +77,8 @@ const SESSION_LOG_PREV: &str = "remothing-session.log.1";
 const PID_FILE: &str = "remothing-session.pid";
 /// The service log is appended across restarts; beyond this it starts over.
 const SERVICE_LOG_MAX: u64 = 1 << 20;
+/// Longest wait for a helper run as the user (`run_as_user`) once its output ended.
+const HELPER_WAIT_MS: u32 = 2000;
 
 /// Session ids that never host an interactive console (0 is the services
 /// session, u32::MAX means "console is between sessions").
@@ -407,6 +410,86 @@ pub(crate) fn is_local_system() -> Result<bool> {
     let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
     // SAFETY: SID pointer refers into `buf`, alive here.
     Ok(unsafe { IsWellKnownSid(user.User.Sid, WinLocalSystemSid) }.as_bool())
+}
+
+/// The token of the user logged in to this process's session.
+pub(crate) fn user_token() -> Result<Owned<HANDLE>> {
+    let mut session = 0;
+    // SAFETY: plain out-parameter calls; the token handle is owned from here.
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session).context("find this session")?;
+        let mut token = HANDLE::default();
+        WTSQueryUserToken(session, &mut token).context("nobody is logged in to the session")?;
+        Ok(Owned::new(token))
+    }
+}
+
+/// Runs this program with `args` as the user logged in to this process's
+/// session, on its desktop, and returns what it printed (stdout and
+/// stderr). For what Windows shows that user and not SYSTEM.
+pub(crate) fn run_as_user(args: &[&OsStr]) -> Result<Vec<u8>> {
+    let token = user_token()?;
+    let exe = std::env::current_exe().context("find this program")?;
+    let mut all = vec![exe.as_os_str()];
+    all.extend_from_slice(args);
+    let mut cmd = command_line(&all);
+    let mut desktop = wide(OsStr::new(r"winsta0\default"));
+    let inherit = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, bInheritHandle: true.into(), ..Default::default() };
+    let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+    // SAFETY: out-parameters; both ends are owned right after.
+    unsafe { CreatePipe(&mut read, &mut write, Some(&inherit), 0) }.context("create a pipe")?;
+    // SAFETY: the read end, owned by the File from here (closed with it).
+    let mut output = unsafe { File::from_raw_handle(read.0) };
+    // SAFETY: handle owned here.
+    let write = unsafe { Owned::new(write) };
+    // Only the write end goes to the child.
+    // SAFETY: a handle owned by `output`.
+    unsafe { SetHandleInformation(HANDLE(output.as_raw_handle()), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+        .context("keep the pipe's read end")?;
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        lpDesktop: PWSTR(desktop.as_mut_ptr()),
+        dwFlags: STARTF_USESTDHANDLES,
+        hStdOutput: *write,
+        hStdError: *write,
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: all buffers are NUL-terminated and alive for the call; the
+    // command line buffer is mutable as CreateProcessAsUserW requires.
+    unsafe {
+        CreateProcessAsUserW(
+            Some(*token),
+            PCWSTR::null(),
+            Some(PWSTR(cmd.as_mut_ptr())),
+            None,
+            None,
+            true,
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &startup,
+            &mut info,
+        )
+    }
+    .context("start it as the user")?;
+    // SAFETY: handles returned by CreateProcessAsUserW, owned here.
+    let (process, _thread) = unsafe { (Owned::new(info.hProcess), Owned::new(info.hThread)) };
+    // Ours closed, the pipe ends when the child exits.
+    drop(write);
+    let mut out = Vec::new();
+    output.read_to_end(&mut out).context("read its output")?;
+    let mut code = 0;
+    // SAFETY: a process handle owned here; the pipe's end means it is exiting.
+    unsafe {
+        WaitForSingleObject(*process, HELPER_WAIT_MS);
+        GetExitCodeProcess(*process, &mut code)
+    }
+    .context("its exit code")?;
+    if code != 0 {
+        bail!("it failed ({code}): {}", String::from_utf8_lossy(&out).trim());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

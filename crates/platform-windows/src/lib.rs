@@ -6,7 +6,7 @@
 #![cfg(windows)]
 
 mod audio;
-mod clipboard;
+pub mod clipboard;
 mod cursor;
 mod desktop;
 mod downloads;

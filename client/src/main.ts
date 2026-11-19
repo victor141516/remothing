@@ -26,14 +26,19 @@ let pendingCopy: string | null = null;
 
 /** Copies a remote clipboard change to this computer's clipboard (HTTPS or
  * localhost only). Only in the window being used: one in the background
- * would otherwise overwrite, later, what was copied here meanwhile. */
-function copyHere(text: string): void {
+ * would otherwise overwrite, later, what was copied here meanwhile.
+ * Whether this computer's clipboard takes it. */
+function copyHere(text: string): boolean {
   pendingCopy = null;
-  if (!window.isSecureContext || !document.hasFocus()) return;
+  if (!window.isSecureContext || !document.hasFocus()) return false;
   navigator.clipboard.writeText(text).catch(() => {
     pendingCopy = text;
   });
+  return true;
 }
+
+/** The remote clipboard's file list last shown (JSON), to tell a new copy from a repeat. */
+let shownFiles: string | null = null;
 
 // The next key or click in this window allows what was refused.
 for (const type of ['keydown', 'pointerdown']) {
@@ -370,7 +375,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'clipboard':
       ui.remoteClipboard(m.text);
-      if (m.changed) copyHere(m.text);
+      if (m.changed) input.remoteChanged(copyHere(m.text) ? m.text : null);
       break;
     case 'displays': {
       const list = JSON.parse(m.json) as DisplaysMessage;
@@ -392,9 +397,15 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case 'micinfo':
       mic.info(m.json);
       break;
-    case 'clipfiles':
-      ui.remoteFiles(JSON.parse(m.json) as ClipboardFiles);
+    case 'clipfiles': {
+      const files = JSON.parse(m.json) as ClipboardFiles;
+      ui.remoteFiles(files);
+      // The first list (and the same one again after a reconnection) is
+      // what was there already; a new one was just copied there.
+      if (shownFiles !== null && m.json !== shownFiles && files.files.length > 0) input.remoteChanged(null);
+      shownFiles = m.json;
       break;
+    }
     case 'pasted':
       input.pasted();
       break;

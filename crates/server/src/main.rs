@@ -78,6 +78,11 @@ fn main() -> Result<()> {
             let sub = command.get(1).context("service install|uninstall|start|stop|run")?;
             return remothing_platform_windows::service::command(sub, &config_path);
         }
+        // Run as the user by the service's session process (see clipboard.rs).
+        #[cfg(windows)]
+        Some(remothing_platform_windows::clipboard::READ_COMMAND) => {
+            return remothing_platform_windows::clipboard::print_clipboard();
+        }
         #[cfg(target_os = "macos")]
         Some("service") => {
             let sub = command.get(1).context("service install|uninstall|start|stop")?;

@@ -1,5 +1,6 @@
 //! Clipboard of the interactive window station: text, and the files
-//! Explorer copies (CF_HDROP, read only).
+//! Explorer copies (CF_HDROP, read only; as the service, through a helper
+//! run as the user, see `read_as_user`).
 //!
 //! A message-only window on its own thread listens for clipboard updates
 //! (WM_CLIPBOARDUPDATE) and is the owner when text is set: SetClipboardData
@@ -10,19 +11,20 @@
 //! UTF-16 with CRLF line ends on the Windows side and as UTF-8 with LF on
 //! ours.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use remothing_core::platform::{Clipboard, ClipboardSink, Copied};
 use windows::core::w;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
-    RemoveClipboardFormatListener, SetClipboardData,
+    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+    OpenClipboard, RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
@@ -33,6 +35,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_HDROP: u32 = 15;
+/// The subcommand that prints what is on the clipboard (`print_clipboard`).
+pub const READ_COMMAND: &str = "clipboard-read";
 /// Text waits in `Shared::pending`.
 const WM_SET_TEXT: u32 = WM_APP;
 const WM_STOP: u32 = WM_APP + 1;
@@ -142,6 +146,9 @@ impl Drop for WindowClipboard {
 
 /// Message loop of the listener window, until WM_STOP.
 fn listen(hwnd: HWND, shared: &Shared) {
+    // As the service (SYSTEM) Windows hides from this process what programs
+    // copy through OLE: a helper running as the user reads it (`read_as_user`).
+    let as_system = crate::service::is_local_system().unwrap_or(false);
     let mut msg = MSG::default();
     // SAFETY: `msg` is a valid MSG; the window belongs to this thread.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
@@ -155,9 +162,19 @@ fn listen(hwnd: HWND, shared: &Shared) {
                 // SAFETY: the timer set above.
                 let _ = unsafe { KillTimer(Some(hwnd), READ_TIMER) };
                 let changed = !shared.found.swap(false, Ordering::Relaxed);
+                let copied = match read(Some(hwnd)) {
+                    Ok(None) if as_system => read_as_user(),
+                    read => read,
+                };
                 // Our own text comes back here too; the core ignores what it already has.
-                if let (Some(copied), Some(on_change)) = (read(hwnd), shared.on_change.lock().unwrap().as_ref()) {
-                    on_change(copied, changed);
+                match copied {
+                    Ok(Some(copied)) => {
+                        if let Some(on_change) = shared.on_change.lock().unwrap().as_ref() {
+                            on_change(copied, changed);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("clipboard: {e:#}"),
                 }
             }
             WM_SET_TEXT => {
@@ -178,11 +195,13 @@ fn listen(hwnd: HWND, shared: &Shared) {
     }
 }
 
-fn open(hwnd: HWND) -> Result<()> {
+/// `hwnd`: the window that owns the clipboard while it is open (None: this
+/// process's helper run, which only reads).
+fn open(hwnd: Option<HWND>) -> Result<()> {
     let mut tries = 0;
     loop {
-        // SAFETY: `hwnd` is this thread's window.
-        match unsafe { OpenClipboard(Some(hwnd)) } {
+        // SAFETY: `hwnd` is this thread's window, or none.
+        match unsafe { OpenClipboard(hwnd) } {
             Ok(()) => return Ok(()),
             Err(e) if tries == OPEN_TRIES => return Err(e).context("open clipboard"),
             Err(_) => {
@@ -194,36 +213,20 @@ fn open(hwnd: HWND) -> Result<()> {
 }
 
 /// Files (Explorer's copy) when there are, else text; None for anything
-/// else (images) or when the clipboard cannot be opened.
-fn read(hwnd: HWND) -> Option<Copied> {
-    open(hwnd).ok()?;
-    // SAFETY: the clipboard is open; its handles stay valid until it is
-    // closed, and their memory is read within its size while locked.
+/// else (images). An error says why what is there could not be read.
+fn read(hwnd: Option<HWND>) -> Result<Option<Copied>> {
+    open(hwnd)?;
+    // SAFETY: the clipboard is open; its handles stay valid until it is closed.
     let copied = unsafe {
-        let files = GetClipboardData(CF_HDROP).ok().map(|data| {
-            let drop = HDROP(data.0);
-            (0..DragQueryFileW(drop, u32::MAX, None))
-                .filter_map(|i| {
-                    let mut name = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
-                    let len = DragQueryFileW(drop, i, Some(&mut name)) as usize;
-                    (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&name[..len])))
-                })
-                .collect::<Vec<_>>()
-        });
-        match files {
-            Some(files) if !files.is_empty() => Some(Copied::Files(files)),
-            _ => GetClipboardData(CF_UNICODETEXT).ok().and_then(|data| {
-                let memory = HGLOBAL(data.0);
-                let chars = GlobalLock(memory) as *const u16;
-                if chars.is_null() {
-                    return None;
-                }
-                let wide = std::slice::from_raw_parts(chars, GlobalSize(memory) / 2);
-                let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-                let text = String::from_utf16_lossy(&wide[..end]).replace("\r\n", "\n");
-                let _ = GlobalUnlock(memory);
-                Some(Copied::Text(text))
-            }),
+        if IsClipboardFormatAvailable(CF_HDROP).is_ok() {
+            GetClipboardData(CF_HDROP).context("read the copied files").map(|data| Some(Copied::Files(drop_files(HDROP(data.0)))))
+        } else if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+            GetClipboardData(CF_UNICODETEXT)
+                .context("read the copied text")
+                .and_then(|data| unicode_text(HGLOBAL(data.0)))
+                .map(|text| Some(Copied::Text(text)))
+        } else {
+            Ok(None)
         }
     };
     // SAFETY: opened above.
@@ -231,9 +234,72 @@ fn read(hwnd: HWND) -> Option<Copied> {
     copied
 }
 
+/// What is on the clipboard as the logged-in user sees it. Explorer (and
+/// other programs using OLE) puts its copies there rendered on request,
+/// and Windows shows a process running as SYSTEM only OLE's own
+/// "DataObject" format: neither CF_HDROP nor the text, nor through OLE's
+/// own path, nor impersonating the user (all measured). This program, run
+/// as the user, prints it (`print_clipboard`).
+fn read_as_user() -> Result<Option<Copied>> {
+    let out = crate::service::run_as_user(&[OsStr::new(READ_COMMAND)]).context("read the clipboard as the user")?;
+    let out = String::from_utf8_lossy(&out);
+    Ok(match out.split_once('\n') {
+        Some(("files", list)) => Some(Copied::Files(list.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())),
+        Some(("text", text)) => Some(Copied::Text(text.to_string())),
+        _ => None,
+    })
+}
+
+/// `remothing clipboard-read`, run as the user by `read_as_user`: prints
+/// "files" and one path per line, or "text" and the text, or nothing.
+pub fn print_clipboard() -> Result<()> {
+    match read(None)? {
+        Some(Copied::Files(files)) => {
+            println!("files");
+            for file in files {
+                println!("{}", file.display());
+            }
+        }
+        Some(Copied::Text(text)) => print!("text\n{text}"),
+        None => {}
+    }
+    Ok(())
+}
+
+/// The paths of a CF_HDROP block.
+fn drop_files(drop: HDROP) -> Vec<PathBuf> {
+    // SAFETY: `drop` is a valid CF_HDROP block for the duration of the call;
+    // each name is read into a buffer of the length asked for.
+    unsafe {
+        (0..DragQueryFileW(drop, u32::MAX, None))
+            .filter_map(|i| {
+                let mut name = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
+                let len = DragQueryFileW(drop, i, Some(&mut name)) as usize;
+                (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&name[..len])))
+            })
+            .collect()
+    }
+}
+
+/// A CF_UNICODETEXT block, with LF line ends.
+fn unicode_text(memory: HGLOBAL) -> Result<String> {
+    // SAFETY: a valid global memory block, read within its size while locked.
+    unsafe {
+        let chars = GlobalLock(memory) as *const u16;
+        if chars.is_null() {
+            bail!("lock the copied text: {}", windows::core::Error::from_win32());
+        }
+        let wide = std::slice::from_raw_parts(chars, GlobalSize(memory) / 2);
+        let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+        let text = String::from_utf16_lossy(&wide[..end]).replace("\r\n", "\n");
+        let _ = GlobalUnlock(memory);
+        Ok(text)
+    }
+}
+
 /// `text`: UTF-16, NUL-terminated.
 fn write_text(hwnd: HWND, text: &[u16]) -> Result<()> {
-    open(hwnd)?;
+    open(Some(hwnd))?;
     // SAFETY: the clipboard is open with `hwnd` as owner; the block is
     // large enough for `text` and, once set, belongs to the clipboard.
     let set = unsafe {

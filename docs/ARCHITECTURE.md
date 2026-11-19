@@ -422,6 +422,17 @@ Windows waits for its clipboard thread, X11 makes a round trip after
 taking the selection. Without permission to read the clipboard the client
 sends a plain V.
 
+Neither side's older content replaces the other's newer one. The server
+only sends what changed after the client connected, and never a client's
+own change back. The client (`input.ts`) keeps the text of its own
+clipboard that is no newer than the remote one (`synced`): what it copied
+from there, sent there, or found here when the remote clipboard changed
+to something it cannot hold (files) or got while the window was in the
+background (read when the window is used again, unless it changed
+meanwhile). Ctrl+V sends its clipboard only when it differs from that,
+else an empty C_PASTE that leaves the remote clipboard as it is. Reading
+happens only where the browser already allows it, never with a prompt.
+
 The other way, what is copied on the remote side reaches this computer's
 clipboard: `S_CLIPBOARD` flags a change made after the client connected
 (`CLIPBOARD_CHANGED`), which `main.ts` writes with `navigator.clipboard`;
@@ -460,7 +471,15 @@ latency and must not hold up frames or input), with the stream token:
   file to the folder's owner. macOS: `~/Downloads` of the launch agent's user.
 - **From the session**: the platforms report files copied there besides
   text (`Copied::Files`): Windows `CF_HDROP`, X11 `text/uri-list` (asked
-  for when TARGETS offers it), macOS the items' file URLs. They go to the
+  for when TARGETS offers it), macOS the items' file URLs. Explorer puts
+  its copies on the clipboard through OLE, rendered on request, and
+  Windows shows a process running as SYSTEM (the service's session
+  process) only OLE's own "DataObject" format: no `CF_HDROP`, not through
+  `OleGetClipboard` either, nor while impersonating the user (all measured
+  on the demo). So when the session process, as SYSTEM, reads nothing, it
+  runs itself as the logged-in user (`WTSQueryUserToken`,
+  `CreateProcessAsUserW`) with the hidden `clipboard-files` subcommand,
+  which prints the files to a pipe. They go to the
   clients as `S_CLIPBOARD_FILES`, and `GET /files/clipboard?session&index&name`
   sends one: only a file on the clipboard of the display that page shows,
   by index and name together, so a list that changed meanwhile never sends

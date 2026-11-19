@@ -79,6 +79,15 @@ export class Input {
   private queued: [number, boolean][] = [];
   /** The V of that paste is still held. */
   private pasteV = false;
+  /** This computer's clipboard text that is no newer than the remote
+   * clipboard: it came from there, went there, or was already here when
+   * the remote one last changed. Ctrl+V does not send it, so an old copy
+   * here never replaces a newer one there. */
+  private synced: string | null = null;
+  /** The last text seen on this computer's clipboard (null: none yet). */
+  private known: string | null = null;
+  /** The remote clipboard changed while this window was not in use. */
+  private stale = false;
 
   /** `pointerChanged`: `touch` changed, or the pointer moved by touch.
    * `captureChanged`: the capture mode, or whether the mouse is trapped, changed. */
@@ -149,6 +158,7 @@ export class Input {
     window.addEventListener('keydown', (e) => this.onKey(e, true));
     window.addEventListener('keyup', (e) => this.onKey(e, false));
     window.addEventListener('blur', () => this.releaseAll());
+    window.addEventListener('focus', () => this.back());
     canvas.addEventListener('blur', () => this.releaseAll());
     // A click anywhere but the picture (the menu, the area around it) takes
     // the keyboard away from it. A touch around the picture is the trackpad.
@@ -469,7 +479,11 @@ export class Input {
     void navigator.clipboard.readText().then(
       (text) => {
         if (this.paste !== paste) return;
-        this.sendPaste(text);
+        // An empty text leaves the remote clipboard as it is.
+        const newer = text !== this.synced;
+        this.known = text;
+        if (newer) this.synced = text;
+        this.sendPaste(newer ? text : '');
         // The server answers (`pasted`); if it never does, keys go on.
         paste.done = window.setTimeout(() => this.pasted(), PASTE_WAIT_MS);
       },
@@ -483,6 +497,35 @@ export class Input {
     );
   }
 
+  /** The remote clipboard changed (text or files); `copied`: its text, which
+   * this computer's clipboard now holds too (null: not copied here). What
+   * this computer's clipboard holds now is older than the change. */
+  remoteChanged(copied: string | null): void {
+    if (copied !== null) {
+      this.synced = this.known = copied;
+      this.stale = false;
+    } else if (document.hasFocus()) {
+      void readQuietly().then((text) => {
+        if (text !== null) this.synced = this.known = text;
+      });
+    } else {
+      this.stale = true;
+    }
+  }
+
+  /** Back in this window after a remote change: what this computer's
+   * clipboard holds is older unless it changed while away (then it was
+   * just copied, to be pasted here). */
+  private back(): void {
+    if (!this.stale) return;
+    this.stale = false;
+    void readQuietly().then((text) => {
+      if (text === null) return;
+      if (this.known === null || text === this.known) this.synced = text;
+      this.known = text;
+    });
+  }
+
   /** The server pressed the V (`S_PASTED`): held-back keys go out. */
   pasted(): void {
     if (!this.paste) return;
@@ -491,5 +534,19 @@ export class Input {
     const queued = this.queued;
     this.queued = [];
     for (const [code, down] of queued) this.setKey(code, down);
+  }
+}
+
+/** This computer's clipboard text, read only where the browser already
+ * allows it (no permission prompt out of the blue); null otherwise. */
+async function readQuietly(): Promise<string | null> {
+  if (!window.isSecureContext) return null;
+  try {
+    const permission = await navigator.permissions.query({ name: 'clipboard-read' as PermissionName });
+    if (permission.state !== 'granted') return null;
+    return await navigator.clipboard.readText();
+  } catch {
+    // Firefox and Safari know no such permission.
+    return null;
   }
 }
