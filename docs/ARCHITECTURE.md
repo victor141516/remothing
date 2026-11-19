@@ -436,6 +436,37 @@ the browser refuses (Firefox and Safari want a recent key or click), the
 next key or click in the window writes it, unless the window lost the
 focus first.
 
+## Files
+
+`files.rs`, plain HTTP beside the stream sockets (a file needs no low
+latency and must not hold up frames or input), with the stream token:
+
+- **To the session**: a file dropped on the page or pasted outside the
+  picture (`files.ts`; the `paste` event carries files only when the page
+  gets it, which is why the picture gives up the keyboard on a click
+  elsewhere) goes up with `POST /files?name=` one at a time, an
+  XMLHttpRequest for its upload progress. The server writes it as
+  `name.part`, after reserving the first free name ("name (1).ext", ...)
+  by creating it, and renames it when complete. The name keeps only its
+  last component and loses what Windows refuses. Where:
+  `Platform::downloads_dir`. Windows: the known folder of the user logged
+  in to the session (`WTSQueryUserToken`), since as the service the session
+  process is SYSTEM. Linux: `XDG_DOWNLOAD_DIR` of `user-dirs.dirs` (often
+  a localized name) or `~/Downloads`, created when missing; as root, the
+  home (`/etc/passwd`) of the regular user (uid 1000 and up) running the
+  most processes: the desktop's (the images run it as `user`). What a
+  process was started with would name it better, but reading that needs
+  CAP_SYS_PTRACE, which a container's root lacks. `hand_over` gives the
+  file to the folder's owner. macOS: `~/Downloads` of the launch agent's user.
+- **From the session**: the platforms report files copied there besides
+  text (`Copied::Files`): Windows `CF_HDROP`, X11 `text/uri-list` (asked
+  for when TARGETS offers it), macOS the items' file URLs. They go to the
+  clients as `S_CLIPBOARD_FILES`, and `GET /files/clipboard?session&index&name`
+  sends one: only a file on the clipboard of the display that page shows,
+  by index and name together, so a list that changed meanwhile never sends
+  another file. The browser downloads it as any file. Folders are listed
+  but not sent.
+
 Each client streams its own display, so windows of the same browser (or
 different devices) can show different displays at once:
 
@@ -553,8 +584,11 @@ stats, capture, the keyboards) closes the menu; Esc, the tab and a click
 outside close it, and that click, caught on `window` in the capture phase,
 never reaches `input.ts` (on touch it would click wherever the remote
 pointer is). Questions are pinned: only their buttons answer them. Buttons
-never take focus (keys belong to the remote side); fields do while used,
-and focus goes back to the picture after a choice. While the mouse is
+never take focus; fields do while used. Keys go to the remote side only
+while the picture (the canvas) has the focus: `input.ts` takes it away on a
+pointer down anywhere else (a touch around the picture is the trackpad and
+keeps it), so a paste after a click on the menu is the page's own (files,
+see "Files"), and the menu gives it back when it closes. While the mouse is
 captured the tab hides; while capture waits for a click, the tab says so.
 The panel's height is limited to the visible area above the on-screen
 keyboard (`--ui-free`).
@@ -792,7 +826,8 @@ tile layer switches + optional video access unit), CURSOR (RGBA + hotspot, 0×0 
 CURSOR_POS (the cursor's hot spot, to a client that captured the mouse),
 PONG, SIGNAL (WebRTC and WebTransport JSON), CHUNK (data-channel piece of a
 FRAME), PIECE (WebTransport datagram piece of a FRAME, or parity), PASTED, CLIPBOARD
-(text), DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
+(text, flagged when copied after connecting), CLIPBOARD_FILES (JSON: the files copied there),
+DISPLAYS (JSON list), AUDIO_INFO (JSON: codec and source, or why
 there is no sound), AUDIO (one encoded packet), MIC_INFO (JSON: the
 microphone is free, taken, playing, needs something installed, needs a
 restart, or why not); client → server PING, ACK (with client hold time and

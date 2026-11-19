@@ -119,9 +119,10 @@ struct MicRequest {
     channels: usize,
 }
 
-fn authorized(app: &App, q: &TokenQuery) -> bool {
+/// The stream token (any page's own requests carry it).
+pub(crate) fn token_ok(app: &App, token: &str) -> bool {
     let expected = app.settings.read().unwrap().auth.stream_token.clone();
-    expected.is_empty() || constant_time_eq(expected.as_bytes(), q.token.as_bytes())
+    expected.is_empty() || constant_time_eq(expected.as_bytes(), token.as_bytes())
 }
 
 /// Answers a wrong token: the upgrade goes through only to carry the close
@@ -139,7 +140,7 @@ pub async fn stream_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(app): State<Arc<App>>,
 ) -> Response {
-    if !authorized(&app, &q) {
+    if !token_ok(&app, &q.token) {
         eprintln!("refused a stream connection from {addr}: wrong token");
         return refuse(ws);
     }
@@ -156,7 +157,7 @@ pub async fn input_handler(
     Query(q): Query<TokenQuery>,
     State(app): State<Arc<App>>,
 ) -> Response {
-    if !authorized(&app, &q) {
+    if !token_ok(&app, &q.token) {
         return refuse(ws);
     }
     ws.on_upgrade(move |mut socket| async move {
@@ -391,25 +392,42 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
             // The clipboard of the display the client streams: what is there
             // on connect and after a switch, then every change this client
             // did not make. Changes copied after that, by anyone, the client
-            // also puts on its own computer's clipboard.
+            // also puts on its own computer's clipboard. Copied files go as
+            // a list the client can download them from.
             loop {
-                let mut text = link.watching.read().unwrap().control.clipboard_text();
-                let mut first = true;
+                let control = link.watching.read().unwrap().control.clone();
+                let (mut text, mut files) = (control.clipboard_text(), control.clipboard_files());
+                let (mut first, mut send_text, mut send_files) = (true, true, true);
                 loop {
-                    let now = text.borrow_and_update().clone();
-                    if now.by != Some(link.id) && !now.text.is_empty() {
-                        let flags = if now.changed && !first { proto::CLIPBOARD_CHANGED } else { 0 };
-                        let mut m = Vec::with_capacity(2 + now.text.len());
-                        m.extend_from_slice(&[proto::S_CLIPBOARD, flags]);
-                        m.extend_from_slice(now.text.as_bytes());
-                        let _ = out_tx.send(m);
+                    if send_text {
+                        let now = text.borrow_and_update().clone();
+                        if now.by != Some(link.id) && !now.text.is_empty() {
+                            let flags = if now.changed && !first { proto::CLIPBOARD_CHANGED } else { 0 };
+                            let mut m = Vec::with_capacity(2 + now.text.len());
+                            m.extend_from_slice(&[proto::S_CLIPBOARD, flags]);
+                            m.extend_from_slice(now.text.as_bytes());
+                            let _ = out_tx.send(m);
+                        }
+                        first = false;
                     }
-                    first = false;
+                    if send_files {
+                        let list = files.borrow_and_update().clone();
+                        let listing = tokio::task::block_in_place(|| crate::files::listing(&list));
+                        let _ = out_tx.send(proto::text(proto::S_CLIPBOARD_FILES, &listing.to_string()));
+                    }
+                    (send_text, send_files) = (false, false);
                     tokio::select! {
                         changed = text.changed() => {
                             if changed.is_err() {
                                 return;
                             }
+                            send_text = true;
+                        }
+                        changed = files.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            send_files = true;
                         }
                         _ = switched.changed() => break,
                     }

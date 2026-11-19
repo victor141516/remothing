@@ -22,7 +22,7 @@ import {
   C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
   FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
-  S_PASTED, S_SIGNAL, VIEW_HDR, now,
+  S_CLIPBOARD_FILES, S_PASTED, S_SIGNAL, VIEW_HDR, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { WtPath, type WtOffer } from './wt';
@@ -91,7 +91,9 @@ export type FromWorker =
   /** The server closed the stream for good with this close code. */
   | { type: 'refused'; code: number }
   /** The server set the clipboard and pressed V (S_PASTED). */
-  | { type: 'pasted' };
+  | { type: 'pasted' }
+  /** The files on the remote clipboard, JSON (S_CLIPBOARD_FILES). */
+  | { type: 'clipfiles'; json: string };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -833,6 +835,9 @@ function connect(url: string): void {
       }
       case S_CURSOR:
         post({ type: 'cursor', buf }, [buf]);
+        break;
+      case S_CLIPBOARD_FILES:
+        post({ type: 'clipfiles', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
         break;
       case S_PASTED:
         post({ type: 'pasted' });

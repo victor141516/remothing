@@ -2,6 +2,7 @@
 //! core (tiles, policy, protocol, transport, admin) only talks to them.
 
 use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,14 @@ pub trait Platform: Send + Sync + 'static {
     /// Restarts the computer, after an installation that needs it.
     fn restart(&self) -> Result<()> {
         bail!("restarting is not supported on this platform")
+    }
+    /// The Downloads folder of the session's user, where files a client
+    /// sends are saved; created when it is missing.
+    fn downloads_dir(&self) -> Result<PathBuf>;
+    /// A file just saved in `downloads_dir` becomes the session user's
+    /// (the server may run as another user).
+    fn hand_over(&self, _path: &Path) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -170,15 +179,23 @@ pub struct OpenedDisplay {
     pub clipboard: Option<Arc<dyn Clipboard>>,
 }
 
-/// Receives the clipboard text: once what is there when watching starts
-/// (`false`; may be skipped when there is none), then each change (`true`).
-pub type ClipboardSink = Box<dyn Fn(String, bool) + Send + Sync>;
+/// What was copied: text, or files (their paths on this computer).
+#[derive(Debug)]
+pub enum Copied {
+    Text(String),
+    Files(Vec<PathBuf>),
+}
+
+/// Receives what is on the clipboard: once what is there when watching
+/// starts (`false`; may be skipped when there is nothing), then each change
+/// (`true`). Something else (an image) is not reported.
+pub type ClipboardSink = Box<dyn Fn(Copied, bool) + Send + Sync>;
 
 /// Text clipboard of the session a display belongs to.
 pub trait Clipboard: Send + Sync {
     fn set_text(&self, text: &str) -> Result<()>;
-    /// Reports the text on the clipboard now, then every time something
-    /// else puts text on it (called once).
+    /// Reports what is on the clipboard now, then every time something
+    /// else copies text or files (called once).
     fn watch(&self, on_change: ClipboardSink);
 }
 

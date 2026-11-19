@@ -9,6 +9,8 @@ export const S_CURSOR_POS = 13;
 export const CURSOR_FOLLOW = 1;
 /** The server set the clipboard of a C_PASTE and pressed V. */
 export const S_PASTED = 14;
+/** UTF-8 JSON: the files on the remote clipboard (see proto.rs). */
+export const S_CLIPBOARD_FILES = 15;
 export const S_PONG = 4;
 /** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
 export const S_SIGNAL = 5;

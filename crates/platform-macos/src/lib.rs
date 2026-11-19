@@ -19,11 +19,12 @@ mod sck;
 pub mod service;
 mod virtual_display;
 
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use objc2_core_foundation::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult};
 use remothing_core::encode::EncoderProvider;
 use remothing_core::platform::{
@@ -164,5 +165,13 @@ impl Platform for MacPlatform {
     fn open_microphone(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSink>, MicUnavailable> {
         tried.push("macOS has no virtual microphone without a third-party audio driver; not supported".into());
         Err(MicUnavailable::Failed)
+    }
+
+    /// The launch agent runs as the logged-in user: their home's Downloads.
+    fn downloads_dir(&self) -> Result<PathBuf> {
+        let home = std::env::var_os("HOME").context("HOME is not set")?;
+        let dir = PathBuf::from(home).join("Downloads");
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Ok(dir)
     }
 }

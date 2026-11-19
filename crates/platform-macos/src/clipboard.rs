@@ -1,15 +1,18 @@
-//! The general pasteboard. macOS has no change notification for it: its
-//! change count is polled, as every clipboard tool on the Mac does.
+//! The general pasteboard: text, and the files the Finder copies (read
+//! only). macOS has no change notification for it: its change count is
+//! polled, as every clipboard tool on the Mac does.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString};
 use objc2_foundation::NSString;
-use remothing_core::platform::{Clipboard, ClipboardSink};
+use remothing_core::files::file_uri_path;
+use remothing_core::platform::{Clipboard, ClipboardSink, Copied};
 
 const POLL: Duration = Duration::from_millis(250);
 
@@ -45,15 +48,14 @@ impl Clipboard for Pasteboard {
             // What is there now is the first report.
             let (mut seen, found) = autoreleasepool(|_| {
                 let pb = NSPasteboard::generalPasteboard();
-                // SAFETY: framework constant.
-                (pb.changeCount(), pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string()))
+                (pb.changeCount(), read(&pb))
             });
-            if let Some(text) = found {
-                on_change(text, false);
+            if let Some(copied) = found {
+                on_change(copied, false);
             }
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(POLL);
-                let text = autoreleasepool(|_| {
+                let copied = autoreleasepool(|_| {
                     let pb = NSPasteboard::generalPasteboard();
                     let count = pb.changeCount();
                     if count == seen {
@@ -63,11 +65,10 @@ impl Clipboard for Pasteboard {
                     if count == own.load(Ordering::Relaxed) {
                         return None;
                     }
-                    // SAFETY: framework constant.
-                    pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string())
+                    read(&pb)
                 });
-                if let Some(text) = text {
-                    on_change(text, true);
+                if let Some(copied) = copied {
+                    on_change(copied, true);
                 }
             }
         });
@@ -75,6 +76,22 @@ impl Clipboard for Pasteboard {
             eprintln!("clipboard: cannot watch the pasteboard: {e}");
         }
     }
+}
+
+/// Files (the Finder's copy: one file URL per item) when there are, else text.
+fn read(pb: &NSPasteboard) -> Option<Copied> {
+    // SAFETY: framework constants.
+    let (file_url, string) = unsafe { (NSPasteboardTypeFileURL, NSPasteboardTypeString) };
+    let files: Vec<PathBuf> = pb
+        .pasteboardItems()
+        .map(|items| {
+            items.iter().filter_map(|item| item.stringForType(file_url)).filter_map(|url| file_uri_path(&url.to_string())).collect()
+        })
+        .unwrap_or_default();
+    if !files.is_empty() {
+        return Some(Copied::Files(files));
+    }
+    pb.stringForType(string).map(|s| Copied::Text(s.to_string()))
 }
 
 impl Drop for Pasteboard {

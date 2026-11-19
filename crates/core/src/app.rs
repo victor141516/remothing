@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{bail, Context, Result};
 use axum::http::{HeaderName, HeaderValue};
-use axum::routing::get;
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::assets;
+use crate::{assets, files};
 use crate::audio::AudioHub;
 use crate::capture::{DisplayStream, Streams};
 use crate::config::{ConfigFile, Settings};
@@ -224,6 +225,9 @@ pub fn run(platform: Arc<dyn Platform>, config: ConfigFile, settings: Settings) 
     let stream_router = Router::new()
         .route("/ws", get(stream::stream_handler))
         .route("/input", get(stream::input_handler))
+        // A file is as large as it is.
+        .route("/files", post(files::upload).layer(DefaultBodyLimit::disable()))
+        .route("/files/clipboard", get(files::clipboard_file))
         .fallback(assets::stream_asset)
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("cross-origin-opener-policy"),

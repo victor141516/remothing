@@ -10,6 +10,7 @@ pub mod assets;
 pub mod capture;
 pub mod config;
 pub mod encode;
+pub mod files;
 pub mod geom;
 pub mod mic;
 pub mod pixels;

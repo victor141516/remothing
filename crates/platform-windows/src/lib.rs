@@ -9,6 +9,7 @@ mod audio;
 mod clipboard;
 mod cursor;
 mod desktop;
+mod downloads;
 mod dxgi;
 mod gpu_diff;
 mod hdr;
@@ -21,6 +22,7 @@ pub mod service;
 mod uipi;
 mod vdd;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -165,5 +167,9 @@ impl Platform for WindowsPlatform {
 
     fn restart(&self) -> Result<()> {
         microphone::restart()
+    }
+
+    fn downloads_dir(&self) -> Result<PathBuf> {
+        downloads::downloads_dir()
     }
 }

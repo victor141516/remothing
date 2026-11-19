@@ -89,12 +89,27 @@ export interface UiActions {
   toggleCapture(): void;
   /** The space left for the picture changed (the keyboard opened or closed). */
   layout(): void;
+  /** Downloads the file at `index` of the remote clipboard's list. */
+  download(index: number, name: string): void;
+}
+
+/** A file on the remote clipboard (S_CLIPBOARD_FILES). */
+export interface ClipboardFile {
+  name: string;
+  size: number;
+  folder: boolean;
+}
+
+export interface ClipboardFiles {
+  files: ClipboardFile[];
 }
 
 /** Typing pauses this long before the text goes to the remote clipboard. */
 const CLIPBOARD_SEND_MS = 300;
 /** How long the "Mouse captured" note stays. */
 const FLASH_MS = 2500;
+/** How long a note about a sent file stays. */
+const NOTE_MS = 5000;
 const MOD = navigator.platform.startsWith('Mac') ? 'Ctrl+Option+Shift+Z' : 'Ctrl+Alt+Shift+Z';
 
 type View = 'closed' | 'root' | 'displays' | 'clipboard' | 'ask' | 'stopped';
@@ -128,6 +143,9 @@ export class Ui {
   /** Answers the question on screen, if there is one. */
   private answer: ((yes: boolean) => void) | null = null;
   private clipboardTimer = 0;
+  /** Files on the remote clipboard. */
+  private files: ClipboardFile[] = [];
+  private readonly fileList = document.createElement('div');
   private flashTimer = 0;
   private locked = false;
   private keyboardLocked = false;
@@ -199,11 +217,17 @@ export class Ui {
       this.clipboardTimer = setTimeout(() => this.flushClipboard(), CLIPBOARD_SEND_MS);
       this.showClipTile();
     });
+    this.fileList.className = 'files';
+    this.fileList.hidden = true;
     const clipboardView = section('ui-clipboard');
     clipboardView.append(
       this.pageHead('Clipboard'),
+      this.fileList,
       this.clipboardBox,
-      paragraph('note', 'What is copied on the remote computer appears here. What you type or paste here is copied there.'),
+      paragraph(
+        'note',
+        'What is copied on the remote computer appears here. What you type or paste here is copied there. Files dropped on the page or pasted outside the picture go to Downloads there.',
+      ),
     );
 
     const askView = section('ui-ask');
@@ -344,6 +368,34 @@ export class Ui {
     this.page.update(message);
   }
 
+  /** Files copied on the remote computer (S_CLIPBOARD_FILES): each can be downloaded here. */
+  remoteFiles(message: ClipboardFiles): void {
+    this.files = message.files;
+    const rows = message.files.map((file, index) => {
+      const row = document.createElement('div');
+      row.className = 'file';
+      const name = span('name', file.name);
+      name.title = file.name;
+      const get = this.button(file.folder ? 'Folder' : 'Download', file.folder ? 'Folders cannot be downloaded' : '', () =>
+        this.actions.download(index, file.name),
+      );
+      get.disabled = file.folder;
+      row.append(name, span('size', file.folder ? '' : bytes(file.size)), get);
+      return row;
+    });
+    this.fileList.replaceChildren(...rows);
+    this.fileList.hidden = rows.length === 0;
+    this.showClipTile();
+  }
+
+  /** A line under the tab (over the bottom while the menu is open); `sticky`: until the next one. */
+  note(text: string, sticky: boolean): void {
+    this.flash.textContent = text;
+    this.flash.classList.add('show');
+    clearTimeout(this.flashTimer);
+    if (!sticky) this.flashTimer = setTimeout(() => this.flash.classList.remove('show'), NOTE_MS);
+  }
+
   // ---- views
 
   private get view(): View {
@@ -401,12 +453,13 @@ export class Ui {
     action();
   }
 
-  /** Focus out of the menu, back to the picture. A focused Type field keeps
-   * the phone's keyboard, so focus elsewhere is left alone. */
+  /** Keys back to the picture, unless a field outside the menu has them
+   * (a focused Type field keeps the phone's keyboard). */
   private toPicture(): void {
     const menu = document.getElementById('ui-menu');
-    if (!menu?.contains(document.activeElement)) return;
-    (document.activeElement as HTMLElement).blur();
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && !menu?.contains(active)) return;
+    if (active instanceof HTMLElement) active.blur();
     document.getElementById('screen')?.focus({ preventScroll: true });
   }
 
@@ -525,9 +578,11 @@ export class Ui {
   }
 
   private showClipTile(): void {
+    const files = this.files.length;
     // Never the text itself: it may be a password.
     const n = this.clipboardBox.value.length;
-    this.tiles.clip.set(null, '', n ? `${n} characters` : 'Empty');
+    const detail = files ? `${files} ${files === 1 ? 'file' : 'files'} to download` : n ? `${n} characters` : 'Empty';
+    this.tiles.clip.set(null, '', detail);
   }
 
   // ---- actions
@@ -597,4 +652,15 @@ function span(className: string, text: string): HTMLElement {
   s.className = className;
   s.textContent = text;
   return s;
+}
+
+function bytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do {
+    n /= 1024;
+    i++;
+  } while (n >= 1024 && i < units.length - 1);
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }

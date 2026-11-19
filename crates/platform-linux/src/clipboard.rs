@@ -1,9 +1,11 @@
-//! Text clipboard (the CLIPBOARD selection) of one X server.
+//! Clipboard (the CLIPBOARD selection) of one X server: text, and the
+//! files a file manager copies (`text/uri-list`, read only).
 //!
 //! X has no clipboard storage: the owner of the selection hands the data to
 //! whoever asks. So an unmapped window on its own connection does both
 //! sides: XFixes tells it when another client takes the selection, and it
-//! asks that owner for the text (UTF8_STRING, in INCR pieces when large);
+//! asks that owner what it offers (TARGETS), then for the file list or else
+//! the text (UTF8_STRING), in INCR pieces when large;
 //! when a client sets text it takes the selection itself and answers the
 //! requests of pasting applications.
 
@@ -11,7 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use remothing_core::platform::{Clipboard, ClipboardSink};
+use remothing_core::files::file_uri_path;
+use remothing_core::platform::{Clipboard, ClipboardSink, Copied};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEventMask};
 use x11rb::protocol::xproto::{
@@ -22,7 +25,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-/// Longest text accepted from another client (INCR transfers are cut here).
+/// Longest text (or file list) accepted from another client (INCR transfers are cut here).
 const MAX_TEXT: usize = 1 << 20;
 
 struct Atoms {
@@ -32,7 +35,9 @@ struct Atoms {
     text_plain_utf8: Atom,
     targets: Atom,
     incr: Atom,
-    /// Property on our window where owners deliver the text.
+    /// What file managers offer for copied files.
+    uri_list: Atom,
+    /// Property on our window where owners deliver what we ask for.
     transfer: Atom,
 }
 
@@ -79,6 +84,7 @@ impl X11Clipboard {
             targets: atom(b"TARGETS")?,
             incr: atom(b"INCR")?,
             transfer: atom(b"REMOTHING_CLIPBOARD")?,
+            uri_list: atom(b"text/uri-list")?,
         };
         conn.xfixes_query_version(5, 0)?.reply().context("XFixes unavailable")?;
         conn.xfixes_select_selection_input(window, atoms.clipboard, SelectionEventMask::SET_SELECTION_OWNER)?;
@@ -113,12 +119,10 @@ impl Clipboard for X11Clipboard {
         let inner = &self.inner;
         *inner.on_change.lock().unwrap() = Some(on_change);
         // What is on the clipboard now is the first report; with no owner
-        // the answer is a SelectionNotify without a property.
+        // the answers are SelectionNotify events without a property.
         inner.found.store(true, Ordering::Relaxed);
-        let a = &inner.atoms;
-        let asked = inner.conn.convert_selection(inner.window, a.clipboard, a.utf8_string, a.transfer, x11rb::CURRENT_TIME);
-        if asked.is_ok() {
-            let _ = inner.conn.flush();
+        if let Err(e) = inner.ask(inner.atoms.targets, x11rb::CURRENT_TIME) {
+            eprintln!("clipboard: {e:#}");
         }
     }
 }
@@ -136,8 +140,8 @@ impl Drop for X11Clipboard {
 
 impl Inner {
     fn run(&self) {
-        // Pieces of an INCR transfer in progress.
-        let mut incoming: Option<Vec<u8>> = None;
+        // An INCR transfer in progress: its target and the pieces so far.
+        let mut incoming: Option<(Atom, Vec<u8>)> = None;
         loop {
             let Ok(event) = self.conn.wait_for_event() else { return };
             if self.stop.load(Ordering::Acquire) {
@@ -149,38 +153,52 @@ impl Inner {
         }
     }
 
-    fn handle(&self, event: Event, incoming: &mut Option<Vec<u8>>) -> Result<()> {
+    /// Asks the owner of the selection for `target`, delivered into `transfer`.
+    fn ask(&self, target: Atom, time: u32) -> Result<()> {
+        self.conn.convert_selection(self.window, self.atoms.clipboard, target, self.atoms.transfer, time)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn handle(&self, event: Event, incoming: &mut Option<(Atom, Vec<u8>)>) -> Result<()> {
         let a = &self.atoms;
         match event {
-            // Another client copied something: ask it for the text.
+            // Another client copied something: ask it what it offers.
             Event::XfixesSelectionNotify(e) if e.owner != self.window && e.owner != x11rb::NONE => {
                 *self.text.lock().unwrap() = None;
-                self.conn.convert_selection(self.window, a.clipboard, a.utf8_string, a.transfer, e.selection_timestamp)?;
-                self.conn.flush()?;
+                self.ask(a.targets, e.selection_timestamp)?;
             }
-            // Its answer (property NONE: it has no text to offer).
+            // Its answer.
             Event::SelectionNotify(e) if e.property == a.transfer => {
                 let reply = self.conn.get_property(false, self.window, a.transfer, AtomEnum::ANY, 0, u32::MAX)?.reply()?;
                 // Deleting the property also tells an INCR owner to send the first piece.
                 self.conn.delete_property(self.window, a.transfer)?;
                 self.conn.flush()?;
                 if reply.type_ == a.incr {
-                    *incoming = Some(Vec::new());
+                    *incoming = Some((e.target, Vec::new()));
+                } else if e.target == a.targets {
+                    // Files (a file manager's copy) when offered, else text.
+                    let offered = reply.value32().map(|atoms| atoms.collect::<Vec<_>>()).unwrap_or_default();
+                    self.ask(if offered.contains(&a.uri_list) { a.uri_list } else { a.utf8_string }, e.time)?;
                 } else {
-                    self.changed(reply.value);
+                    self.received(e.target, reply.value, e.time)?;
                 }
             }
-            // No text, or no owner: then the first report is that nothing is there.
+            // An owner too old to list its targets may still give text.
+            Event::SelectionNotify(e) if e.target == a.targets => self.ask(a.utf8_string, e.time)?,
+            // Nothing to give, or no owner: then the first report is that nothing is there.
             Event::SelectionNotify(_) => self.found.store(false, Ordering::Relaxed),
             Event::PropertyNotify(e) if e.atom == a.transfer && e.state == Property::NEW_VALUE => {
-                let Some(text) = incoming else { return Ok(()) };
+                let Some((target, data)) = incoming else { return Ok(()) };
                 let piece = self.conn.get_property(true, self.window, a.transfer, AtomEnum::ANY, 0, u32::MAX)?.reply()?.value;
                 self.conn.flush()?;
                 if piece.is_empty() {
                     // An empty piece ends the transfer.
-                    self.changed(incoming.take().unwrap_or_default());
-                } else if text.len() + piece.len() <= MAX_TEXT {
-                    text.extend_from_slice(&piece);
+                    let target = *target;
+                    let data = incoming.take().map(|(_, data)| data).unwrap_or_default();
+                    self.received(target, data, e.time)?;
+                } else if data.len() + piece.len() <= MAX_TEXT {
+                    data.extend_from_slice(&piece);
                 }
             }
             Event::SelectionRequest(e) => self.answer(e)?,
@@ -190,11 +208,27 @@ impl Inner {
         Ok(())
     }
 
-    fn changed(&self, text: Vec<u8>) {
+    /// The owner's text, or its `text/uri-list`: one URI a line, `#` lines
+    /// are comments. A list without local files is asked for as text.
+    fn received(&self, target: Atom, data: Vec<u8>, time: u32) -> Result<()> {
+        let copied = if target == self.atoms.uri_list {
+            let files: Vec<_> = String::from_utf8_lossy(&data)
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .filter_map(file_uri_path)
+                .collect();
+            if files.is_empty() {
+                return self.ask(self.atoms.utf8_string, time);
+            }
+            Copied::Files(files)
+        } else {
+            Copied::Text(String::from_utf8_lossy(&data).into_owned())
+        };
         let changed = !self.found.swap(false, Ordering::Relaxed);
         if let Some(on_change) = self.on_change.lock().unwrap().as_ref() {
-            on_change(String::from_utf8_lossy(&text).into_owned(), changed);
+            on_change(copied, changed);
         }
+        Ok(())
     }
 
     /// An application pastes (or asks what we offer) while we own the selection.

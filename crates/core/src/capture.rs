@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use tokio::sync::watch;
 
 use crate::geom::{MovedRect, Rect};
 use crate::pixels::Differ;
-use crate::platform::{CaptureSession, Clipboard, DisplayInfo, InputProvider, OpenedDisplay, Platform, ThreadRole};
+use crate::platform::{CaptureSession, Clipboard, Copied, DisplayInfo, InputProvider, OpenedDisplay, Platform, ThreadRole};
 use crate::proto;
 use crate::shared::Shared;
 use crate::telemetry::Telemetry;
@@ -56,6 +57,7 @@ pub struct DisplayControl {
     input: RwLock<Option<Arc<dyn InputProvider>>>,
     clipboard: RwLock<Option<Arc<dyn Clipboard>>>,
     clipboard_text: watch::Sender<ClipboardText>,
+    clipboard_files: watch::Sender<Arc<[PathBuf]>>,
 }
 
 impl Default for DisplayControl {
@@ -66,6 +68,7 @@ impl Default for DisplayControl {
             input: RwLock::default(),
             clipboard: RwLock::default(),
             clipboard_text: watch::channel(ClipboardText::default()).0,
+            clipboard_files: watch::channel(Arc::from(Vec::new())).0,
         }
     }
 }
@@ -95,8 +98,42 @@ impl DisplayControl {
         }
         let clipboard = self.clipboard.read().unwrap().clone().context("no clipboard access on this display")?;
         clipboard.set_text(text)?;
+        // Text replaced whatever files were copied.
+        self.clear_files();
         self.clipboard_changed(Some(client), text, true);
         Ok(())
+    }
+
+    fn clear_files(&self) {
+        self.clipboard_files.send_if_modified(|files| {
+            let modified = !files.is_empty();
+            *files = Arc::from(Vec::new());
+            modified
+        });
+    }
+
+    /// Files on the session's clipboard (empty: none), followed across changes.
+    pub fn clipboard_files(&self) -> watch::Receiver<Arc<[PathBuf]>> {
+        self.clipboard_files.subscribe()
+    }
+
+    /// What the platform reports as copied.
+    fn copied(&self, copied: Copied, changed: bool) {
+        match copied {
+            Copied::Text(text) => {
+                self.clear_files();
+                self.clipboard_changed(None, &text, changed);
+            }
+            Copied::Files(list) => {
+                self.clipboard_files.send_if_modified(|files| {
+                    let modified = **files != *list;
+                    if modified {
+                        *files = list.into();
+                    }
+                    modified
+                });
+            }
+        }
     }
 
     /// Publishes the text unless it is what was last seen (the session
@@ -400,7 +437,7 @@ impl CaptureLoop {
         self.streams.refresh_shown();
         if let Some(c) = &clipboard {
             let control = self.stream.control.clone();
-            c.watch(Box::new(move |text, changed| control.clipboard_changed(None, &text, changed)));
+            c.watch(Box::new(move |copied, changed| control.copied(copied, changed)));
         }
         // The previous display's clipboard (and its watcher) ends here.
         *self.stream.control.clipboard.write().unwrap() = clipboard;

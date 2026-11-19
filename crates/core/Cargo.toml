@@ -16,7 +16,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rust-embed = { version = "8", features = ["mime-guess"] }
 sha2 = "0.10"
 sysinfo = { version = "0.35", default-features = false, features = ["system"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "fs", "io-util"] }
 toml = "0.8"
 tower-http = { version = "0.6", features = ["set-header"] }
 # WebRTC (data channels over UDP); pure-Rust crypto keeps the Windows build static.

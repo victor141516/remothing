@@ -134,8 +134,11 @@ export class Input {
     const body = document.body;
     body.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'touch' || (e.target !== canvas && e.target !== body)) return;
-      // No focus change (a phone's keyboard would close) and no mouse events made up from the touch.
+      // No focus change (a phone's keyboard would close) and no mouse events
+      // made up from the touch; a keyboard attached to the device types into
+      // the picture unless a field has the focus.
       e.preventDefault();
+      if (document.activeElement === body) canvas.focus({ preventScroll: true });
       this.touchDown(e);
     });
     body.addEventListener(moveEvent, (e) => this.touchMove(e as PointerEvent));
@@ -146,6 +149,17 @@ export class Input {
     window.addEventListener('keydown', (e) => this.onKey(e, true));
     window.addEventListener('keyup', (e) => this.onKey(e, false));
     window.addEventListener('blur', () => this.releaseAll());
+    canvas.addEventListener('blur', () => this.releaseAll());
+    // A click anywhere but the picture (the menu, the area around it) takes
+    // the keyboard away from it. A touch around the picture is the trackpad.
+    window.addEventListener(
+      'pointerdown',
+      (e) => {
+        const trackpad = e.pointerType === 'touch' && e.target === body;
+        if (e.target !== canvas && !trackpad && document.activeElement === canvas) canvas.blur();
+      },
+      true,
+    );
   }
 
   /** The remote screen, as a HELLO describes it. */
@@ -383,9 +397,10 @@ export class Input {
       if (down && !e.repeat) this.setCapture(!this.capture);
       return;
     }
-    // Text typed into the menu's fields is theirs.
-    const t = e.target;
-    if (t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t instanceof HTMLInputElement) return;
+    // Keys belong to the remote side only while the picture has the focus;
+    // elsewhere (the menu's fields, the page after a click outside the
+    // picture) they do what they do in any page, pasting included.
+    if (e.target !== this.canvas) return;
     const code = EVDEV[e.code];
     if (code === undefined) return;
     e.preventDefault();

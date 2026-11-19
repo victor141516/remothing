@@ -8,6 +8,7 @@
 mod audio;
 mod clipboard;
 mod cursor;
+mod downloads;
 mod input;
 mod microphone;
 mod monitor;
@@ -16,6 +17,7 @@ mod xfb;
 mod xvfb;
 mod xvfb_session;
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -184,5 +186,13 @@ impl Platform for LinuxPlatform {
 
     fn open_microphone(&self, tried: &mut Vec<String>) -> Result<Box<dyn AudioSink>, MicUnavailable> {
         microphone::open(&self.sound, tried)
+    }
+
+    fn downloads_dir(&self) -> Result<PathBuf> {
+        downloads::downloads_dir()
+    }
+
+    fn hand_over(&self, path: &Path) -> Result<()> {
+        downloads::hand_over(path)
     }
 }

@@ -9,8 +9,9 @@ import { Microphone } from './mic';
 import { Peer } from './peer';
 import { InputProber } from './probe';
 import { C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
+import { Uploads } from './files';
 import { Stats } from './stats';
-import { Ui, type DisplaysMessage } from './ui';
+import { Ui, type ClipboardFiles, type DisplaysMessage } from './ui';
 import type { FromWorker, Path, ToWorker } from './worker';
 
 declare global {
@@ -54,7 +55,8 @@ const params = new URLSearchParams(location.search);
 const benchSeconds = Number(params.get('bench') ?? 0);
 const probeEnabled = benchSeconds > 0 || params.has('probe');
 // Relative to the page, so the client also works behind a reverse proxy under a path prefix.
-const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${new URL('.', location.href).pathname}`;
+const pageDir = new URL('.', location.href).pathname;
+const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${pageDir}`;
 // Stream access token, given in the page URL (`?token=`), and this page's
 // key on both sockets: its input goes to the display its stream shows.
 const sessionKey = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -140,7 +142,16 @@ const ui = new Ui(document.getElementById('ui') as HTMLDivElement, {
   toggleMic: () => void mic.toggle(),
   toggleCapture: () => input.setCapture(!input.capture),
   layout,
+  download: (index, name) => {
+    // The browser saves it and shows its progress, as any download.
+    const link = document.createElement('a');
+    link.href = `${pageDir}files/clipboard${auth}&index=${index}&name=${encodeURIComponent(name)}`;
+    link.download = name;
+    link.click();
+  },
 });
+
+new Uploads(`${pageDir}files${auth}`, (text, sticky) => ui.note(text, sticky));
 
 const sound = new Sound({
   request: (on) => toWorker({ type: 'audio', on }),
@@ -380,6 +391,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case 'micinfo':
       mic.info(m.json);
+      break;
+    case 'clipfiles':
+      ui.remoteFiles(JSON.parse(m.json) as ClipboardFiles);
       break;
     case 'pasted':
       input.pasted();

@@ -122,6 +122,20 @@ and then they are remothing's own. Restart the server after granting them.
   remote side is copied on this computer too (HTTPS or localhost, in the
   window being used); what the remote clipboard held before the page
   opened is not.
+- Keys go to the remote side while the picture has the keyboard: a click
+  on it gives it, a click anywhere else (the menu, the area around the
+  picture) takes it away, and closing the menu gives it back.
+- Files: a file dragged onto the page (a frame shows where it can be
+  dropped), or pasted where the picture does not have the keyboard (after
+  a click on the menu, say), is saved in the Downloads folder of the remote
+  session's user, under a name of its own when one is taken; a note at
+  the top says how far it got and where it went. Windows: the logged-in
+  user's Downloads, also when the server runs as the service. Linux: the
+  folder `~/.config/user-dirs.dirs` names, else `~/Downloads`, created when
+  missing; when the server runs as root (the images) the home is that of
+  the desktop's user, who gets the file. Folders are not sent. The other
+  way, files copied on the remote side (Explorer, Finder, a Linux file
+  manager) are listed in `Clipboard ›`, each with `Download`.
 - Several displays at once: each window streams its own display. The
   `Display ›` page in the menu changes only that window, and the
   address carries it (`&display=ID`): a reload, or the address opened in

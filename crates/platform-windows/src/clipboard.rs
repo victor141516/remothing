@@ -1,4 +1,5 @@
-//! Text clipboard of the interactive window station.
+//! Clipboard of the interactive window station: text, and the files
+//! Explorer copies (CF_HDROP, read only).
 //!
 //! A message-only window on its own thread listens for clipboard updates
 //! (WM_CLIPBOARDUPDATE) and is the owner when text is set: SetClipboardData
@@ -9,13 +10,14 @@
 //! UTF-16 with CRLF line ends on the Windows side and as UTF-8 with LF on
 //! ours.
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use remothing_core::platform::{Clipboard, ClipboardSink};
+use remothing_core::platform::{Clipboard, ClipboardSink, Copied};
 use windows::core::w;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::{
@@ -23,12 +25,14 @@ use windows::Win32::System::DataExchange::{
     RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, PostMessageW, SetTimer, HWND_MESSAGE,
     MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLIPBOARDUPDATE, WM_TIMER,
 };
 
 const CF_UNICODETEXT: u32 = 13;
+const CF_HDROP: u32 = 15;
 /// Text waits in `Shared::pending`.
 const WM_SET_TEXT: u32 = WM_APP;
 const WM_STOP: u32 = WM_APP + 1;
@@ -152,8 +156,8 @@ fn listen(hwnd: HWND, shared: &Shared) {
                 let _ = unsafe { KillTimer(Some(hwnd), READ_TIMER) };
                 let changed = !shared.found.swap(false, Ordering::Relaxed);
                 // Our own text comes back here too; the core ignores what it already has.
-                if let (Some(text), Some(on_change)) = (read_text(hwnd), shared.on_change.lock().unwrap().as_ref()) {
-                    on_change(text, changed);
+                if let (Some(copied), Some(on_change)) = (read(hwnd), shared.on_change.lock().unwrap().as_ref()) {
+                    on_change(copied, changed);
                 }
             }
             WM_SET_TEXT => {
@@ -189,28 +193,42 @@ fn open(hwnd: HWND) -> Result<()> {
     }
 }
 
-/// None when the clipboard holds no text (images, files) or cannot be opened.
-fn read_text(hwnd: HWND) -> Option<String> {
+/// Files (Explorer's copy) when there are, else text; None for anything
+/// else (images) or when the clipboard cannot be opened.
+fn read(hwnd: HWND) -> Option<Copied> {
     open(hwnd).ok()?;
-    // SAFETY: the clipboard is open; the handle stays valid until it is
-    // closed, and its memory is read within its size while locked.
-    let text = unsafe {
-        GetClipboardData(CF_UNICODETEXT).ok().and_then(|data| {
-            let memory = HGLOBAL(data.0);
-            let chars = GlobalLock(memory) as *const u16;
-            if chars.is_null() {
-                return None;
-            }
-            let wide = std::slice::from_raw_parts(chars, GlobalSize(memory) / 2);
-            let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-            let text = String::from_utf16_lossy(&wide[..end]).replace("\r\n", "\n");
-            let _ = GlobalUnlock(memory);
-            Some(text)
-        })
+    // SAFETY: the clipboard is open; its handles stay valid until it is
+    // closed, and their memory is read within its size while locked.
+    let copied = unsafe {
+        let files = GetClipboardData(CF_HDROP).ok().map(|data| {
+            let drop = HDROP(data.0);
+            (0..DragQueryFileW(drop, u32::MAX, None))
+                .filter_map(|i| {
+                    let mut name = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
+                    let len = DragQueryFileW(drop, i, Some(&mut name)) as usize;
+                    (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&name[..len])))
+                })
+                .collect::<Vec<_>>()
+        });
+        match files {
+            Some(files) if !files.is_empty() => Some(Copied::Files(files)),
+            _ => GetClipboardData(CF_UNICODETEXT).ok().and_then(|data| {
+                let memory = HGLOBAL(data.0);
+                let chars = GlobalLock(memory) as *const u16;
+                if chars.is_null() {
+                    return None;
+                }
+                let wide = std::slice::from_raw_parts(chars, GlobalSize(memory) / 2);
+                let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+                let text = String::from_utf16_lossy(&wide[..end]).replace("\r\n", "\n");
+                let _ = GlobalUnlock(memory);
+                Some(Copied::Text(text))
+            }),
+        }
     };
     // SAFETY: opened above.
     let _ = unsafe { CloseClipboard() };
-    text
+    copied
 }
 
 /// `text`: UTF-16, NUL-terminated.

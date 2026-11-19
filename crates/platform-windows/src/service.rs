@@ -389,7 +389,7 @@ fn sas_policy() -> Option<u32> {
     .map(|()| value)
 }
 
-fn is_local_system() -> Result<bool> {
+pub(crate) fn is_local_system() -> Result<bool> {
     let mut token = HANDLE::default();
     // SAFETY: pseudo handle of the current process; output handle owned below.
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.context("open process token")?;

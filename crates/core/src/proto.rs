@@ -86,6 +86,11 @@ pub const S_CURSOR_POS: u8 = 13;
 pub const CURSOR_FOLLOW: u8 = 1;
 /// Empty: the C_PASTE of this client is done (its V pressed, or failed).
 pub const S_PASTED: u8 = 14;
+/// UTF-8 JSON, the files on the session's clipboard, on connect, after a
+/// display switch and on every change: `{"files":[{"name","size","folder"}]}`
+/// (empty: none). The page downloads one with `GET /files/clipboard`
+/// (`files.rs`).
+pub const S_CLIPBOARD_FILES: u8 = 15;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
