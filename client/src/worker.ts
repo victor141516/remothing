@@ -147,6 +147,17 @@ let offset = 0;
 const syncSamples: { rtt: number; offset: number }[] = [];
 let lastTs = -1;
 let lastMarker = -1;
+/** Pictures drawn since the last display refresh, and when the last was drawn. */
+let drawsSinceRefresh = 0;
+let lastDraw = -Infinity;
+/** Gaps longer than this between draws are pauses, not the frame rate. */
+const GAP_MAX_MS = 100;
+
+function onRefresh(): void {
+  rec.refresh(drawsSinceRefresh);
+  drawsSinceRefresh = 0;
+  self.requestAnimationFrame(onRefresh);
+}
 
 /** Frames left on a data channel abandoned by choice (the WebSocket got
  * shorter) are given up after this long: those still on their way arrive
@@ -771,6 +782,10 @@ function apply(f: Frame): void {
   // `drawn` then marks GPU completion rather than command submission.
   const code = barcode?.read();
   const drawn = now();
+  drawsSinceRefresh++;
+  // Only between pictures that keep coming (a still screen sends none).
+  if (drawn - lastDraw < GAP_MAX_MS) rec.push('gap', drawn - lastDraw);
+  lastDraw = drawn;
 
   // The server leaves this frame's time here out of its network model.
   sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired);
@@ -943,6 +958,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'init':
       renderer = new Renderer(m.canvas, m.hdr);
       if (!renderer.showsBt601()) bt601Wrong('WebGL ignores the colour space of video frames');
+      // Display refreshes as this worker sees them (Chromium has animation
+      // frames in workers; elsewhere the rates stay at 0).
+      if (typeof self.requestAnimationFrame === 'function') self.requestAnimationFrame(onRefresh);
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
       wtAllowed = m.wt;

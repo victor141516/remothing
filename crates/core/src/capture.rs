@@ -171,6 +171,33 @@ pub struct DisplayStream {
     watchers: AtomicUsize,
     /// The display went away: its clients move to the default display.
     gone: AtomicBool,
+    /// Captures that brought changes, for `capture_fps`.
+    captures: Mutex<Rate>,
+}
+
+/// Events a second, over windows of about a second.
+#[derive(Default)]
+struct Rate {
+    start_us: u64,
+    count: u64,
+    per_sec: f64,
+}
+
+impl Rate {
+    fn note(&mut self, now: u64) {
+        self.roll(now);
+        self.count += 1;
+    }
+
+    fn roll(&mut self, now: u64) {
+        let elapsed = now.saturating_sub(self.start_us);
+        if elapsed >= 1_000_000 {
+            // The first window starts at the first event.
+            self.per_sec = if self.start_us == 0 { 0.0 } else { self.count as f64 * 1e6 / elapsed as f64 };
+            self.start_us = now;
+            self.count = 0;
+        }
+    }
 }
 
 impl DisplayStream {
@@ -180,6 +207,13 @@ impl DisplayStream {
 
     pub fn watchers(&self) -> usize {
         self.watchers.load(Ordering::Acquire)
+    }
+
+    /// Captures with changes a second, over the last second or so (admin status).
+    pub fn capture_fps(&self) -> f64 {
+        let mut c = self.captures.lock().unwrap();
+        c.roll(proto::now_us());
+        c.per_sec
     }
 
     fn set_gone(&self) {
@@ -234,6 +268,7 @@ impl Streams {
             control: Arc::new(DisplayControl::default()),
             watchers: AtomicUsize::new(1),
             gone: AtomicBool::new(false),
+            captures: Mutex::default(),
         });
         stream.shared.set_follow(!self.capturing.lock().unwrap().is_empty());
         map.insert(id.to_string(), stream.clone());
@@ -505,6 +540,7 @@ impl CaptureLoop {
             let tiles = diff.mark_rects(&rects, hints.as_ref().map_or(&[][..], |h| &h.skip));
             read_and_diff(&mut capture, &mut diff, &tiles, &frame.moved, true)?;
             self.stream.shared.commit(&diff, frame.capture_us, false);
+            self.stream.captures.lock().unwrap().note(proto::now_us());
         }
         Ok(())
     }

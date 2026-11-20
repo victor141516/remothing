@@ -887,8 +887,13 @@ video in the wrong colours).
 
 Separate listener (`server.admin_listen`, default `127.0.0.1:8081`):
 token/password login (cookie session or `Authorization: Bearer`), status
-(platform, provider, encoders and fallback reasons, GPUs, CPU, clients with
-fps/Mbit/s and client-reported latencies, recent errors, and per-client
+(platform, provider, encoders and fallback reasons, GPUs, CPU, each
+streamed display's capture rate (`capture_fps`: captures that brought
+changes, the most any client could get), clients with fps/Mbit/s sent and
+what the client reports each second: latencies, the gap between its draws,
+and pictures drawn, display refreshes, refreshes that showed a new picture
+and pictures replaced before a refresh showed them, from animation frames
+in the stream worker), recent errors, and per-client
 events: path switches, estimate cuts, video cap changes, lost frames,
 keyframe requests, and the stutters the client saw — frames drawn more than
 200 ms after their change, with the split of the worst one: on the server

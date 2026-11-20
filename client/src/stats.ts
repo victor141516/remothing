@@ -22,6 +22,7 @@ export const SERIES = [
   'client', // received -> drawn
   'total', // oldest capture -> drawn
   'appToDraw', // app draw (barcode) -> drawn
+  'gap', // previous draw -> this draw, while pictures keep coming
 ] as const;
 export type SeriesName = (typeof SERIES)[number];
 
@@ -30,12 +31,18 @@ export interface Batch {
   frames: number;
   videoFrames: number;
   bytes: number;
+  /** Display refreshes seen by the stream worker, those that showed a new
+   * picture, and pictures drawn but replaced before a refresh showed them. */
+  refreshes: number;
+  shown: number;
+  superseded: number;
 }
 
 const emptySamples = () => Object.fromEntries(SERIES.map((s) => [s, []])) as unknown as Record<SeriesName, number[]>;
+const emptyBatch = (): Batch => ({ samples: emptySamples(), frames: 0, videoFrames: 0, bytes: 0, refreshes: 0, shown: 0, superseded: 0 });
 
 export class Recorder {
-  private batch: Batch = { samples: emptySamples(), frames: 0, videoFrames: 0, bytes: 0 };
+  private batch: Batch = emptyBatch();
 
   push(name: SeriesName, v: number): void {
     this.batch.samples[name].push(v);
@@ -47,9 +54,16 @@ export class Recorder {
     if (video) this.batch.videoFrames++;
   }
 
+  /** A display refresh that came after `draws` draws (0: nothing new shown). */
+  refresh(draws: number): void {
+    this.batch.refreshes++;
+    if (draws > 0) this.batch.shown++;
+    this.batch.superseded += Math.max(0, draws - 1);
+  }
+
   take(): Batch {
     const b = this.batch;
-    this.batch = { samples: emptySamples(), frames: 0, videoFrames: 0, bytes: 0 };
+    this.batch = emptyBatch();
     return b;
   }
 }
@@ -87,6 +101,8 @@ export class Stats {
   private since = performance.now();
   // Rate over the last overlay refresh.
   private recent = { frames: 0, videoFrames: 0, bytes: 0, since: performance.now() };
+  // Rates since the last `brief`.
+  private rates = { frames: 0, refreshes: 0, shown: 0, superseded: 0, since: performance.now() };
 
   add(b: Batch): void {
     for (const name of SERIES) for (const v of b.samples[name]) this.series[name].push(v);
@@ -96,6 +112,10 @@ export class Stats {
     this.recent.frames += b.frames;
     this.recent.videoFrames += b.videoFrames;
     this.recent.bytes += b.bytes;
+    this.rates.frames += b.frames;
+    this.rates.refreshes += b.refreshes;
+    this.rates.shown += b.shown;
+    this.rates.superseded += b.superseded;
   }
 
   reset(): void {
@@ -117,13 +137,17 @@ export class Stats {
     };
   }
 
-  /** Recent p50/p99 (ms) of the main latencies, reported to the server for the admin UI. */
-  brief(): Record<string, [number, number] | null> {
+  /** Recent p50/p99 (ms) of the main latencies, and frame rates since the
+   * last call, reported to the server every second for the admin status. */
+  brief(): Record<string, [number, number] | number | null> {
     const pair = (s: Series): [number, number] | null => {
       const x = s.summary(OVERLAY_WINDOW);
       return x.n ? [+x.p50.toFixed(2), +x.p99.toFixed(2)] : null;
     };
-    return {
+    const r = this.rates;
+    const secs = (performance.now() - r.since) / 1000;
+    const rate = (n: number) => +(n / secs).toFixed(1);
+    const out = {
       captureToDraw: pair(this.series.total),
       appToDraw: pair(this.series.appToDraw),
       inputRtt: pair(this.inputRtt),
@@ -132,7 +156,16 @@ export class Stats {
       network: pair(this.series.net),
       client: pair(this.series.client),
       decode: pair(this.series.decode),
+      drawGap: pair(this.series.gap),
+      // Pictures drawn, display refreshes, refreshes that showed a new
+      // picture, pictures replaced before any refresh showed them; a second.
+      drawnFps: rate(r.frames),
+      refreshFps: rate(r.refreshes),
+      shownFps: rate(r.shown),
+      supersededFps: rate(r.superseded),
     };
+    this.rates = { frames: 0, refreshes: 0, shown: 0, superseded: 0, since: performance.now() };
+    return out;
   }
 
   text(): string {

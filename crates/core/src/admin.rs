@@ -111,6 +111,8 @@ async fn status(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
             "clients": s.watchers(),
             "motion": s.shared.motion(),
             "hdr_max": s.shared.hdr_max(),
+            // New pictures the capture delivers: what any client could get at most.
+            "capture_fps": (s.capture_fps() * 10.0).round() / 10.0,
         })).collect::<Vec<_>>(),
         "scheduling": app.streaming.lock().unwrap().notes,
         "encoders": p.encoders().backends(),
