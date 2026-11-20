@@ -258,19 +258,23 @@ pixels that is thrown away a moment later.
   thread ran at 60 Hz while its worker ran at 120, and the rate measured
   once on the page held that phone to 60 frames a second and half a 60 Hz
   slot of wait (capture→draw 27–33 ms, 15–16 at 120). Browsers without
-  animation frames in workers measure on the page, every 5 s. In motion
-  mode the encoder encodes the largest of that size, the display's, and
-  ¾, ⅔ and ½ of the display that fits the video cap at 0.1 bit per pixel
-  and refresh (`video_size`, a first guess); never below the client's
-  size. Every change is a new encoder and a keyframe, so a larger size
-  waits until the link has had room for 10 s (0.5 s while slow start is
-  still raising the estimate), a smaller one comes at once, and leaving
-  the mode goes straight back to the display's size (tiles need it). The
-  client samples the smaller picture to the screen (bilinear). Scaling:
-  Windows' D3D11 input keeps a full-size copy of the changed regions that
-  the GPU video processor scales into the encoder texture before each
-  frame; the system-memory and CUDA inputs scale on the CPU (swscale,
-  fast bilinear), the CUDA one then uploads the whole scaled picture.
+  animation frames in workers measure on the page, every 5 s. In every
+  mode, not only this one, video is encoded at the size the client shows
+  the display at (`video_size`), never larger than the display: more
+  pixels than it shows cost encoding, link and above all its decoder, for
+  nothing it can show (a phone showing a 3840x2160 display at 1927x1084
+  took 11–13 ms to decode each AV1 frame of it, 5–7 ms at its own size).
+  The bitrate still follows the link through the video cap. Every size
+  change is a new encoder and a keyframe; the view only changes once the
+  window has settled. Tiles stay at the display's size, so a client
+  composes smaller video under exact tiles: it samples the video by
+  position (bilinear). Scaling: Windows' D3D11 input keeps a full-size copy
+  of the changed regions that the GPU video processor scales into the
+  encoder texture before each frame (at 3840x2160 to half, encoding got
+  cheaper: AV1 2.4 → 1.4 ms, H.264 5.3 → 2.0); the system-memory and CUDA
+  inputs scale on the CPU (swscale, fast bilinear, in up to 8 slice
+  threads: one thread took 23 ms a frame at 3840x2160, 8 take 10), the
+  CUDA one then uploads the whole scaled picture.
 - **Frame rate per client**: frames go at most once per client refresh,
   whatever they carry (new changes, refinement, layer switches) and in
   every mode (more than the screen shows are replaced before it shows

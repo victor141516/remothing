@@ -67,16 +67,6 @@ const CAP_DEADBAND: (f64, f64) = (0.67, 1.5);
 const CAP_COLLAPSE: f64 = 0.33;
 const CAP_JUMP: f64 = 2.5;
 const CAP_JUMP_HOLD_US: u64 = 500_000;
-/// In motion mode the picture is encoded smaller for a client that shows it
-/// smaller (see `video_size`). Every size change is a new encoder and a
-/// keyframe: larger only after the link has had room this long.
-const SIZE_UP_US: u64 = 10_000_000;
-/// Bits per pixel and frame a size is planned with: decent H.264 of moving
-/// content; a size is afforded when it fits the video cap at the client's
-/// refresh rate (60 when unknown). A first guess, to be tuned.
-const BITS_PER_PIXEL: f64 = 0.1;
-/// Sizes between the client's and the display's, as fractions of the display.
-const SIZE_STEPS: [f64; 4] = [1.0, 0.75, 2.0 / 3.0, 0.5];
 /// During slow start the cap is this many times the video share: frame
 /// pacing keeps the bytes within the share (fewer, better pictures), and
 /// video that fills it is what lets the estimate grow; capped at the share
@@ -1028,7 +1018,6 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     // one still cannot convert, it is not replaced again and again).
     let mut bt709_done = false;
     let mut two_pass_retry_us = 0;
-    let mut room_since = 0;
     // Estimate on the WebSocket path when frames moved to the data channel
     // (0: not there, or already found slower).
     let mut ws_rate = 0.0;
@@ -1162,25 +1151,11 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         // Frames the client cannot show are not built.
         codec.min_frame_us = if view.hz > 0 { 1_000_000 / view.hz as u64 } else { 0 };
         if codec.encoder.is_some() && size != (0, 0) {
-            let in_motion = shared.motion();
-            let want = if in_motion { video_size(size, view, video_cap.bps) } else { size };
-            let area = |(w, h): (u32, u32)| w as u64 * h as u64;
-            let now = proto::now_us();
-            // Larger only once the link has had room for a while (shortly
-            // while slow start is still raising the estimate: it begins low
-            // for every new client); smaller at once, and the full size as
-            // soon as tiles need it again.
-            if in_motion && area(want) > area(encoded) {
-                room_since = if room_since == 0 { now } else { room_since };
-            } else {
-                room_since = 0;
-            }
-            let hold = if model.proven { SIZE_UP_US } else { CAP_JUMP_HOLD_US };
-            if want != encoded && (!in_motion || area(want) < area(encoded) || now - room_since >= hold) {
+            let want = video_size(size, view);
+            if want != encoded {
                 let text = format!("video {}x{} -> {}x{}", encoded.0, encoded.1, want.0, want.1);
                 app.telemetry.event(link.id, &text);
                 encoded = want;
-                room_since = 0;
                 pending = None;
                 let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
                 create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
@@ -1271,18 +1246,18 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     }
 }
 
-/// Encoded size in motion mode: the largest of the client's own size, the
-/// display's, and the steps between them that the video cap affords at the
-/// client's refresh rate; never below the client's. Even (4:2:0 video).
-fn video_size(display: (u32, u32), view: View, cap_bps: u64) -> (u32, u32) {
+/// Encoded video size: the size the client shows the display at (its view,
+/// with the display's proportions), never larger than the display. More
+/// pixels than the client shows cost encoding, link and above all the
+/// client's decoder for nothing it can show: a phone showing a 3840x2160
+/// display at 1927x1084 took 11 ms to decode each AV1 frame of it. Even
+/// (4:2:0 video).
+fn video_size(display: (u32, u32), view: View) -> (u32, u32) {
     if view.width == 0 || view.height == 0 {
         return display;
     }
     let (dw, dh) = (display.0 as f64, display.1 as f64);
-    let least = (view.width as f64 / dw).max(view.height as f64 / dh).min(1.0);
-    let hz = if view.hz == 0 { 60.0 } else { view.hz as f64 };
-    let affords = |s: f64| dw * dh * s * s * hz * BITS_PER_PIXEL <= cap_bps as f64;
-    let scale = SIZE_STEPS.into_iter().filter(|&s| s > least).find(|&s| affords(s)).unwrap_or(least);
+    let scale = (view.width as f64 / dw).max(view.height as f64 / dh);
     if scale >= 1.0 {
         return display;
     }
@@ -1392,8 +1367,8 @@ fn next_two_pass(codec: &ClientCodec, cap_bps: u64, rtt_us: u64) -> bool {
     wants_two_pass(codec.encoder.as_ref().and_then(|e| e.two_pass()).unwrap_or(false), cap_bps, rtt_us)
 }
 
-/// A new encoder for `size` (the display's), encoding `output` (smaller in
-/// motion mode for a small client, see `video_size`), with the backend
+/// A new encoder for `size` (the display's), encoding `output` (the size
+/// the client shows it at, see `video_size`), with the backend
 /// preference and codec of `conf`. H.264 when the chosen codec cannot be
 /// opened.
 #[allow(clippy::too_many_arguments)]
@@ -1591,22 +1566,15 @@ mod tests {
     }
 
     #[test]
-    fn size_is_the_displays_on_a_fast_link_and_never_below_the_clients() {
-        assert_eq!(video_size(DISPLAY, view(1920, 1080, 60), 200_000_000), DISPLAY);
-        // Nothing fits: the client's own size, whatever the link.
-        assert_eq!(video_size(DISPLAY, view(1920, 1080, 60), 1_000_000), (1920, 1080));
-        // No report: the display's.
-        assert_eq!(video_size(DISPLAY, View::default(), 1_000_000), DISPLAY);
-    }
-
-    #[test]
-    fn size_steps_up_as_far_as_the_cap_affords() {
-        // 3/4 of 4K at 60 Hz needs 28 Mbit/s, the whole 50.
-        assert_eq!(video_size(DISPLAY, view(1280, 720, 60), 30_000_000), (2880, 1620));
-        // At 144 Hz the same cap only affords half.
-        assert_eq!(video_size(DISPLAY, view(1280, 720, 144), 30_000_000), (1920, 1080));
+    fn video_is_encoded_at_the_size_the_client_shows_it() {
+        assert_eq!(video_size(DISPLAY, view(1920, 1080, 60)), (1920, 1080));
+        // A phone's window, not quite half the display.
+        assert_eq!(video_size(DISPLAY, view(1927, 1084, 120)), (1926, 1084));
+        // Never larger than the display, and the display's without a report.
+        assert_eq!(video_size(DISPLAY, view(5120, 2880, 60)), DISPLAY);
+        assert_eq!(video_size(DISPLAY, View::default()), DISPLAY);
         // A window wider in proportion than the display decides by its width.
-        assert_eq!(video_size(DISPLAY, view(3000, 1000, 60), 1_000_000), (3000, 1688));
+        assert_eq!(video_size(DISPLAY, view(3000, 1000, 60)), (3000, 1688));
     }
 
     #[test]

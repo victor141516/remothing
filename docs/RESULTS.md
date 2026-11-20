@@ -709,3 +709,35 @@ with two or more frames; of the time draw gaps exceeded a refresh, 146 ms a
 second came from the server's send gaps, 75 from the network, 20 from the
 client. 61 of the server's gaps over two refreshes held a captured change,
 47 had nothing new captured.
+
+## Phone: refresh rate and video size
+
+OnePlus CPH2653 (Android 16, Brave/Chromium 157, 120 Hz screen), Wi-Fi,
+WebTransport, AV1 (NVENC), driven over the DevTools protocol through adb.
+Bench container with the GPU (`--gpus all`), `--mode full --fps 120`;
+the phone shows the display at 1927x1084 device pixels. p50 / p99 ms.
+
+| display | client | fps | capture→draw | server wait | decode |
+|---|---|---|---|---|---|
+| 1920x1080 | refresh measured once on the page (60 Hz) | 60 | 27–33 / 44–88 | 13–17 | 6.1 |
+| 1920x1080 | refresh from the worker's frames (120 Hz) | 110–118 | 15–16 / 32–54 | 0.9 | 4.8 |
+| 3840x2160 | video 1926x1084, scaler one thread | 33 | 70–73 / 92–113 | 28–30 | 7.2–7.3 |
+| 3840x2160 | video 1926x1084, scaler 8 threads | 52–60 | 38–42 / 156–176 | 13–15 | 6.1–6.3 |
+
+The page's animation frames ran at 60 Hz (16.6 ms apart) while the
+worker's ran at 120. At 3840x2160 the container's encode (swscale of the
+whole picture, then NVENC) took 23.6 ms a frame with one scaler thread and
+9.8 with 8; the rest of the gap to 120 fps is that path's copy of the
+capture (4.5 ms). The same phone on the Windows demo (3840x2160 display,
+video at the display's size outside motion mode) decoded each AV1 frame in
+11–13 ms; capture→draw went from 6–10 ms without video to 18–26 with it.
+
+Windows, `d3d11_bench --size 3840x2160 --scene plasma --enc nvenc-gpu
+--fps 120 --no-check` (GPU video processor scaling), encode p50 / p99 ms
+and KiB a frame:
+
+| codec | full size | half size |
+|---|---|---|
+| AV1 | 2.44 / 3.57, 17.5 | 1.44 / 2.65, 6.9 |
+| HEVC | 2.59 / 3.70, 40.3 | 1.45 / 2.62, 15.7 |
+| H.264 | 5.31 / 6.44, 38.9 | 1.95 / 2.84, 14.4 |

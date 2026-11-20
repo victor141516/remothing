@@ -29,7 +29,7 @@ pub(crate) enum Input {
 /// when the encoder or a smaller output needs it.
 pub(crate) struct HostInput {
     bgrx: ff::frame::Video,
-    convert: Option<(scaling::Context, ff::frame::Video)>,
+    convert: Option<(Scaler, ff::frame::Video)>,
 }
 
 impl HostInput {
@@ -41,30 +41,7 @@ impl HostInput {
             // Scaled: the fast bilinear filter, since the whole picture is
             // scaled for every frame on the CPU.
             let flags = if (iw, ih) == (ow, oh) { scaling::Flags::POINT } else { scaling::Flags::FAST_BILINEAR };
-            let mut sws = scaling::Context::get(Pixel::BGRZ, iw, ih, wants, ow, oh, flags)?;
-            if wants != Pixel::BGRZ {
-                // RGB to YUV in BT.709, what the stream signals (swscale's
-                // default is BT.601; the same speed either way, measured).
-                // SAFETY: reads and sets the colour details of the live context.
-                unsafe {
-                    let (mut inv, mut src_range, mut table, mut dst_range) = (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-                    let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
-                    let ctx = sws.as_mut_ptr();
-                    ff::ffi::sws_getColorspaceDetails(
-                        ctx,
-                        &mut inv,
-                        &mut src_range,
-                        &mut table,
-                        &mut dst_range,
-                        &mut brightness,
-                        &mut contrast,
-                        &mut saturation,
-                    );
-                    let bt709 = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
-                    ff::ffi::sws_setColorspaceDetails(ctx, bt709, src_range, bt709, dst_range, brightness, contrast, saturation);
-                }
-            }
-            Some((sws, ff::frame::Video::new(wants, ow, oh)))
+            Some((Scaler::new((iw, ih), (ow, oh), wants, flags)?, ff::frame::Video::new(wants, ow, oh)))
         };
         Ok(Self { bgrx: ff::frame::Video::new(Pixel::BGRZ, iw, ih), convert })
     }
@@ -90,6 +67,85 @@ impl HostInput {
             }
             None => &mut self.bgrx,
         })
+    }
+}
+
+/// Most threads a picture is converted with: a slice each.
+const SCALE_THREADS: usize = 8;
+
+/// An swscale context set up for slice threads. The `ffmpeg-next` context
+/// runs the legacy `sws_scale`, which uses one thread whatever the options:
+/// a 3840x2160 picture scaled to half and converted to NV12 took 23 ms a
+/// frame that way (container, fast bilinear), a frame rate of 40 at most.
+struct Scaler(*mut ff::ffi::SwsContext);
+
+impl Scaler {
+    fn new((iw, ih): (u32, u32), (ow, oh): (u32, u32), wants: Pixel, flags: scaling::Flags) -> Result<Self> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(SCALE_THREADS));
+        let options = [
+            (c"srcw", iw as i64),
+            (c"srch", ih as i64),
+            (c"src_format", ff::ffi::AVPixelFormat::from(Pixel::BGRZ) as i64),
+            (c"dstw", ow as i64),
+            (c"dsth", oh as i64),
+            (c"dst_format", ff::ffi::AVPixelFormat::from(wants) as i64),
+            (c"sws_flags", flags.bits() as i64),
+            (c"threads", threads as i64),
+        ];
+        // SAFETY: a fresh context, configured through its AVOptions before
+        // `sws_init_context`; owned by `Scaler`, whose Drop frees it on every
+        // path from here on.
+        unsafe {
+            let ctx = ff::ffi::sws_alloc_context();
+            if ctx.is_null() {
+                return Err(anyhow!("swscale: no context"));
+            }
+            let scaler = Self(ctx);
+            for (name, value) in options {
+                if ff::ffi::av_opt_set_int(ctx.cast(), name.as_ptr(), value, 0) < 0 {
+                    return Err(anyhow!("swscale: option {name:?} refused"));
+                }
+            }
+            if ff::ffi::sws_init_context(ctx, std::ptr::null_mut(), std::ptr::null_mut()) < 0 {
+                return Err(anyhow!("swscale: {iw}x{ih} to {ow}x{oh} {wants:?} not possible"));
+            }
+            if wants != Pixel::BGRZ {
+                // RGB to YUV in BT.709, what the stream signals (swscale's
+                // default is BT.601; the same speed either way, measured).
+                let (mut inv, mut src_range, mut table, mut dst_range) = (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+                let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
+                ff::ffi::sws_getColorspaceDetails(
+                    ctx,
+                    &mut inv,
+                    &mut src_range,
+                    &mut table,
+                    &mut dst_range,
+                    &mut brightness,
+                    &mut contrast,
+                    &mut saturation,
+                );
+                let bt709 = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
+                ff::ffi::sws_setColorspaceDetails(ctx, bt709, src_range, bt709, dst_range, brightness, contrast, saturation);
+            }
+            Ok(scaler)
+        }
+    }
+
+    fn run(&mut self, src: &ff::frame::Video, dst: &mut ff::frame::Video) -> Result<()> {
+        // SAFETY: both frames were allocated with the sizes and formats this
+        // context was set up for, and stay alive for the call.
+        let r = unsafe { ff::ffi::sws_scale_frame(self.0, dst.as_mut_ptr(), src.as_ptr()) };
+        if r < 0 {
+            return Err(anyhow!("swscale: {}", ff::Error::from(r)));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Scaler {
+    fn drop(&mut self) {
+        // SAFETY: the context was allocated by `sws_alloc_context` and is freed once.
+        unsafe { ff::ffi::sws_freeContext(self.0) }
     }
 }
 
