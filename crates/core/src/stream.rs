@@ -172,7 +172,7 @@ pub async fn input_handler(
             if let Some(previous) = last.as_ref().filter(|l| !Arc::ptr_eq(l, &stream)) {
                 held.release(previous);
             }
-            if let Err(e) = handle_input(&b, &stream, &app.streams, &mut held) {
+            if let Err(e) = handle_input(&b, &stream, &mut held) {
                 app.telemetry.error("input", e);
             }
             last = Some(stream);
@@ -680,7 +680,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     (Some(proto::C_SIGNAL), _) => on_signal(&b[1..], &app, &link, &out_tx, &peer_tx).await,
                     _ => {
                         let stream = link.watching.read().unwrap().clone();
-                        if let Err(e) = handle_input(&b, &stream, &app.streams, &mut link.held.lock().unwrap()) {
+                        if let Err(e) = handle_input(&b, &stream, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -709,7 +709,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                     },
                     PeerEvent::Input(b) => {
                         let stream = link.watching.read().unwrap().clone();
-                        if let Err(e) = handle_input(&b, &stream, &app.streams, &mut link.held.lock().unwrap()) {
+                        if let Err(e) = handle_input(&b, &stream, &mut link.held.lock().unwrap()) {
                             app.telemetry.error("input", e);
                         }
                     }
@@ -911,7 +911,7 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
                     break;
                 }
                 let stream = link.watching.read().unwrap().clone();
-                if let Err(e) = handle_input(&msg, &stream, &app.streams, &mut link.held.lock().unwrap()) {
+                if let Err(e) = handle_input(&msg, &stream, &mut link.held.lock().unwrap()) {
                     app.telemetry.error("input", e);
                 }
             }
