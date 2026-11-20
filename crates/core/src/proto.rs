@@ -26,6 +26,8 @@ pub const S_PONG: u8 = 4;
 /// "iceServers":[...]}` on connect, `{"type":"answer","sdp":...}`,
 /// `{"type":"closed"}` (the server dropped the peer) and `{"type":"slow"}`
 /// (the data channel carries less than the WebSocket did: leave it).
+/// `{"type":"trace"}` on connect while `[debug] frame_trace` is on: record
+/// the frames drawn and send them (C_TRACE).
 /// WebTransport: `{"type":"wt","key","hash","port","candidates":[...]}`
 /// on connect and when the certificate is renewed: `candidates` are URLs to
 /// try (`key` goes in their query as `k`), or bare hosts for
@@ -196,6 +198,16 @@ pub const C_PASTE: u8 = 25;
 /// then on this client's video is BT.709, converted by the server where
 /// that costs (NVENC).
 pub const C_BT709: u8 = 26;
+/// UTF-8 JSON, one batch of the frame trace the server asked for with
+/// `{"type":"trace"}` (S_SIGNAL), every 2 s while frames are drawn:
+/// `{"offset", "frames": [[seq, bytes, flags, oldest, newest, pulled,
+/// upload, encode, sent, received, decoded, drawn], ...], "refreshes":
+/// [...]}`. Times are ms on the server's clock (the client's own converted
+/// with its clock offset estimate, `offset` = server - client); `oldest`,
+/// `newest`, `pulled`, `upload`, `encode` and `sent` are the FRAME header's,
+/// `decoded` is 0 without video; `refreshes` are the display refreshes
+/// (`requestAnimationFrame`) since the last batch.
+pub const C_TRACE: u8 = 27;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server

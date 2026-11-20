@@ -30,6 +30,8 @@ pub fn router() -> Router<Arc<App>> {
         .route("/api/virtual/install", post(install_virtual))
         .route("/api/virtual/{id}", put(set_virtual).delete(destroy_virtual))
         .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/trace", get(traces))
+        .route("/api/trace/{id}", get(trace))
 }
 
 type ApiResult = Result<Response, (StatusCode, String)>;
@@ -178,6 +180,20 @@ async fn destroy_virtual(State(app): State<Arc<App>>, headers: HeaderMap, Path(i
     Ok(Json(json!({"ok": true})).into_response())
 }
 
+/// Clients with a frame trace kept, and the batches kept of each.
+async fn traces(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
+    check(&app, &headers)?;
+    let clients: Vec<_> = app.telemetry.traced().into_iter().map(|(id, batches)| json!({"client": id, "batches": batches})).collect();
+    Ok(Json(json!({"clients": clients})).into_response())
+}
+
+/// One client's frame trace: the batches it sent (see `C_TRACE`), oldest first.
+async fn trace(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<u64>) -> ApiResult {
+    check(&app, &headers)?;
+    let batches = app.telemetry.trace(id).ok_or((StatusCode::NOT_FOUND, format!("no trace of client {id}")))?;
+    Ok(Json(json!({"client": id, "batches": batches})).into_response())
+}
+
 async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult {
     check(&app, &headers)?;
     let s = app.settings.read().unwrap().clone();
@@ -188,6 +204,7 @@ async fn get_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiRes
         "encoder_preferred": s.encoder.preferred,
         "encoders": app.platform.encoders().backends(),
         "keyboard_layout": s.input.keyboard_layout,
+        "frame_trace": s.debug.frame_trace,
         "stream_token": s.auth.stream_token,
         "admin_password_set": !s.auth.admin_password.is_empty(),
         "tls": app.tls_enabled,
@@ -205,6 +222,7 @@ struct SettingsPatch {
     keyboard_layout: Option<String>,
     stream_token: Option<String>,
     admin_password: Option<String>,
+    frame_trace: Option<bool>,
 }
 
 async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): Json<SettingsPatch>) -> ApiResult {
@@ -242,6 +260,9 @@ async fn put_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(p): 
         }
         if let Some(l) = p.keyboard_layout {
             s.input.keyboard_layout = l;
+        }
+        if let Some(t) = p.frame_trace {
+            s.debug.frame_trace = t;
         }
         if let Some(t) = p.stream_token {
             s.auth.stream_token = t;

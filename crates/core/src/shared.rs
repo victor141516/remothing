@@ -628,6 +628,17 @@ impl Shared {
             return Ok(Pull::Reset { geometry, first_seq: c.seq.wrapping_add(1), hdr_max: *hdr_max });
         }
 
+        // No more frames than the client's screen refreshes (`min_frame_us`):
+        // changes wait and go together in the next one, on a grid that moves
+        // one refresh per frame. A capture up to half a refresh early for its
+        // slot goes now: a short wait costs a thread wake-up that often comes
+        // milliseconds late (measured ~4 ms in the container).
+        let min = codec.min_frame_us;
+        let frame_due = (codec.frame_slot + min).saturating_sub(min / 2);
+        if c.pending && now < frame_due {
+            return Ok(Pull::Idle { wake_at_us: Some(frame_due) });
+        }
+
         let tuning = codec.tuning;
         // Pacing, bursts and refinement follow the (conservative) estimate;
         // what content the link affords follows the budget.
@@ -663,13 +674,7 @@ impl Shared {
 
         // Video frames are paced so their bytes fit the video share of the
         // link: a slow link gets fewer, decent pictures instead of a queue.
-        // At most once per client refresh, on average: a grid (`video_slot`)
-        // moves one refresh per frame. A capture up to half a refresh early
-        // for its slot goes now: a short wait costs a thread wake-up that
-        // often comes milliseconds late (measured ~4 ms in the container).
-        let min = codec.min_video_us;
-        let slot_due = (codec.video_slot + min).saturating_sub(min / 2);
-        let video_due = codec.next_video_us.max(slot_due);
+        let video_due = codec.next_video_us.max(frame_due);
         let video_ready = now >= video_due;
         let mut video_deferred = false;
         let mut refine_deferred = false;
@@ -867,10 +872,6 @@ impl Shared {
             let v = codec.encoder.as_mut().expect("loaded implies encoder").encode(force_key)?;
             encode_us = (proto::now_us() - encode_start) as u32;
             let paced = (v.data.len() as f64 / (rate * VIDEO_SHARE) * 1e6) as u64;
-            // The grid moves one refresh per frame, so a frame that waited
-            // for its slot does not push the next one later; after a gap
-            // (captures come unevenly) up to two catch up.
-            codec.video_slot = (codec.video_slot + min).max(now.saturating_sub(2 * min));
             codec.next_video_us = now + paced;
             key = v.key;
             let encoder = codec.encoder.as_ref().expect("loaded implies encoder");
@@ -882,6 +883,10 @@ impl Shared {
         if motion {
             msg[1] |= FLAG_MOTION;
         }
+        // The grid moves one refresh per frame, so a frame that waited for
+        // its slot does not push the next one later; after a gap (captures
+        // come unevenly) up to two catch up.
+        codec.frame_slot = (codec.frame_slot + min).max(now.saturating_sub(2 * min));
         msg[0] = proto::S_FRAME;
         msg[2..4].copy_from_slice(&(codec.rects.len() as u16).to_le_bytes());
         msg[4..8].copy_from_slice(&seq.to_le_bytes());
@@ -950,10 +955,10 @@ pub struct ClientCodec {
     zstd: Option<zstd::bulk::Compressor<'static>>,
     /// Earliest time of the next video frame (video pacing).
     next_video_us: u64,
-    /// Least time between video frames: the client's refresh interval.
-    pub min_video_us: u64,
-    /// Slot on that grid the last video frame took.
-    video_slot: u64,
+    /// Least time between frames: the client's refresh interval.
+    pub min_frame_us: u64,
+    /// Slot on that grid the last frame took.
+    frame_slot: u64,
     /// The last pull held content back for pacing (video or refinement).
     paced: bool,
 }
@@ -973,8 +978,8 @@ impl ClientCodec {
             refine_at: 0,
             zstd: None,
             next_video_us: 0,
-            min_video_us: 0,
-            video_slot: 0,
+            min_frame_us: 0,
+            frame_slot: 0,
             paced: false,
         }
     }

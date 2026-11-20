@@ -264,12 +264,15 @@ pixels that is thrown away a moment later.
   the GPU video processor scales into the encoder texture before each
   frame; the system-memory and CUDA inputs scale on the CPU (swscale,
   fast bilinear), the CUDA one then uploads the whole scaled picture.
-- **Frame rate per client**: video frames go at most once per client
-  refresh, in every mode: a grid of slots moves one refresh per frame, a
-  capture up to half a refresh early for its slot goes at once (a short
-  wait costs a thread wake-up that often comes milliseconds late), and
-  after a gap up to two frames catch up. `?bench` reports no view: it
-  measures the pipeline at the display's size and the capture rate.
+- **Frame rate per client**: frames go at most once per client refresh,
+  lossless ones too and in every mode (more than the screen shows are
+  replaced before it shows them, and decoding them costs the client
+  refreshes): changes wait and go together in the next frame, on a grid
+  of slots that moves one refresh per frame. A capture up to half a
+  refresh early for its slot goes at once (a short wait costs a thread
+  wake-up that often comes milliseconds late), and after a gap up to two
+  frames catch up. `?bench` reports no view: it measures the pipeline at
+  the display's size and the capture rate.
 - Clients without a video encoder are not affected: lossless is all they
   have. FRAME carries the mode as a flag, for the overlay and the event
   log.
@@ -902,8 +905,25 @@ encoding and the rest until sent; network; client), mode and size
 changes, the view each client reports, which displays are streamed and the
 default display new clients start on, virtual display create/destroy, live
 settings (bandwidth budget, lossless limit, encoder preference, keyboard
-layout, stream token, admin password). Settings persist in the TOML config
+layout, stream token, admin password, frame trace). Settings persist in the TOML config
 file.
+
+Frame trace (`debug.frame_trace`, off by default: it costs the client a
+record per frame and a message every 2 s). It is read once per
+connection, so the switch applies to clients connecting after it: the
+server asks with an S_SIGNAL, the client sends C_TRACE batches with every
+drawn frame's server times (captures, build, upload, encode, send) and its
+own (arrival, decode, draw) on the server's clock, plus its display
+refreshes. The server keeps the last two minutes of the 8 newest traced
+clients, also after they leave. Aggregates (p50/p99, rates) cannot tell
+whether pictures that reach the screen in bunches left the server that
+way, were bunched by the network, or by the client; the trace can.
+
+The client also logs what WebRTC's ICE offered (host, mDNS, srflx
+candidates, or none when a browser policy forbids UDP) and whether the
+peer connected or failed, so a client where neither WebRTC nor
+WebTransport comes up can be told apart from a network that drops UDP.
+
 TLS (rustls) applies to both listeners when `tls.cert`/`tls.key` are set.
 
 ## Platform notes and limitations

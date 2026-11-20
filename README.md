@@ -241,7 +241,11 @@ below it), `tuning.max_lossless_frame_kb`,
 the server encodes; `h264|hevc|av1`: that one, H.264 for a client without
 it; a config written before codecs could be chosen says `h264`: set
 `auto` to get the others),
-`input.keyboard_layout`,
+`input.keyboard_layout`, `debug.frame_trace` (clients connecting while
+it is on record every frame they draw, with its server times, and the
+display refreshes, and send them every 2 s; the admin API keeps the last
+two minutes of the last 8 such clients: `GET /api/trace` lists them,
+`GET /api/trace/{client}` returns one; the admin UI has the switch),
 `auth.*`, and on Linux `[platform]`:
 `x11_displays = [":0"]`, `session_command = "openbox-session"`,
 `virtual_on_start = "1920x1080"`.

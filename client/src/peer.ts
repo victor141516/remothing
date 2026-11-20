@@ -13,6 +13,8 @@ export interface PeerEvents {
   message(buf: ArrayBuffer, received: number): void;
   /** The frames channel opened or went away. */
   open(open: boolean): void;
+  /** Something for the server's event log (what ICE offered, how it ended). */
+  log(text: string): void;
 }
 
 export class Peer {
@@ -36,10 +38,22 @@ export class Peer {
     frames.onclose = () => this.events.open(false);
     this.frames = frames;
     this.input = pc.createDataChannel('input', { ordered: true });
+    // What ICE offers says whether this browser may use UDP at all (a
+    // policy can hide or forbid it): reported once gathering ends.
+    const offered: Record<string, number> = {};
     pc.onicecandidate = (e) => {
-      if (e.candidate?.candidate) this.events.signal({ type: 'candidate', candidate: e.candidate.candidate });
+      const c = e.candidate;
+      if (c?.candidate) {
+        this.events.signal({ type: 'candidate', candidate: c.candidate });
+        const kind = `${c.type ?? '?'} ${c.protocol ?? '?'}${c.address?.endsWith('.local') ? ' mDNS' : ''}`;
+        offered[kind] = (offered[kind] ?? 0) + 1;
+      } else if (!c) {
+        const list = Object.entries(offered).map(([kind, n]) => `${n} ${kind}`).join(', ');
+        this.events.log(`webrtc: candidates offered: ${list || 'none'}`);
+      }
     };
     pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected' || pc.connectionState === 'failed') this.events.log(`webrtc: ${pc.connectionState}`);
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') this.close();
     };
     await pc.setLocalDescription(await pc.createOffer());

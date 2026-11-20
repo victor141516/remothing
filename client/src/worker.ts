@@ -19,7 +19,7 @@ import { BarcodeReader, barcodeAge } from './probe';
 import {
   BT601, BT709, C_ACK, C_AUDIO, C_BT709, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME,
   C_MIC_INFO, C_PING, C_SIGNAL, CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
-  C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_BT601,
+  C_PASTE, C_STATS, C_TRACE, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_BT601,
   FLAG_CODEC_MASK, FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_CLIPBOARD_FILES, S_PASTED, S_SIGNAL, VIEW_HDR, now,
@@ -153,9 +153,21 @@ let lastDraw = -Infinity;
 /** Gaps longer than this between draws are pauses, not the frame rate. */
 const GAP_MAX_MS = 100;
 
-function onRefresh(): void {
+/** The frame trace the server asked for (see C_TRACE): rows of drawn frames
+ * and display refresh times, on the server's clock, since the last batch. */
+interface TraceBatch {
+  frames: number[][];
+  refreshes: number[];
+}
+let trace: TraceBatch | null = null;
+let traceTimer = 0;
+const TRACE_EVERY_MS = 2000;
+
+function onRefresh(t: number): void {
   rec.refresh(drawsSinceRefresh);
   drawsSinceRefresh = 0;
+  // `t` counts from the worker's start; `now()` from the epoch.
+  trace?.refreshes.push(Math.round((performance.timeOrigin + t + offset) * 100) / 100);
   self.requestAnimationFrame(onRefresh);
 }
 
@@ -832,6 +844,31 @@ function apply(f: Frame): void {
       };
     }
   }
+  if (trace) {
+    const ms = (x: number) => Math.round(x * 100) / 100;
+    const video = !!f.picture;
+    trace.frames.push([
+      f.seq,
+      f.buf.byteLength,
+      v.getUint8(1),
+      ms(f.oldest),
+      ms(Number(v.getBigUint64(16, true)) / 1000),
+      ms(Number(v.getBigUint64(32, true)) / 1000),
+      video ? v.getUint16(46, true) / 100 : 0,
+      video ? v.getUint32(40, true) / 1000 : 0,
+      ms(f.sent),
+      ms(f.received + offset),
+      video ? ms(f.decoded + offset) : 0,
+      ms(drawn + offset),
+    ]);
+  }
+}
+
+/** A batch of the frame trace to the server (C_TRACE); nothing while nothing is drawn. */
+function sendTrace(): void {
+  if (!trace) return;
+  if (trace.frames.length) sendText(C_TRACE, JSON.stringify({ offset: Math.round(offset * 100) / 100, ...trace }));
+  trace = { frames: [], refreshes: [] };
 }
 
 function reportLate(): void {
@@ -848,6 +885,8 @@ function connect(url: string): void {
   ws = new WebSocket(`${url}${codecs}&display=${encodeURIComponent(display)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    // Each server session says whether it wants the frame trace.
+    trace = null;
     // The server's choice is per connection.
     bt709Asked = false;
     syncSamples.length = 0;
@@ -870,7 +909,10 @@ function connect(url: string): void {
       case S_SIGNAL: {
         const json = new TextDecoder().decode(new Uint8Array(buf, 1));
         const signal = JSON.parse(json) as Signal;
-        if (signal.type === 'wt') {
+        if (signal.type === 'trace') {
+          trace ??= { frames: [], refreshes: [] };
+          traceTimer ||= setInterval(sendTrace, TRACE_EVERY_MS);
+        } else if (signal.type === 'wt') {
           // A new WebSocket connection is a new server session: its offer
           // is tried at once, whatever happened to the last one.
           const offer = JSON.parse(json) as WtOffer;

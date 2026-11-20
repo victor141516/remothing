@@ -86,6 +86,7 @@ interface Settings {
   encoder_preferred: string;
   encoders: string[];
   keyboard_layout: string;
+  frame_trace: boolean;
   stream_token: string;
   admin_password_set: boolean;
   tls: boolean;
@@ -587,6 +588,7 @@ function renderSettings(s: Settings) {
   ) as HTMLSelectElement;
   const layout = h('input', { type: 'text', value: s.keyboard_layout, placeholder: 'e.g. us, de, fr', list: 'layouts' }) as HTMLInputElement;
   const layouts = h('datalist', { id: 'layouts' }, ...['us', 'gb', 'de', 'fr', 'es', 'it', 'pt', 'ch', 'se', 'no', 'dk', 'fi', 'jp'].map((l) => h('option', { value: l })));
+  const trace = h('input', { type: 'checkbox', checked: s.frame_trace }) as HTMLInputElement;
 
   const streaming = h(
     'form',
@@ -596,6 +598,7 @@ function renderSettings(s: Settings) {
     ...field('Codec', codec, h('span', { class: 'dim' }, 'auto: AV1, HEVC or H.264, the best each client decodes in hardware')),
     ...field('Encoder preference', encoder, h('span', { class: 'dim' }, s.encoders.length ? '' : 'no hardware/software encoder available')),
     ...field('Keyboard layout', layout, layouts),
+    ...field('Frame trace', h('label', {}, trace, ' for clients connecting from now on'), h('span', { class: 'dim' }, 'each frame they draw, for /api/trace')),
     h('span'),
     h('div', {}, h('button', { class: 'primary', type: 'submit' }, 'Save')),
   );
@@ -607,6 +610,7 @@ function renderSettings(s: Settings) {
           tuning: { bandwidth_mbps: +bandwidth.value, max_lossless_frame_kb: Math.round(+maxKb.value) },
           encoder_preferred: encoder.value,
           keyboard_layout: layout.value.trim(),
+          frame_trace: trace.checked,
         },
         'Streaming settings',
       ),

@@ -337,6 +337,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         let ice: Vec<serde_json::Value> = hub.ice_servers.iter().map(|u| json!({ "urls": u })).collect();
         let _ = out_tx.send(proto::signal(&json!({ "type": "config", "iceServers": ice })));
     }
+    // Read once: the setting applies to clients connecting after a change.
+    let tracing = app.settings.read().unwrap().debug.frame_trace;
+    if tracing {
+        let _ = out_tx.send(proto::signal(&json!({ "type": "trace" })));
+    }
     // WebTransport sessions opened with this key belong to this client.
     let wt_key = crate::config::random_token();
     let (wt_tx, mut wt_rx) = mpsc::unbounded_channel::<wtransport::Connection>();
@@ -553,6 +558,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         let set = tokio::task::block_in_place(|| stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])));
                         if let Err(e) = set {
                             app.telemetry.error("clipboard", e);
+                        }
+                    }
+                    (Some(proto::C_TRACE), _) if tracing => {
+                        if let Ok(v) = serde_json::from_slice(&b[1..]) {
+                            app.telemetry.client_trace(link.id, v);
                         }
                     }
                     (Some(proto::C_BT709), _) => {
@@ -1149,8 +1159,8 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 }
             }
         }
-        // Frames the client cannot show are not encoded.
-        codec.min_video_us = if view.hz > 0 { 1_000_000 / view.hz as u64 } else { 0 };
+        // Frames the client cannot show are not built.
+        codec.min_frame_us = if view.hz > 0 { 1_000_000 / view.hz as u64 } else { 0 };
         if codec.encoder.is_some() && size != (0, 0) {
             let in_motion = shared.motion();
             let want = if in_motion { video_size(size, view, video_cap.bps) } else { size };

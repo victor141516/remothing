@@ -184,6 +184,7 @@ const peer = new Peer({
   signal: (json) => toWorker({ type: 'signal', json: JSON.stringify(json) }),
   message: (buf, received) => toWorker({ type: 'dcmsg', buf, received }, [buf]),
   open: (open) => toWorker({ type: 'dc', open }),
+  log: (text) => toWorker({ type: 'event', text }),
 });
 
 function onSignal(json: string): void {

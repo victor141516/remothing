@@ -111,6 +111,8 @@ export const C_VIRTUAL = 24;
 export const C_PASTE = 25;
 /** Empty: this browser shows BT.601 video in the wrong colours; video in BT.709 from now on (see proto.rs). */
 export const C_BT709 = 26;
+/** UTF-8 JSON, a batch of the frame trace the server asked for (see proto.rs). */
+export const C_TRACE = 27;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 

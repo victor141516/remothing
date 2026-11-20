@@ -15,6 +15,10 @@ const MAX_EVENTS: usize = 200;
 /// Longest client-supplied event text kept (a WebTransport failure lists
 /// every address tried).
 const MAX_EVENT_LEN: usize = 500;
+/// A client sends a trace batch every 2 s: two minutes of each.
+const MAX_TRACE_BATCHES: usize = 60;
+/// Traces of this many clients (the newest) are kept.
+const MAX_TRACED_CLIENTS: usize = 8;
 
 #[derive(Clone, Serialize)]
 pub struct ErrorEntry {
@@ -83,6 +87,8 @@ pub struct Telemetry {
     errors: Mutex<VecDeque<ErrorEntry>>,
     events: Mutex<VecDeque<EventEntry>>,
     clients: Mutex<HashMap<u64, ClientStatus>>,
+    /// Frame trace batches per client (`[debug] frame_trace`).
+    traces: Mutex<HashMap<u64, VecDeque<serde_json::Value>>>,
     cpu: Mutex<sysinfo::System>,
 }
 
@@ -96,6 +102,7 @@ impl Default for Telemetry {
             errors: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             clients: Mutex::new(HashMap::new()),
+            traces: Mutex::new(HashMap::new()),
             cpu: Mutex::new(cpu),
         }
     }
@@ -197,6 +204,33 @@ impl Telemetry {
         if let Some(c) = self.clients.lock().unwrap().get_mut(&id) {
             c.client_report = Some(report);
         }
+    }
+
+    /// One batch of a client's frame trace (C_TRACE). Kept after it leaves,
+    /// so a session can be read once it has ended.
+    pub fn client_trace(&self, id: u64, batch: serde_json::Value) {
+        let mut traces = self.traces.lock().unwrap();
+        if !traces.contains_key(&id) && traces.len() == MAX_TRACED_CLIENTS {
+            let oldest = *traces.keys().min().expect("full map has keys");
+            traces.remove(&oldest);
+        }
+        let q = traces.entry(id).or_default();
+        if q.len() == MAX_TRACE_BATCHES {
+            q.pop_front();
+        }
+        q.push_back(batch);
+    }
+
+    /// The kept batches of one client's trace, oldest first.
+    pub fn trace(&self, id: u64) -> Option<Vec<serde_json::Value>> {
+        self.traces.lock().unwrap().get(&id).map(|q| q.iter().cloned().collect())
+    }
+
+    /// Clients with a kept trace and how many batches each.
+    pub fn traced(&self) -> Vec<(u64, usize)> {
+        let mut v: Vec<_> = self.traces.lock().unwrap().iter().map(|(&id, q)| (id, q.len())).collect();
+        v.sort_unstable();
+        v
     }
 
     pub fn clients(&self) -> Vec<ClientStatus> {

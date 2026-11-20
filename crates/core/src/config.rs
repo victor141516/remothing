@@ -21,8 +21,17 @@ pub struct Settings {
     pub tls: TlsSettings,
     pub webrtc: WebRtcSettings,
     pub webtransport: WebTransportSettings,
+    pub debug: DebugSettings,
     /// Platform-specific options (e.g. `[platform] session_command = "..."` on Linux).
     pub platform: toml::Table,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugSettings {
+    /// Clients connecting from now on record every frame they draw and the
+    /// display refreshes, and send them in batches (admin API `/api/trace`).
+    pub frame_trace: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +150,7 @@ impl Default for Settings {
             tls: TlsSettings::default(),
             webrtc: WebRtcSettings::default(),
             webtransport: WebTransportSettings::default(),
+            debug: DebugSettings::default(),
             platform: toml::Table::new(),
         }
     }
