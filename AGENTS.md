@@ -115,6 +115,12 @@ docker build --target desktop -t remothing-desktop .
 - Remote input can be checked without touching this PC: in a container,
   send `C_MOVE`/`C_MOVE_REL` over `/input` and read `xdotool
   getmouselocation` (`apt-get install xdotool`).
+- Phones: an Android phone on USB (adb in `%LOCALAPPDATA%/Android/Sdk/platform-tools`);
+  `adb forward tcp:9222 localabstract:chrome_devtools_remote` gives its browser's
+  DevTools (open tabs, `Security.setIgnoreCertificateErrors` on the page for the
+  self-signed HTTPS). `source .tools/phone-bench.sh "<bench args>" WxH` starts a
+  GPU bench container the phone reaches on the LAN (HTTPS 19443); run it with
+  `source`, not `bash`: Git Bash's docker mangles container paths.
 - Unit tests exist where logic can be judged without a machine
   (`pacer.rs` simulator, input mapping). Do not add tests that only pin
   wording or wiring.
