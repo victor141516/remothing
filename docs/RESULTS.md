@@ -783,5 +783,46 @@ container held the ports the router forwards (the demo was stopped).
 
 On this Wi-Fi the transports are alike at this load. On 5G the link model
 cut its estimate to the floor on delay the radio adds whatever is sent
-(0.5-0.9 Mbit/s sent, delay p10 9-20 ms and p90 30-110 ms per second):
-`tasks/010-mobile-link-delay.md`.
+(0.5-0.9 Mbit/s sent, delay p10 9-20 ms and p90 30-110 ms per second); see
+the next section.
+
+## Link model on 5G: undoing cuts that do not work
+
+`pacer.rs` simulator, 50 Mbit/s, 15 ms, a delay level 15-60 ms above the
+path's minimum drawn every 300 ms (the minimum only in a 50 ms dip every
+7 s), 30 ms of jitter; 90 s from a fresh start, estimate median of the last
+60 s:
+
+| content | path | every cut kept: fps, estimate | cuts undone when the delay stays: fps, estimate |
+|---|---|---|---|
+| 6 KB at 120 fps | wandering delay | 44, 2.2 Mbit/s | 93-94, 8.9-11.3 Mbit/s |
+| video following the estimate | wandering delay | 65, 1.0 Mbit/s | 94-95, 27.7-29.7 Mbit/s |
+| 6 KB at 120 fps | + 250 ms stall every 3 s | 49, 2.8 Mbit/s | 92-94, 9.2-11.5 Mbit/s |
+| video following the estimate | + 250 ms stall every 3 s | 73, 1.0 Mbit/s | 92-93, 24.7-28.4 Mbit/s |
+
+The 30 s retry changed none of these. A download taking two thirds of a
+30 Mbit/s link for 20 s: the estimate came down to 10-13 Mbit/s and was
+back within 1-2 s of the end, with either rule.
+
+Bench container, `tc netem` profiles of "Bad links", `?bench=10`, one run
+each (fps, capture→draw p50 / p99 ms):
+
+| link | scenario | every cut kept | cuts undone when the delay stays |
+|---|---|---|---|
+| WAN 50M/20ms | box / scroll / full | 230 / 174 / 179 fps; 18/25, 23/26, 23/27 | 236 / 173 / 181 fps; 16/26, 19/27, 18/25 |
+| Funnel-like 18M/40ms | box / scroll / full | 225 / 164 / 175 fps; 27/34, 30/59, 31/36 | 220 / 163 / 176 fps; 28/36, 32/63, 31/36 |
+| Mobile 6M/50ms±10 0.5%loss | box | 167 fps; 46 / 141 | 186 fps; 50 / 145 |
+| Mobile 6M/50ms±10 0.5%loss | scroll | 126 fps; 64 / 219 | 132 fps; 78 / 255 |
+| Mobile 6M/50ms±10 0.5%loss | full | 72 fps; 71 / 184 | 84 fps; 67 / 155 |
+
+No cut at all on the first two links. The phone on 5G, the same bench
+(`full`, 1920x1080, 120 fps), one image after the other, 45 s each, on a
+bad spell of the link (network p99 640-870 ms, stalls up to 1.2 s):
+
+| server | transport | frames/s | refreshes with a new picture | cuts / undone / retried | estimate at the end |
+|---|---|---|---|---|---|
+| every cut kept | WebTransport | 66 | 49.1 % | 28 / 0 / 0 | 1.3 Mbit/s |
+| cuts undone when the delay stays | WebSocket (WebTransport fell back) | 75 | 52.9 % | 27 / 10 / 0 | 2.6 Mbit/s |
+
+On the real link most cuts still stand: its stalls end within the round
+trip after the cut, so the delay has fallen by the time the cut is judged.

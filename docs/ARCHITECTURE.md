@@ -346,10 +346,30 @@ only the network is modelled; a slow client still holds frames back):
   share): video capped at the share could never show that the link carries
   more. A cap 2.5 times the current one is applied after 500 ms instead of
   the usual hold.
-- **Window**: estimated rate × (base RTT + jitter) with 10 % margin, so the
-  frame rate is not bound by the round trip (was a fixed 2 frames); and the
-  oldest unacknowledged frame must not be overdue, so a stalled client gets
-  no backlog — held-back updates coalesce into one current frame.
+- **Cuts that do not work are undone**: the window after a cut shows
+  whether it shortened the delay. A queue of ours falls, whoever else fills
+  the link (the server backs off for other traffic too), and one that keeps
+  growing is ours as well; a delay that did neither, and that our own
+  largest frame of the window cannot explain (its size at the best delivery
+  rate seen: a slow link behind a large frame), is the path's. A phone on
+  5G adds 10-60 ms for hundreds of ms whatever is sent, and stalls for
+  hundreds of ms every few seconds: read as a queue, it took the estimate
+  to its 1 Mbit/s floor. Such a cut is undone (event "link estimate back
+  to …") and queues are judged above that delay from then on; the floor
+  comes down 20 ms a second once the delay falls below it.
+- **Retry**: an estimate still under 60 % of where it was before a spell of
+  cuts goes back there every 30 s (event "link estimate retried at …"); if
+  the link cannot carry it, the queue cuts it again. A cut made during a 5G
+  stall seems to work when the stall ends by itself, and the radio's delay
+  can keep a short-queue signal from raising the estimate for good. A link
+  whose other traffic stopped already recovers through growth (1-2 s in
+  the simulator after a download took two thirds of it for 20 s).
+- **Window**: estimated rate × (base RTT + the path's delay above + jitter)
+  with 10 % margin, so the frame rate is not bound by the round trip (was a
+  fixed 2 frames); and the oldest unacknowledged frame must not be
+  overdue, so a stalled client gets no backlog — held-back updates coalesce
+  into one current frame. Widening it to the delay of recent windows let a
+  slow link's own queue grow (174-506 ms in the simulator).
 
 Over Tailscale Funnel (≈18 Mbit/s, ≈50 ms) this took the harness from
 10–34 fps to ~170 fps with lower latency; see `docs/RESULTS.md`.

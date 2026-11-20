@@ -91,6 +91,14 @@ const QUEUE_LIMIT_US: u64 = 30_000;
 /// only once it has lasted this long: a radio hiccup (Wi-Fi scan, roaming)
 /// delays a few ACKs, congestion lasts as long as we keep sending.
 const PERSIST_US: u64 = 200_000;
+/// How fast the path's own delay (`path_floor_us`) comes down once the
+/// delay falls below it, µs a second.
+const FLOOR_FALL_PER_S: f64 = 20_000.0;
+/// An estimate below RETRY_BELOW of where it was before a spell of cuts goes
+/// back there this often; a spell ends once it is within RECOVERED of it.
+const RETRY_EVERY_US: u64 = 30_000_000;
+const RETRY_BELOW: f64 = 0.6;
+const RECOVERED: f64 = 0.9;
 /// RTT excess below this is jitter, too small for a transmission-time sample.
 const JITTER_US: u64 = 6_000;
 /// Window beyond the bandwidth-delay product: margin and slack.
@@ -148,6 +156,32 @@ pub struct Pacer {
     judge_n: u64,
     judge_best: f64,
     judge_limited: bool,
+    /// Largest frame ACKed in the current judging window, bytes.
+    judge_max_bytes: u64,
+    /// The last cut, until the ACKs after it show whether it shortened the
+    /// delay: (delay beyond base RTT when it was made, µs; estimate before
+    /// it; delay our own largest frame explains, µs).
+    cut_check: Option<(u64, f64, u64)>,
+    /// An undone cut or a retry, not reported yet.
+    notice: Option<Notice>,
+    /// Delay beyond base RTT the path adds whatever is sent (learned from
+    /// cuts that did not shorten it), µs; queues are judged above it.
+    path_floor_us: f64,
+    /// When `path_floor_us` last came down.
+    floor_at_us: u64,
+    /// Estimate before the first cut of the current spell of cuts (0: none),
+    /// and when it was last retried.
+    spell_peak: f64,
+    retry_us: u64,
+}
+
+/// What the estimate did besides cuts, for the client's event log.
+pub enum Notice {
+    /// A cut did not shorten the delay: undone; queues are judged above the
+    /// delay the path adds whatever is sent.
+    Undone { rate: f64, path_delay_us: u64 },
+    /// Back to the level before a spell of cuts, to see if the link carries it.
+    Retried { rate: f64 },
 }
 
 impl Default for Pacer {
@@ -175,6 +209,13 @@ impl Default for Pacer {
             judge_n: 0,
             judge_best: 0.0,
             judge_limited: false,
+            judge_max_bytes: 0,
+            cut_check: None,
+            notice: None,
+            path_floor_us: 0.0,
+            floor_at_us: 0,
+            spell_peak: 0.0,
+            retry_us: 0,
         }
     }
 }
@@ -211,9 +252,10 @@ impl Pacer {
         self.base_rtt.0
     }
 
-    /// Round trip the window covers: base RTT plus typical jitter, µs.
+    /// Round trip the window covers: base RTT, the path's own delay and
+    /// typical jitter, µs.
     fn path_us(&self) -> f64 {
-        if self.base_rtt.0 == 0 { DEFAULT_RTT_US as f64 } else { self.base_rtt.0 as f64 + self.jitter_us }
+        if self.base_rtt.0 == 0 { DEFAULT_RTT_US as f64 } else { self.base_rtt.0 as f64 + self.path_floor_us + self.jitter_us }
     }
 
     fn window(&self) -> f64 {
@@ -249,6 +291,11 @@ impl Pacer {
     /// The last emergency cut, once: (new estimate in bytes/s, queue in µs).
     pub fn take_cut(&mut self) -> Option<(f64, u64)> {
         self.cut_report.take()
+    }
+
+    /// What the estimate did besides cuts since the last call, once.
+    pub fn take_notice(&mut self) -> Option<Notice> {
+        self.notice.take()
     }
 
     pub fn on_send(&mut self, seq: u32, bytes: u64, now: u64) {
@@ -343,6 +390,7 @@ impl Pacer {
         self.judge_sum_us += delay;
         self.judge_n += 1;
         self.judge_best = self.judge_best.max(sample);
+        self.judge_max_bytes = self.judge_max_bytes.max(f.bytes);
         let elapsed = now.saturating_sub(self.judge_start_us);
         let window = base.max(JUDGE_MIN_US);
         // Share of the estimate the content used in this window.
@@ -363,6 +411,7 @@ impl Pacer {
             self.judge_sum_us = 0;
             self.judge_n = 0;
             self.judge_best = 0.0;
+            self.judge_max_bytes = 0;
             self.judge_limited = false;
         }
         self.rate = self.rate.max(MIN_RATE);
@@ -370,17 +419,43 @@ impl Pacer {
 
     /// `used`: share of the estimate delivered in the window.
     fn judge(&mut self, base: u64, now: u64, windows: i32, used: f64) {
-        let queue = self.judge_min_us;
-        let spread = (self.judge_sum_us / self.judge_n - queue) as f64;
+        let delay = self.judge_min_us;
+        let spread = (self.judge_sum_us / self.judge_n - delay) as f64;
         self.jitter_us += (spread - self.jitter_us) / 4.0;
+        // The path's own delay comes down as the path's does, slowly: a dip
+        // of a radio's delay is not the end of it.
+        let fall = FLOOR_FALL_PER_S * now.saturating_sub(self.floor_at_us) as f64 / 1e6;
+        self.floor_at_us = now;
+        if (delay as f64) < self.path_floor_us {
+            self.path_floor_us = (self.path_floor_us - fall).max(delay as f64);
+        }
+        // ACKs of frames sent before the last cut: no news of it yet.
+        let waiting = now.saturating_sub(self.cut_us) < self.cut_hold_us;
+        if let Some((before, rate_before, explained)) = self.cut_check.filter(|_| !waiting) {
+            self.cut_check = None;
+            // A cut shortens a queue of ours, whoever else fills the link,
+            // and one that keeps growing is ours too. A delay that neither
+            // fell nor grew once we sent less, and that our own frames cannot
+            // explain (one frame sent at the delivery rate seen), is the
+            // path's (a 5G radio scheduling, 10-60 ms for hundreds of ms
+            // whatever is sent): the cut is undone and queues are judged from
+            // that delay on.
+            let fell = delay < before / 2;
+            let grew = delay > before + QUEUE_LIMIT_US;
+            if !fell && !grew && before > explained {
+                self.rate = self.rate.max(rate_before);
+                self.path_floor_us = self.path_floor_us.max(before.min(delay) as f64);
+                self.notice = Some(Notice::Undone { rate: self.rate, path_delay_us: self.path_floor_us as u64 });
+            }
+        }
+        let queue = delay.saturating_sub(self.path_floor_us as u64);
         let over = queue > QUEUE_LIMIT_US.max(base / 2);
         if !over {
             self.over_since_us = 0;
         } else if self.over_since_us == 0 {
             self.over_since_us = self.judge_start_us.max(1);
         }
-        if now.saturating_sub(self.cut_us) < self.cut_hold_us {
-            // ACKs of frames sent before the last cut: no news yet.
+        if waiting {
             return;
         }
         // Content that waited for the estimate or used a good part of it
@@ -399,7 +474,18 @@ impl Pacer {
             self.rate = (self.rate * 0.85).min(self.judge_best * 0.9).max(self.rate * 0.7);
             self.cut_report = Some((self.rate, queue));
             self.cut_us = now;
-            self.cut_hold_us = base + queue + JUDGE_MIN_US;
+            self.cut_hold_us = base + delay + JUDGE_MIN_US;
+            // What our own largest frame of the window explains, sent at the
+            // best delivery rate seen: a slow link's queue behind a large frame.
+            let explained = match self.judge_best > 0.0 {
+                true => (self.judge_max_bytes as f64 * 1e6 / self.judge_best) as u64,
+                false => u64::MAX,
+            };
+            self.cut_check = Some((delay, self.ceiling, explained));
+            if self.spell_peak == 0.0 {
+                self.spell_peak = self.ceiling;
+                self.retry_us = now;
+            }
             self.up_streak = 0;
         } else {
             let off = ((TARGET_QUEUE_US - queue as f64) / TARGET_QUEUE_US).clamp(-1.0, 1.0);
@@ -428,6 +514,21 @@ impl Pacer {
             } else {
                 self.up_streak = 0;
             }
+            // Every RETRY_EVERY_US, an estimate still far below where it was
+            // before its cuts goes back there: the cuts may have been the
+            // path's doing (a 5G radio's stalls end by themselves, so a cut
+            // during one seems to work), and its delay can keep a short-queue
+            // signal from ever raising the estimate again. If the link still
+            // cannot carry it, the queue cuts it as before.
+            if self.spell_peak > 0.0 {
+                if self.rate >= RECOVERED * self.spell_peak {
+                    self.spell_peak = 0.0;
+                } else if self.rate < RETRY_BELOW * self.spell_peak && now.saturating_sub(self.retry_us) >= RETRY_EVERY_US {
+                    self.rate = self.spell_peak;
+                    self.retry_us = now;
+                    self.notice = Some(Notice::Retried { rate: self.rate });
+                }
+            }
         }
         if pushing {
             self.backed = self.rate;
@@ -452,11 +553,22 @@ mod tests {
         lcg: u64,
         /// Longest wait of a frame behind earlier ones, over the whole run.
         worst_queue_us: u64,
+        /// Path delay that does not depend on traffic: a level up to the
+        /// first value (µs) drawn anew every second value (µs).
+        wander: (u64, u64),
+        /// The wandering level's least (µs) but in a dip of the third value
+        /// (µs) every second value (µs), when the path's minimum shows.
+        wander_low: (u64, u64, u64),
+        /// Stalls: every first value (µs), the path holds everything for the
+        /// second value (µs).
+        stall: (u64, u64),
+        /// Last frame number sent over it (runs go on from it).
+        seq: u32,
     }
 
     impl Link {
         fn new(rate: f64, rtt_us: u64, jitter_us: u64) -> Self {
-            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1, worst_queue_us: 0 }
+            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1, worst_queue_us: 0, wander: (0, 1), wander_low: (0, 0, 0), stall: (0, 0), seq: 0 }
         }
 
         /// ACK time of a frame handed to the link at `now`.
@@ -466,7 +578,21 @@ mod tests {
             self.busy_until = start + (bytes as f64 * 1e6 / self.rate) as u64;
             self.lcg = self.lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let jitter = if self.jitter_us == 0 { 0 } else { (self.lcg >> 33) % self.jitter_us };
-            self.last_ack = (self.busy_until + self.rtt_us + jitter + self.hold_us).max(self.last_ack);
+            let (amplitude, period) = self.wander;
+            let (low, every, lasts) = self.wander_low;
+            let draw = (now / period).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) >> 33;
+            let level = match amplitude {
+                0 => 0,
+                _ if every > 0 && now % every < lasts => 0,
+                _ => low + draw % (amplitude - low),
+            };
+            // A stall holds everything sent during it until it ends.
+            let (every, lasts) = self.stall;
+            let held = match every {
+                0 => 0,
+                _ => lasts.saturating_sub(now % every),
+            };
+            self.last_ack = (self.busy_until + self.rtt_us + level + jitter + held + self.hold_us).max(self.last_ack);
             self.last_ack
         }
     }
@@ -475,24 +601,31 @@ mod tests {
     /// and the gap after it. Frames wait for the window (noted as limited);
     /// with `paced`, content always waits for the estimate (it is sized from
     /// it). Returns (frames sent, worst bottleneck queueing of the last half).
-    fn run(
+    fn run(p: &mut Pacer, link: &mut Link, secs: u64, paced: bool, next: impl FnMut(&Pacer) -> (u64, u64)) -> (u64, u64) {
+        let (_, sent, worst) = run_from(p, link, 1_000_000, secs, paced, next);
+        (sent, worst)
+    }
+
+    /// `run` from `start` (µs), returning where it ended too, so a run can go
+    /// on after the link changed.
+    fn run_from(
         p: &mut Pacer,
         link: &mut Link,
+        start: u64,
         secs: u64,
         paced: bool,
         mut next: impl FnMut(&Pacer) -> (u64, u64),
-    ) -> (u64, u64) {
+    ) -> (u64, u64, u64) {
         let mut acks: VecDeque<(u64, u32)> = VecDeque::new();
-        let (mut seq, mut sent, mut worst) = (0u32, 0u64, 0u64);
-        let start = 1_000_000u64;
+        let (mut seq, mut sent, mut worst) = (link.seq, 0u64, 0u64);
         let end = start + secs * 1_000_000;
         let (mut t, mut next_frame) = (start, start);
-        while t < end {
+        while t < end || !acks.is_empty() {
             while acks.front().is_some_and(|&(at, _)| at <= t) {
                 let (_, s) = acks.pop_front().unwrap();
                 p.on_ack(s, t, link.hold_us, false);
             }
-            if t >= next_frame {
+            if t < end && t >= next_frame {
                 if p.can_send(t) {
                     let (bytes, gap) = next(p);
                     seq += 1;
@@ -512,10 +645,85 @@ mod tests {
             }
             t += 250;
         }
-        (sent, worst)
+        link.seq = seq;
+        (t, sent, worst)
     }
 
     const FUNNEL: f64 = 18e6 / 8.0;
+
+    /// A phone on 5G as measured (tasks: link model on wandering delay):
+    /// 50 Mbit/s, 15 ms, and a delay level drawn anew every 300 ms whatever
+    /// is sent (the radio's scheduling), 15-60 ms above the path's minimum,
+    /// which only shows in a 50 ms dip every 7 s; plus 30 ms of jitter.
+    fn five_g(rate: f64) -> Link {
+        let mut link = Link::new(rate, 15_000, 30_000);
+        link.wander_low = (15_000, 7_000_000, 50_000);
+        link.wander = (60_000, 300_000);
+        link
+    }
+
+    #[test]
+    fn wandering_path_delay_does_not_collapse_the_estimate() {
+        // ~6 Mbit/s of content (6 KB at 120 fps), from a fresh start and from
+        // a learned estimate. With every cut kept, the delay read as a queue
+        // took the estimate to its 1 Mbit/s floor: 44 frames a second of the
+        // 120 here (37-41 on the phone). The rest of the gap to 120 is the
+        // send window, which covers base RTT and jitter, not the radio's level.
+        let learned = Pacer { rate: 30e6 / 8.0, ceiling: 30e6 / 8.0, backed: 30e6 / 8.0, ..Default::default() };
+        for mut p in [Pacer::default(), learned] {
+            let (sent, _) = run(&mut p, &mut five_g(50e6 / 8.0), 30, false, |_| (6_000, 8_333));
+            let fps = sent as f64 / 30.0;
+            assert!(fps > 80.0 && p.rate() > 2.5e6 / 8.0, "fps {fps}, estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+        }
+    }
+
+    #[test]
+    fn wandering_path_delay_still_detects_a_slow_link() {
+        // The same path when it carries 3 Mbit/s: the content's queue is its
+        // own, and grows on top of the radio's delay.
+        let mut p = Pacer { rate: 30e6 / 8.0, ceiling: 30e6 / 8.0, backed: 30e6 / 8.0, ..Default::default() };
+        let (_, worst) = run(&mut p, &mut five_g(3e6 / 8.0), 30, false, |_| (6_000, 8_333));
+        assert!(p.rate() < 5e6 / 8.0, "estimate {} Mbit/s", p.rate() * 8.0 / 1e6);
+        assert!(worst < 300_000, "worst queueing {worst} µs");
+    }
+
+    #[test]
+    fn radio_stalls_do_not_keep_the_estimate_down() {
+        // The 5G path also stalls, holding everything for 250 ms every 3 s;
+        // video follows the estimate (70 % of it, at most 8 KB a frame at
+        // 120 fps). A cut made during a stall seems to work when the stall
+        // ends by itself, and on the phone the estimate stayed at 1.2-1.7
+        // Mbit/s for 10 s and more after a few of them.
+        let video = |p: &Pacer| (((0.7 * p.rate() / 120.0) as u64).clamp(500, 8_000), 8_333);
+        let mut p = Pacer::default();
+        let mut link = five_g(50e6 / 8.0);
+        link.stall = (3_000_000, 250_000);
+        let mut t = 1_000_000;
+        let mut estimates = Vec::new();
+        for _ in 0..90 {
+            t = run_from(&mut p, &mut link, t, 1, true, video).0;
+            estimates.push(p.rate() * 8.0 / 1e6);
+        }
+        let late = &mut estimates[30..].to_vec();
+        late.sort_by(f64::total_cmp);
+        assert!(late[late.len() / 2] > 6.0, "estimates of the last minute (Mbit/s): {late:?}");
+    }
+
+    #[test]
+    fn estimate_comes_back_when_the_link_does() {
+        // 30 Mbit/s, 20 ms; another download takes two thirds of it for 20 s.
+        // Content sized from the estimate (paced video: 70 % of it).
+        let paced = |p: &Pacer| (20_000, (20_000.0 / (0.7 * p.rate()) * 1e6) as u64);
+        let mut p = Pacer::default();
+        let mut link = Link::new(30e6 / 8.0, 20_000, 2_000);
+        let t = run_from(&mut p, &mut link, 1_000_000, 10, true, paced).0;
+        link.rate = 10e6 / 8.0;
+        let t = run_from(&mut p, &mut link, t, 20, true, paced).0;
+        assert!(p.rate() < 15e6 / 8.0, "estimate {} Mbit/s with the download", p.rate() * 8.0 / 1e6);
+        link.rate = 30e6 / 8.0;
+        run_from(&mut p, &mut link, t, 30, true, paced);
+        assert!(p.rate() > 25e6 / 8.0, "estimate {} Mbit/s 30 s after it ended", p.rate() * 8.0 / 1e6);
+    }
 
     #[test]
     fn small_frames_are_not_bound_by_round_trip() {

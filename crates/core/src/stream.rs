@@ -29,7 +29,7 @@ use crate::capture::{DisplayStream, Streams};
 use crate::config::constant_time_eq;
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
-use crate::pacer::Pacer;
+use crate::pacer::{Notice, Pacer};
 use crate::platform::{Button, ThreadRole};
 use crate::proto;
 use crate::recovery::SentLog;
@@ -839,15 +839,25 @@ fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
     link.sent.lock().unwrap().ack(seq);
     // Nothing up to `seq` will be asked for again.
     link.wt_frames.lock().unwrap().retain(|&(s, _)| (s.wrapping_sub(seq) as i32) > 0);
-    let cut = {
+    let (cut, notice) = {
         let mut p = link.pacer.lock().unwrap();
         p.on_ack(seq, proto::now_us(), hold_us, b[2] != 0);
-        p.take_cut()
+        (p.take_cut(), p.take_notice())
     };
     if let Some((rate, queue_us)) = cut {
         let text = format!("link estimate cut to {:.1} Mbit/s (queue {} ms)", rate * 8.0 / 1e6, queue_us / 1000);
         app.telemetry.event(link.id, &text);
     }
+    let text = match notice {
+        Some(Notice::Undone { rate, path_delay_us }) => format!(
+            "link estimate back to {:.1} Mbit/s: the delay stayed after the cut, the path adds {} ms whatever is sent",
+            rate * 8.0 / 1e6,
+            path_delay_us / 1000
+        ),
+        Some(Notice::Retried { rate }) => format!("link estimate retried at {:.1} Mbit/s, where it was before its cuts", rate * 8.0 / 1e6),
+        None => return,
+    };
+    app.telemetry.event(link.id, &text);
 }
 
 /// Serves one WebTransport session until it closes; returns why it closed.
