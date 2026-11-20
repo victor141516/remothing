@@ -30,7 +30,7 @@ import { Recorder, refreshRate, type Batch } from './stats';
 
 export type ToWorker =
   /** `hdr`: the page started on an HDR screen (see `Renderer`). */
-  | { type: 'init'; canvas: OffscreenCanvas; url: string; display: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null; hdr: boolean }
+  | { type: 'init'; canvas: OffscreenCanvas; url: string; display: string; probe: boolean; forceDc: boolean; wt: boolean; codec: string | null; hdr: boolean; pace: boolean }
   | { type: 'report'; json: string }
   | { type: 'signal'; json: string }
   | { type: 'dcmsg'; buf: ArrayBuffer; received: number }
@@ -151,6 +151,12 @@ let lastTs = -1;
 let lastMarker = -1;
 /** Pictures drawn since the last display refresh, and when the last was drawn. */
 let drawsSinceRefresh = 0;
+/** At most one draw per display refresh (off with `?pace=0`): a picture that
+ * comes when one was already drawn in this refresh waits for the next, so
+ * none is replaced unseen and the next refresh is not left empty. On a phone
+ * at 120 Hz it raised the refreshes showing a new picture from 83 to 92 %
+ * for 2.5 ms more capture→draw at the median. */
+let paceDraws = false;
 let lastDraw = -Infinity;
 /** Gaps longer than this between draws are pauses, not the frame rate. */
 const GAP_MAX_MS = 100;
@@ -181,6 +187,8 @@ function onRefresh(t: number): void {
   trace?.refreshes.push(Math.round((performance.timeOrigin + t + offset) * 100) / 100);
   refreshStamps.push(t);
   if (refreshStamps.length > REFRESH_STAMPS) refreshStamps.shift();
+  // A picture held back in the last refresh goes into this one.
+  if (undrawn.length) present();
   self.requestAnimationFrame(onRefresh);
 }
 
@@ -772,6 +780,9 @@ function pump(): void {
   while (queue.length && (!queue[0].hasVideo || queue[0].picture)) apply(queue.shift()!);
 }
 
+/** Frames applied to the textures but not drawn yet (held for the next refresh). */
+const undrawn: Frame[] = [];
+
 function apply(f: Frame): void {
   const v = new DataView(f.buf);
   const n = v.getUint16(2, true);
@@ -815,6 +826,14 @@ function apply(f: Frame): void {
     f.picture.close();
     rec.push('decode', f.decoded - f.received);
   }
+  undrawn.push(f);
+  // At most one picture per display refresh: a second one in the same
+  // refresh would replace the first before it was shown.
+  if (!paceDraws || drawsSinceRefresh === 0) present();
+}
+
+/** Draws what the frames applied since the last draw left on the textures. */
+function present(): void {
   renderer.draw();
   // Probe mode reads back pixels, which waits for the GPU to execute the draw:
   // `drawn` then marks GPU completion rather than command submission.
@@ -824,10 +843,6 @@ function apply(f: Frame): void {
   // Only between pictures that keep coming (a still screen sends none).
   if (drawn - lastDraw < GAP_MAX_MS) rec.push('gap', drawn - lastDraw);
   lastDraw = drawn;
-
-  // The server leaves this frame's time here out of its network model.
-  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired);
-
   if (code) {
     if (code.ts !== lastTs) {
       lastTs = code.ts;
@@ -838,6 +853,16 @@ function apply(f: Frame): void {
       post({ type: 'marker', marker: code.marker, at: drawn });
     }
   }
+  for (const f of undrawn) drew(f, drawn);
+  undrawn.length = 0;
+}
+
+/** Acknowledgement, stats and trace of a frame drawn at `drawn`. */
+function drew(f: Frame, drawn: number): void {
+  const v = new DataView(f.buf);
+  // The server leaves this frame's time here out of its network model.
+  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired);
+
   motion = (v.getUint8(1) & FLAG_MOTION) !== 0;
   rec.frame(f.buf.byteLength, !!f.picture);
   rec.push('server', f.sent - f.oldest);
@@ -993,6 +1018,7 @@ function connect(url: string): void {
         renderer.resize(width, height, tile, v.getFloat32(20, true));
         staging = new Uint8Array(width * tile * 4);
         queue.length = 0;
+        undrawn.length = 0;
         // Frames of the previous display (late, on any path) are dropped.
         expected = v.getUint32(16, true);
         for (const s of [...early.keys()]) if (before(s, expected)) early.delete(s);
@@ -1034,6 +1060,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       }
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
+      paceDraws = m.pace && typeof self.requestAnimationFrame === 'function';
       wtAllowed = m.wt;
       createDecoder();
       // WASM zstd (~1.5 GB/s; pure-JS decoders run ~60x slower and stall

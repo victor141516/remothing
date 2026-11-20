@@ -741,3 +741,27 @@ and KiB a frame:
 | AV1 | 2.44 / 3.57, 17.5 | 1.44 / 2.65, 6.9 |
 | HEVC | 2.59 / 3.70, 40.3 | 1.45 / 2.62, 15.7 |
 | H.264 | 5.31 / 6.44, 38.9 | 1.95 / 2.84, 14.4 |
+
+Codecs on the phone, the same bench (1920x1080, `full`, 120 fps), 1200
+video frames each:
+
+| codec | fps | decode p50 / p90 / p99 ms | KB a frame | capture→draw p50 / p99 ms |
+|---|---|---|---|---|
+| AV1 | 116 | 4.8 / 6.3 / 10.2 | 5.1 | 15.9 / 34.1 |
+| HEVC | 111 | 4.8 / 6.2 / 9.7 | 10.9 | 15.9 / 39.0 |
+| H.264 | 101 | 5.3 / 7.0 / 10.4 | 10.6 | 17.3 / 44.8 |
+
+Within half a millisecond of each other: choosing the codec per client by
+measured decode time would gain nothing on this phone.
+
+## Drawing at most once per display refresh
+
+The phone, the same bench, 25 s per run, two runs each (from the trace:
+draw times against the worker's animation frames):
+
+| client | refreshes with a new picture | draws replaced before a refresh | capture→draw p50 / p90 / p99 ms |
+|---|---|---|---|
+| draw on arrival (`?pace=0`) | 82.7 %, 83.4 % | 16.1, 14.9 a second | 14.8–14.9 / 20.6–20.7 / 34–38 |
+| at most one draw per refresh | 92.4 %, 92.4 % | 1.9, 1.4 a second | 17.1–17.6 / 22.4–22.7 / 39 |
+
+Gaps between draws over 25 ms (the Wi-Fi's) stayed at 1.0–1.6 a second.

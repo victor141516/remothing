@@ -96,7 +96,13 @@ flowchart LR
      applied at once.
 6. **Client** (`worker.ts`): frames are applied in order and atomically —
    moves, then lossless rects to one texture, decoded VideoFrame to another;
-   a per-tile mask picks the layer in the WebGL2 shader. ACK after drawing,
+   a per-tile mask picks the layer in the WebGL2 shader. At most one draw
+   per display refresh (the worker's animation frames): a frame applied
+   when one was already drawn in this refresh is drawn at the next one,
+   with whatever else arrived meanwhile, so no picture is replaced unseen
+   and the next refresh is not left empty (`?pace=0` draws on arrival; on a
+   phone at 120 Hz pacing showed a new picture in 92 % of refreshes instead
+   of 83, for 2.5 ms more capture→draw at the median). ACK after drawing,
    carrying the time the frame was held (receive → draw). zstd is decoded in
    WASM (`zstddec`, ~1.5 GB/s; pure-JS decoders stall the worker).
 

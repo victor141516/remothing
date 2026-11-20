@@ -448,6 +448,8 @@ toWorker(
     // `?codec=h264|hevc|av1`: offer only that codec (H.264 is always possible).
     codec: params.get('codec'),
     hdr: hdrScreen.matches,
+    // `?pace=0`: draw every picture as it comes, even two in one display refresh.
+    pace: params.get('pace') !== '0',
   },
   [offscreen],
 );

@@ -282,7 +282,9 @@ Funnel or a reverse proxy), frames and input move to a WebRTC data
 channel; otherwise, or when UDP is blocked or stalls, everything stays on
 the WebSocket. `?transport=ws`, `?transport=webrtc` or `?transport=wt` in
 the client URL overrides the choice. `?codec=h264|hevc|av1` offers the
-server only that codec (H.264 is always possible).
+server only that codec (H.264 is always possible). `?pace=0` draws every
+picture as it arrives instead of at most one per display refresh (lower
+latency, but a picture that arrives right after another is never seen).
 
 ## Latency benchmark
 
