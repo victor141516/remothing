@@ -10,7 +10,7 @@ import { Peer } from './peer';
 import { InputProber } from './probe';
 import { C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
 import { Uploads } from './files';
-import { Stats } from './stats';
+import { Stats, refreshRate } from './stats';
 import { Ui, type ClipboardFiles, type DisplaysMessage } from './ui';
 import type { FromWorker, Path, ToWorker } from './worker';
 
@@ -278,7 +278,15 @@ async function pageHdr(on: boolean): Promise<void> {
   device.queue.submit([encoder.finish()]);
 }
 
-/** Median interval of 60 animation frames, rounded to the usual rates. */
+/** Screens change their rate (phones drop to 60 Hz while nothing moves,
+ * then go back up): measured again this often while the page shows. */
+const REFRESH_CHECK_MS = 5000;
+/** The worker measures the refresh itself (Chromium: animation frames in
+ * workers), from the frames that present the picture: on a phone the page's
+ * own frames ran at 60 Hz while the worker's ran at 120. */
+let workerMeasures = false;
+
+/** The refresh rate from 61 animation frames of this page, where the worker cannot tell. */
 function measureRefresh(): void {
   const stamps: number[] = [];
   const step = (t: number) => {
@@ -287,8 +295,9 @@ function measureRefresh(): void {
       requestAnimationFrame(step);
       return;
     }
-    const gaps = stamps.slice(1).map((s, i) => s - stamps[i]).sort((a, b) => a - b);
-    refreshHz = Math.round(1000 / gaps[gaps.length >> 1]);
+    const hz = refreshRate(stamps);
+    if (workerMeasures || hz === refreshHz) return;
+    refreshHz = hz;
     shownView = '';
     layout();
   };
@@ -297,6 +306,9 @@ function measureRefresh(): void {
 // A hidden tab gets no animation frames: measured once it is shown.
 if (document.hidden) document.addEventListener('visibilitychange', measureRefresh, { once: true });
 else measureRefresh();
+setInterval(() => {
+  if (!document.hidden && !workerMeasures) measureRefresh();
+}, REFRESH_CHECK_MS);
 
 const pointer = document.getElementById('pointer') as HTMLCanvasElement;
 /** Hot spot of the remote cursor's shape; null while the remote side hides its cursor. */
@@ -343,6 +355,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       input.setScreen(m.width, m.height);
       layout();
       void pageHdr(m.hdr);
+      break;
+    case 'refresh':
+      workerMeasures = true;
+      refreshHz = m.hz;
       break;
     case 'cursor':
       setCursor(m.buf);

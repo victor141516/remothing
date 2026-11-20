@@ -90,6 +90,19 @@ export class Series {
 
 export const p50p99 = (s: Summary): string => (s.n ? `${s.p50.toFixed(2)} / ${s.p99.toFixed(2)}` : '-');
 
+/** Refresh rates screens run at: a measured one within 4 % is taken as it,
+ * so jitter between 120 and 121 does not report a new view each time (every
+ * new rate is a new video cap, a keyframe with some encoders). */
+const USUAL_RATES = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 170, 175, 180, 200, 240, 360];
+
+/** The refresh rate of animation-frame times (at least two), from their
+ * median interval, as the usual rate it is near. */
+export function refreshRate(stamps: number[]): number {
+  const gaps = stamps.slice(1).map((s, i) => s - stamps[i]).sort((a, b) => a - b);
+  const hz = 1000 / gaps[gaps.length >> 1];
+  return USUAL_RATES.find((r) => Math.abs(hz - r) < r * 0.04) ?? Math.round(hz);
+}
+
 const OVERLAY_WINDOW = 500;
 
 export class Stats {

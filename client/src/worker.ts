@@ -26,7 +26,7 @@ import {
 } from './proto';
 import { Renderer } from './renderer';
 import { WtPath, type WtOffer } from './wt';
-import { Recorder, type Batch } from './stats';
+import { Recorder, refreshRate, type Batch } from './stats';
 
 export type ToWorker =
   /** `hdr`: the page started on an HDR screen (see `Renderer`). */
@@ -93,7 +93,9 @@ export type FromWorker =
   /** The server set the clipboard and pressed V (S_PASTED). */
   | { type: 'pasted' }
   /** The files on the remote clipboard, JSON (S_CLIPBOARD_FILES). */
-  | { type: 'clipfiles'; json: string };
+  | { type: 'clipfiles'; json: string }
+  /** The refresh rate this worker measured (it presents the picture). */
+  | { type: 'refresh'; hz: number };
 
 const post = (m: FromWorker, transfer: Transferable[] = []) => self.postMessage(m, { transfer });
 
@@ -163,12 +165,36 @@ let trace: TraceBatch | null = null;
 let traceTimer = 0;
 const TRACE_EVERY_MS = 2000;
 
+/** The display's refresh rate as this worker's animation frames see it:
+ * they present the picture, and on a phone they ran at 120 Hz while the
+ * page's own ran at 60. From the last REFRESH_STAMPS of them, checked every
+ * REFRESH_CHECK_MS (phones change their rate); 0 until measured. */
+let shownHz = 0;
+const REFRESH_STAMPS = 61;
+const REFRESH_CHECK_MS = 1000;
+const refreshStamps: number[] = [];
+
 function onRefresh(t: number): void {
   rec.refresh(drawsSinceRefresh);
   drawsSinceRefresh = 0;
   // `t` counts from the worker's start; `now()` from the epoch.
   trace?.refreshes.push(Math.round((performance.timeOrigin + t + offset) * 100) / 100);
+  refreshStamps.push(t);
+  if (refreshStamps.length > REFRESH_STAMPS) refreshStamps.shift();
   self.requestAnimationFrame(onRefresh);
+}
+
+/** A new refresh rate goes to the server in the view, and to the page. */
+function checkRefresh(): void {
+  if (refreshStamps.length < REFRESH_STAMPS) return;
+  const hz = refreshRate(refreshStamps);
+  if (hz === shownHz) return;
+  shownHz = hz;
+  post({ type: 'refresh', hz });
+  if (viewMessage) {
+    new DataView(viewMessage.buffer).setUint16(6, hz, true);
+    send(viewMessage);
+  }
 }
 
 /** Frames left on a data channel abandoned by choice (the WebSocket got
@@ -1002,7 +1028,10 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       if (!renderer.showsBt601()) bt601Wrong('WebGL ignores the colour space of video frames');
       // Display refreshes as this worker sees them (Chromium has animation
       // frames in workers; elsewhere the rates stay at 0).
-      if (typeof self.requestAnimationFrame === 'function') self.requestAnimationFrame(onRefresh);
+      if (typeof self.requestAnimationFrame === 'function') {
+        self.requestAnimationFrame(onRefresh);
+        setInterval(checkRefresh, REFRESH_CHECK_MS);
+      }
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
       wtAllowed = m.wt;
@@ -1090,7 +1119,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       v[1] = m.hdr && renderer.hdrCapable ? VIEW_HDR : 0;
       d.setUint16(2, Math.min(m.width, 0xffff), true);
       d.setUint16(4, Math.min(m.height, 0xffff), true);
-      d.setUint16(6, m.hz, true);
+      d.setUint16(6, shownHz || m.hz, true);
       viewMessage = v;
       send(v);
       break;

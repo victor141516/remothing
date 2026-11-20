@@ -251,7 +251,14 @@ pixels that is thrown away a moment later.
   sent stay video); tiles that are exact and do not change stay exact.
 - **Size per client**: the client reports how it shows the picture
   (`C_VIEW`: its size in the window in device pixels, 3 s after the window
-  last changed, and its refresh rate, from 60 animation frames). In motion
+  last changed, and its refresh rate). The rate is the median interval of
+  the last 61 animation frames of the stream worker, which presents the
+  picture, checked every second and taken as the usual rate it is within
+  4 % of (120, not 121: each new rate is a new video cap): a phone's page
+  thread ran at 60 Hz while its worker ran at 120, and the rate measured
+  once on the page held that phone to 60 frames a second and half a 60 Hz
+  slot of wait (capture→draw 27–33 ms, 15–16 at 120). Browsers without
+  animation frames in workers measure on the page, every 5 s. In motion
   mode the encoder encodes the largest of that size, the display's, and
   ¾, ⅔ and ½ of the display that fits the video cap at 0.1 bit per pixel
   and refresh (`video_size`, a first guess); never below the client's
