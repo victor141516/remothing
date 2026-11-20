@@ -765,3 +765,23 @@ draw times against the worker's animation frames):
 | at most one draw per refresh | 92.4 %, 92.4 % | 1.9, 1.4 a second | 17.1–17.6 / 22.4–22.7 / 39 |
 
 Gaps between draws over 25 ms (the Wi-Fi's) stayed at 1.0–1.6 a second.
+
+## Phone: transports on Wi-Fi and 5G
+
+The phone, the same bench (1920x1080, `full`, 120 fps), drawing once per
+refresh, 20-25 s per transport (`?transport=`). On 5G Wi-Fi was off and the
+container held the ports the router forwards (the demo was stopped).
+
+| link | transport | frames/s | refreshes with a new picture | network p50 / p90 / p99 ms | estimate |
+|---|---|---|---|---|---|
+| Wi-Fi | WebTransport | 115 | 92.1 % | 3.7 / 5.7 / 11.6 | |
+| Wi-Fi | WebRTC | 114 | 92.6 % | 3.5 / 5.3 / 13.0 | |
+| Wi-Fi | WebSocket | 115 | 93.3 % | 3.7 / 5.7 / 10.9 | |
+| 5G | WebTransport | 70 | 51.0 % | 17.6 / 40.6 / 93.7 | 1 Mbit/s |
+| 5G | WebRTC | 78 | 55.6 % | 17.6 / 38.8 / 83.0 | 2 Mbit/s |
+| 5G | WebSocket | 66 | 47.8 % | 19.0 / 44.6 / 156.9 | 1 Mbit/s |
+
+On this Wi-Fi the transports are alike at this load. On 5G the link model
+cut its estimate to the floor on delay the radio adds whatever is sent
+(0.5-0.9 Mbit/s sent, delay p10 9-20 ms and p90 30-110 ms per second):
+`tasks/010-mobile-link-delay.md`.
