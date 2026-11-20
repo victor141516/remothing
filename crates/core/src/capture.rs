@@ -30,6 +30,9 @@ const IDLE_STOP: Duration = Duration::from_secs(10);
 /// to the default one. Not at once: a virtual display changing mode on
 /// Windows is removed and added again.
 const GONE_AFTER: Duration = Duration::from_secs(10);
+/// How often the places of captured displays on the desktop are compared
+/// (see `watch_layout`).
+const LAYOUT_CHECK: Duration = Duration::from_secs(1);
 
 /// Clipboard text as last seen.
 #[derive(Clone)]
@@ -240,7 +243,7 @@ pub struct Streams {
 
 impl Streams {
     pub fn new(platform: Arc<dyn Platform>, telemetry: Arc<Telemetry>, keyboard_layout: Arc<RwLock<String>>, tile: u32) -> Arc<Self> {
-        Arc::new(Self {
+        let streams = Arc::new(Self {
             platform,
             telemetry,
             keyboard_layout,
@@ -249,7 +252,12 @@ impl Streams {
             list: watch::channel(()).0,
             shown: RwLock::default(),
             capturing: Mutex::default(),
-        })
+        });
+        let watcher = Arc::downgrade(&streams);
+        if let Err(e) = std::thread::Builder::new().name("display layout".into()).spawn(move || watch_layout(watcher)) {
+            streams.telemetry.error("display layout thread", anyhow::Error::new(e));
+        }
+        streams
     }
 
     /// One more client watches display `id`; its capture starts with the
@@ -378,6 +386,42 @@ impl Streams {
             map.remove(&stream.id);
         }
         true
+    }
+}
+
+/// Rearranged displays keep their size, so nothing else opens them again:
+/// their places on the desktop are compared every LAYOUT_CHECK while any is
+/// captured, off the capture threads (listing displays on Windows enumerates
+/// DXGI), and a display that moved is opened again, so capture (an X11
+/// output is captured by its area of the X screen) and input (positions are
+/// display pixels plus its place) take the new place. Before, after the
+/// user moved the displays, absolute moves aimed where the display had been
+/// and Windows held the cursor on the nearest edge.
+fn watch_layout(streams: std::sync::Weak<Streams>) {
+    // Places a reopen was asked for, until the display shows it.
+    let mut asked: HashMap<String, (i32, i32)> = HashMap::new();
+    loop {
+        std::thread::sleep(LAYOUT_CHECK);
+        let Some(streams) = streams.upgrade() else { return };
+        let active = streams.active();
+        if active.is_empty() {
+            asked.clear();
+            continue;
+        }
+        let Ok(list) = streams.platform.displays().list() else { continue };
+        for stream in &active {
+            let Some(current) = stream.control.current() else { continue };
+            let Some(now) = list.iter().find(|d| d.id == current.id) else { continue };
+            let place = (now.x, now.y);
+            if (current.x, current.y) == place {
+                asked.remove(&current.id);
+            } else if asked.get(&current.id) != Some(&place) {
+                eprintln!("display {} moved on the desktop to {},{}: opening it again", now.id, now.x, now.y);
+                asked.insert(current.id.clone(), place);
+                streams.reopen(&current.id);
+                streams.list_changed();
+            }
+        }
     }
 }
 

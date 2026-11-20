@@ -381,6 +381,18 @@ frame data, or over the data channel when frames use it; the server injects
 it through the selected display's `InputProvider` (display-relative
 coordinates, evdev key codes on the wire).
 
+Positions stay absolute (where the pointer is over the picture is where
+the remote one goes; relative moves drift with the remote pointer speed
+and acceleration and cannot be corrected without trapping the mouse), so
+the input provider adds the display's place on the desktop. That place is
+followed: every second, while any display is captured and off the capture
+threads, the places of the captured displays are compared with the
+platform's list, and a display that moved is opened again
+(`capture.rs::watch_layout`). Rearranging displays changes no size, so
+nothing else reopened them: absolute moves aimed where a display had been,
+and Windows held the cursor on the nearest edge. Reopening also matters
+for capture on X11, where an output is captured by its area of the screen.
+
 - **Held keys**: a key is down on the server from the client's press to its
   release, so holding it repeats on the remote side (the browser's own
   repeats are dropped). The X server repeats a held key by itself; Windows
