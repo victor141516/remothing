@@ -77,6 +77,11 @@ export const FLAG_MOTION = 4;
 /** Bits 3-4 of FRAME flags: the video codec, a key of CODECS (see proto.rs FLAG_CODEC_SHIFT). */
 export const FLAG_CODEC_SHIFT = 3;
 export const FLAG_CODEC_MASK = 3;
+/** The video's YUV is BT.601 rather than BT.709 (see proto.rs). */
+export const FLAG_BT601 = 32;
+/** How the video's YUV is to be turned into RGB, by FLAG_BT601. */
+export const BT601: VideoColorSpaceInit = { matrix: 'smpte170m', primaries: 'bt709', transfer: 'bt709', fullRange: false };
+export const BT709: VideoColorSpaceInit = { matrix: 'bt709', primaries: 'bt709', transfer: 'bt709', fullRange: false };
 /** Video codecs by their number in FRAME flags: the server's name and the WebCodecs string (levels for 4K at 120 Hz; H.264's 5.1 is what it supports). */
 export const CODECS: Record<number, { name: string; config: string }> = {
   0: { name: 'h264', config: 'avc1.640033' },
@@ -104,6 +109,8 @@ export const C_CAPTURE = 23;
 export const C_VIRTUAL = 24;
 /** UTF-8 text: this computer's clipboard for a Ctrl+V; the server sets it and presses V (see proto.rs). */
 export const C_PASTE = 25;
+/** Empty: this browser shows BT.601 video in the wrong colours; video in BT.709 from now on (see proto.rs). */
+export const C_BT709 = 26;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 

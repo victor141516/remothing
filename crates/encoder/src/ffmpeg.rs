@@ -41,7 +41,29 @@ impl HostInput {
             // Scaled: the fast bilinear filter, since the whole picture is
             // scaled for every frame on the CPU.
             let flags = if (iw, ih) == (ow, oh) { scaling::Flags::POINT } else { scaling::Flags::FAST_BILINEAR };
-            let sws = scaling::Context::get(Pixel::BGRZ, iw, ih, wants, ow, oh, flags)?;
+            let mut sws = scaling::Context::get(Pixel::BGRZ, iw, ih, wants, ow, oh, flags)?;
+            if wants != Pixel::BGRZ {
+                // RGB to YUV in BT.709, what the stream signals (swscale's
+                // default is BT.601; the same speed either way, measured).
+                // SAFETY: reads and sets the colour details of the live context.
+                unsafe {
+                    let (mut inv, mut src_range, mut table, mut dst_range) = (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+                    let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
+                    let ctx = sws.as_mut_ptr();
+                    ff::ffi::sws_getColorspaceDetails(
+                        ctx,
+                        &mut inv,
+                        &mut src_range,
+                        &mut table,
+                        &mut dst_range,
+                        &mut brightness,
+                        &mut contrast,
+                        &mut saturation,
+                    );
+                    let bt709 = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
+                    ff::ffi::sws_setColorspaceDetails(ctx, bt709, src_range, bt709, dst_range, brightness, contrast, saturation);
+                }
+            }
             Some((sws, ff::frame::Video::new(wants, ow, oh)))
         };
         Ok(Self { bgrx: ff::frame::Video::new(Pixel::BGRZ, iw, ih), convert })
@@ -149,6 +171,8 @@ pub(crate) struct FfmpegEncoder {
     codec: Codec,
     /// Runs two-pass (see `offers_two_pass`).
     two_pass: bool,
+    /// The YUV is BT.601: NVENC converting RGB input itself.
+    bt601: bool,
     kind: InputKind,
     pub(crate) fallback: Option<String>,
 }
@@ -168,6 +192,7 @@ impl FfmpegEncoder {
         surface: Option<&GpuSurface>,
         bitrate: u64,
         two_pass: bool,
+        bt709: bool,
         overrides: &[(String, String)],
     ) -> Result<Self> {
         let (width, height) = output;
@@ -182,7 +207,6 @@ impl FfmpegEncoder {
         enc.set_max_b_frames(0);
         // Keyframes only on demand (new client / decoder error).
         enc.set_gop(100_000);
-        enc.set_colorspace(ff::color::Space::BT709);
         enc.set_color_range(ff::color::Range::MPEG);
         enc.set_flags(ff::codec::Flags::LOW_DELAY);
         if backend.caps_bitrate() {
@@ -194,9 +218,16 @@ impl FfmpegEncoder {
             }
         }
 
+        // NVENC converts RGB input to YUV itself, with BT.601 (measured,
+        // whatever the stream signals). Asked for BT.709, it gets YUV
+        // converted by us instead; every other path converts to BT.709.
+        let bt601 = backend == Backend::Nvenc && !bt709;
         let input = match kind {
             #[cfg(target_os = "linux")]
             InputKind::Cuda => {
+                if bt709 {
+                    anyhow::bail!("BT.709 needs NVENC's system-memory input here");
+                }
                 let s = crate::cuda::CudaSurface::new(width, height)?;
                 enc.set_format(Pixel::CUDA);
                 unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = s.frames_ref() };
@@ -205,18 +236,21 @@ impl FfmpegEncoder {
             }
             #[cfg(windows)]
             InputKind::D3D11 => {
-                let i = crate::d3d11::D3D11Input::new(surface.context("no capture surface")?, input, output)?;
+                let nv12 = backend == Backend::Nvenc && bt709;
+                let i = crate::d3d11::D3D11Input::new(surface.context("no capture surface")?, input, output, nv12)?;
                 enc.set_format(Pixel::D3D11);
                 unsafe { (*enc.as_mut_ptr()).hw_frames_ctx = i.frames_ref() };
                 Input::D3D11(i)
             }
             InputKind::Host => {
-                let wants = backend.host_format();
+                let wants = if backend == Backend::Nvenc && bt709 { Pixel::NV12 } else { backend.host_format() };
                 enc.set_format(wants);
                 Input::Host(HostInput::new(input, output, wants)?)
             }
         };
         let _ = surface;
+        // The stream says which matrix its YUV is in.
+        enc.set_colorspace(if bt601 { ff::color::Space::BT470BG } else { ff::color::Space::BT709 });
 
         let mut opts = ff::Dictionary::new();
         match codec {
@@ -295,6 +329,7 @@ impl FfmpegEncoder {
             backend,
             codec,
             two_pass: two_pass && offers_two_pass(backend, codec),
+            bt601,
             kind,
             fallback: None,
         })
@@ -304,11 +339,17 @@ impl FfmpegEncoder {
 impl VideoEncoder for FfmpegEncoder {
     fn name(&self) -> String {
         let pass = if self.two_pass { " two-pass" } else { "" };
-        format!("{} {}{pass} ({})", self.backend.name(), self.codec.name(), self.kind.label())
+        // Says when the colour conversion is ours (C_BT709) rather than NVENC's.
+        let bt709 = if self.backend == Backend::Nvenc && !self.bt601 { ", BT.709" } else { "" };
+        format!("{} {}{pass} ({}{bt709})", self.backend.name(), self.codec.name(), self.kind.label())
     }
 
     fn two_pass(&self) -> Option<bool> {
         offers_two_pass(self.backend, self.codec).then_some(self.two_pass)
+    }
+
+    fn bt601(&self) -> bool {
+        self.bt601
     }
 
     fn codec(&self) -> Codec {

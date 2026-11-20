@@ -474,6 +474,12 @@ impl VideoEncoder for VtEncoder {
     fn two_pass(&self) -> Option<bool> {
         None
     }
+
+    /// VideoToolbox converts the BGRA it is given with the BT.709 matrix the
+    /// pixel buffers are tagged with.
+    fn bt601(&self) -> bool {
+        false
+    }
 }
 
 impl Drop for VtEncoder {

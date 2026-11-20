@@ -873,8 +873,9 @@ impl Shared {
             codec.video_slot = (codec.video_slot + min).max(now.saturating_sub(2 * min));
             codec.next_video_us = now + paced;
             key = v.key;
-            let wire = codec.encoder.as_ref().expect("loaded implies encoder").codec().wire();
-            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 } | wire << proto::FLAG_CODEC_SHIFT;
+            let encoder = codec.encoder.as_ref().expect("loaded implies encoder");
+            let bt601 = if encoder.bt601() { proto::FLAG_BT601 } else { 0 };
+            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 } | encoder.codec().wire() << proto::FLAG_CODEC_SHIFT | bt601;
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
             msg.extend_from_slice(&v.data);
         }

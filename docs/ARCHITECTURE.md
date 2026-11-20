@@ -146,6 +146,27 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   takes NVENC about 250 ms: it opens on its own thread while the current
   one keeps encoding, then takes over with a keyframe. HEVC and AV1 gained
   nothing measurable from it.
+- **Colour matrix.** Tiles carry exact RGB; video turns it into YUV and
+  the browser turns it back, so both ends must use the same matrix or
+  moving areas change colour when they turn into video (up to 39 levels on
+  saturated colours, measured). NVENC converts RGB input (D3D11 BGRA, CUDA
+  or system-memory BGRZ) itself, always with BT.601; swscale (x264, AMF and
+  QuickSync from system memory) and the video processor convert to BT.709;
+  VideoToolbox converts with the BT.709 its pixel buffers are tagged with
+  (not measured). Each stream signals its own matrix, and each FRAME with
+  BT.601 video has `FLAG_BT601`. Chromium ignores what the stream signals
+  (it takes BT.709 for every codec), so the client sets the matrix in the
+  decoder's configuration (`colorSpace`). Where that does not take, the
+  client sees it and asks for BT.709 (`C_BT709`): the decoded frames keep
+  another matrix than the one configured (Chromium's HEVC), or a BT.601
+  test frame drawn the way video is drawn reads back in the wrong colours
+  (`Renderer.showsBt601`, once at start). The server then converts to
+  BT.709 itself for that client: on D3D11 the video processor turns the
+  BGRA copy into NV12 for NVENC; on Linux NVENC takes swscale's NV12 from
+  system memory instead of the CUDA path. That conversion costs NVENC
+  +0.05 to +0.1 ms per frame with AV1 and up to +1.1 ms with H.264 at 4K
+  (docs/RESULTS.md, "Video colour matrix"), so it is only done where the
+  browser needs it; swscale's BT.709 costs nothing over its BT.601.
 
 ## HDR
 
@@ -859,7 +880,8 @@ DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
 it, agree to install or restart), MIC (one packet), MOVE, MOVE_REL (mouse
 counts while captured), BUTTON, WHEEL, KEY, TEXT, NACK (WebTransport
 pieces to send again), VIEW (picture size in the window and refresh rate),
-CAPTURE (the mouse is captured or not).
+CAPTURE (the mouse is captured or not), BT709 (this browser shows BT.601
+video in the wrong colours).
 
 ## Admin
 

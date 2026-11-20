@@ -59,6 +59,10 @@ pub struct EncoderRequest {
     /// one), where the encoder offers it: steadier frame sizes for a little
     /// more encode time.
     pub two_pass: bool,
+    /// The client cannot show BT.601 video in its colours: BT.709 even where
+    /// the encoder would otherwise convert to BT.601 (NVENC with RGB input),
+    /// at the cost of a conversion pass of its own.
+    pub bt709: bool,
 }
 
 pub struct Encoded {
@@ -114,6 +118,9 @@ pub trait VideoEncoder: Send {
     /// Whether it encodes in two passes: None for encoders without that
     /// setting, so asking for the other one would change nothing.
     fn two_pass(&self) -> Option<bool>;
+    /// The video's YUV is BT.601 rather than BT.709: NVENC converts RGB
+    /// input with that matrix (measured), the other paths convert to BT.709.
+    fn bt601(&self) -> bool;
 }
 
 pub trait AudioEncoder: Send {

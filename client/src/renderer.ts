@@ -8,6 +8,8 @@
 // white goes above 1, which the browser shows brighter when the page is in
 // HDR (see `hdrSwitch` in main.ts).
 
+import { BT601 } from './proto';
+
 const VS = `#version 300 es
 void main() {
   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
@@ -217,6 +219,38 @@ export class Renderer {
     }
     gl.activeTexture(gl.TEXTURE1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+  }
+
+  /** Whether a BT.601 video frame comes out in its colours on the way
+   * `uploadVideo` takes: pure red (248, 0, 0) as BT.601 studio-range YUV
+   * reads back as red, not as BT.709's (255, 24, 0). */
+  showsBt601(): boolean {
+    const gl = this.gl;
+    let frame: VideoFrame;
+    try {
+      // 2x2 I420: four Y, one U, one V.
+      const yuv = new Uint8Array([80, 80, 80, 80, 91, 237]);
+      frame = new VideoFrame(yuv, { format: 'I420', codedWidth: 2, codedHeight: 2, timestamp: 0, colorSpace: BT601 });
+    } catch {
+      return false;
+    }
+    // A unit and objects of its own: the compositor's bindings stay as they are.
+    gl.activeTexture(gl.TEXTURE4);
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 2, 2);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+    frame.close();
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    const px = new Uint8Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb);
+    gl.deleteTexture(t);
+    gl.activeTexture(gl.TEXTURE0);
+    return Math.abs(px[0] - 248) <= 4 && px[1] <= 8 && px[2] <= 8;
   }
 
   /** A video texture of the encoded size (immutable storage: a new one per size). */

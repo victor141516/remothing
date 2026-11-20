@@ -971,6 +971,7 @@ mod bench {
                     max_bitrate: u64::MAX,
                     fps: 60,
                     two_pass: false,
+                    bt709: false,
                 };
                 let e = provider.create(&req)?;
                 println!("{w}x{h} prefer {backend}: opened {:?}, fallback: {:?}", e.name(), e.fallback_reason());
@@ -992,6 +993,7 @@ mod bench {
                             fps: 60,
                             // Swept with `--set multipass=qres` instead.
                             two_pass: false,
+                            bt709: false,
                         };
                         let mut e = provider.create(&req)?;
                         let prefix = format!("| {} | {label} | {w}x{h} | {} ", e.name(), scene.name());

@@ -249,6 +249,8 @@ struct ClientLink {
     view: Mutex<View>,
     /// Codecs the client decodes (H.264 always; others in hardware).
     codecs: Vec<Codec>,
+    /// The client cannot show BT.601 video in its colours (C_BT709).
+    bt709: AtomicBool,
 }
 
 /// Moves the client to `stream`, which it already watches (`Streams::watch`):
@@ -310,6 +312,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         held: Mutex::new(Held::default()),
         view: Mutex::new(View::default()),
         codecs,
+        bt709: AtomicBool::new(false),
     });
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (peer_tx, mut peer_rx) = mpsc::unbounded_channel::<PeerEvent>();
@@ -550,6 +553,11 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         let set = tokio::task::block_in_place(|| stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])));
                         if let Err(e) = set {
                             app.telemetry.error("clipboard", e);
+                        }
+                    }
+                    (Some(proto::C_BT709), _) => {
+                        if !link.bt709.swap(true, Ordering::AcqRel) {
+                            waker.unpark();
                         }
                     }
                     (Some(proto::C_PASTE), _) => {
@@ -1006,6 +1014,9 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
     // A replacement encoder opening (two-pass switched), and when a failed
     // one may be tried again.
     let mut pending: Option<PendingEncoder> = None;
+    // The encoder was replaced once for the client's C_BT709 (if the new
+    // one still cannot convert, it is not replaced again and again).
+    let mut bt709_done = false;
     let mut two_pass_retry_us = 0;
     let mut room_since = 0;
     // Estimate on the WebSocket path when frames moved to the data channel
@@ -1075,6 +1086,18 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 need_key = true;
             }
         }
+        // The client's browser shows BT.601 video in the wrong colours
+        // (C_BT709): a new encoder that converts to BT.709 itself.
+        let bt601 = codec.encoder.as_ref().is_some_and(|e| e.bt601());
+        if bt601 && !bt709_done && link.bt709.load(Ordering::Acquire) && size != (0, 0) {
+            bt709_done = true;
+            app.telemetry.event(link.id, "this browser shows BT.601 video in the wrong colours: the server converts to BT.709");
+            pending = None;
+            let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
+            create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
+            shared.encoder_reset(link.id);
+            need_key = true;
+        }
         if let Some(p) = shared.take_cursor_pos(link.id) {
             if out.send(p).is_err() {
                 return;
@@ -1104,7 +1127,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 let state = if want { "on" } else { "off" };
                 let text = format!("two-pass {state} (video cap {:.1} Mbit/s, round trip {} ms)", video_cap.bps as f64 / 1e6, rtt_us / 1000);
                 app.telemetry.event(link.id, &text);
-                let req = encoder_request(shared, current, size, encoded, &encoder_conf.0, &video_cap, want);
+                let req = encoder_request(shared, link, current, size, encoded, &encoder_conf.0, &video_cap, want);
                 pending = Some(PendingEncoder::open(app, req));
             }
         }
@@ -1381,7 +1404,7 @@ fn create_encoder(
     let encoders = app.platform.encoders();
     let (pref, setting) = conf;
     let chosen = pick_codec(setting, &link.codecs, &encoders.codecs());
-    let mut req = encoder_request(shared, chosen, size, output, pref, cap, two_pass);
+    let mut req = encoder_request(shared, link, chosen, size, output, pref, cap, two_pass);
     let mut created = encoders.create(&req);
     if let Err(e) = &created {
         if req.codec != Codec::H264 {
@@ -1399,8 +1422,10 @@ fn create_encoder(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encoder_request(
     shared: &Shared,
+    link: &ClientLink,
     codec: Codec,
     size: (u32, u32),
     output: (u32, u32),
@@ -1418,6 +1443,7 @@ fn encoder_request(
         max_bitrate: cap.bps,
         fps: cap.fps,
         two_pass,
+        bt709: link.bt709.load(Ordering::Acquire),
     }
 }
 

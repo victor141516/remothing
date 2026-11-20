@@ -17,10 +17,10 @@ import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  C_ACK, C_AUDIO, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME, C_MIC_INFO, C_PING, C_SIGNAL,
-  CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
-  C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_CODEC_MASK,
-  FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
+  BT601, BT709, C_ACK, C_AUDIO, C_BT709, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME,
+  C_MIC_INFO, C_PING, C_SIGNAL, CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
+  C_PASTE, C_STATS, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_BT601,
+  FLAG_CODEC_MASK, FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   S_CLIPBOARD_FILES, S_PASTED, S_SIGNAL, VIEW_HDR, now,
 } from './proto';
@@ -129,6 +129,13 @@ let ws: WebSocket | undefined;
 let decoder: VideoDecoder;
 /** Codec the decoder is configured for (a key of CODECS). */
 let decoderCodec = 0;
+/** The decoder is configured for BT.601 video (FLAG_BT601), from the frame of this sequence on. */
+let decoderBt601 = false;
+let bt601From = 0;
+/** Why BT.601 video shows in the wrong colours in this browser (`bt601Wrong`); null: it does not. */
+let bt601Broken: string | null = null;
+/** C_BT709 was sent on this connection. */
+let bt709Asked = false;
 /** Codecs besides H.264 offered to the server: those decoded in hardware here. */
 let offered: string[] = [];
 let awaitingKey = true;
@@ -590,6 +597,11 @@ async function hardwareCodecs(only: string | null): Promise<string[]> {
 function createDecoder(): void {
   decoder = new VideoDecoder({
     output: (picture) => {
+      // A decoder that ignores the colour space it was given (Chromium's
+      // HEVC) reports the stream's: those colours would be wrong.
+      if (decoderBt601 && !before(picture.timestamp, bt601From) && picture.colorSpace.matrix !== 'smpte170m') {
+        bt601Wrong(`the ${CODECS[decoderCodec].name} decoder ignores the colour space it is given`);
+      }
       const f = queue.find((q) => q.hasVideo && !q.picture && q.seq === picture.timestamp);
       if (!f) {
         picture.close();
@@ -621,7 +633,27 @@ function createDecoder(): void {
 }
 
 function configureDecoder(): void {
-  decoder.configure({ codec: CODECS[decoderCodec].config, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+  decoder.configure({
+    codec: CODECS[decoderCodec].config,
+    optimizeForLatency: true,
+    hardwareAcceleration: 'prefer-hardware',
+    // Overrides what the stream says (Chromium takes BT.709 whatever it says).
+    colorSpace: decoderBt601 ? BT601 : BT709,
+  });
+}
+
+/** This browser shows BT.601 video in the wrong colours: the server is asked for BT.709. */
+function bt601Wrong(why: string): void {
+  if (bt601Broken !== null) return;
+  bt601Broken = why;
+  if (decoderBt601) askBt709();
+}
+
+function askBt709(): void {
+  if (bt709Asked) return;
+  bt709Asked = true;
+  sendText(C_EVENT, `BT.601 video would show in the wrong colours here (${bt601Broken}): asking for BT.709`);
+  send(new Uint8Array([C_BT709]));
 }
 
 function resetDecoder(): void {
@@ -657,15 +689,20 @@ function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
     const len = v.getUint32(videoAt, true);
     const key = (flags & FLAG_KEY) !== 0;
     const codec = (flags >> FLAG_CODEC_SHIFT) & FLAG_CODEC_MASK;
-    if (codec !== decoderCodec) {
-      // Another codec starts with a keyframe; queued pictures of the old one still come out first.
+    const bt601 = (flags & FLAG_BT601) !== 0;
+    if (codec !== decoderCodec || bt601 !== decoderBt601) {
+      // Another codec or matrix comes from a new encoder, which starts with a
+      // keyframe; queued pictures of the old one still come out first.
       if (key) {
         decoderCodec = codec;
+        decoderBt601 = bt601;
         configureDecoder();
+        bt601From = f.seq;
       } else {
         awaitingKey = true;
       }
     }
+    if (bt601 && bt601Broken !== null) askBt709();
     if (key && codec === decoderCodec) awaitingKey = false;
     if (!awaitingKey) {
       f.hasVideo = true;
@@ -796,6 +833,8 @@ function connect(url: string): void {
   ws = new WebSocket(`${url}${codecs}&display=${encodeURIComponent(display)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    // The server's choice is per connection.
+    bt709Asked = false;
     syncSamples.length = 0;
     for (let i = 0; i < 20; i++) setTimeout(ping, i * 25);
     // Which display the server chose (the page's address shows it).
@@ -903,6 +942,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   switch (m.type) {
     case 'init':
       renderer = new Renderer(m.canvas, m.hdr);
+      if (!renderer.showsBt601()) bt601Wrong('WebGL ignores the colour space of video frames');
       if (m.probe) barcode = new BarcodeReader(renderer);
       forceDc = m.forceDc;
       wtAllowed = m.wt;

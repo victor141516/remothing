@@ -2,9 +2,10 @@
 //! context wrapping the capture device itself, so the encoder input texture
 //! lives on the same GPU device as the captured desktop: each frame only the
 //! changed regions are copied GPU-to-GPU, and NVENC/AMF read that texture
-//! directly. A smaller encoded size keeps a full-size copy instead, which
-//! the GPU's video processor scales into the encoder texture before each
-//! frame.
+//! directly. A smaller encoded size, or NV12 input (BT.709 for clients that
+//! cannot show NVENC's own BT.601 conversion), keeps a full-size copy
+//! instead, which the GPU's video processor scales and converts into the
+//! encoder texture before each frame.
 
 use std::ffi::{c_int, c_void};
 use std::mem::ManuallyDrop;
@@ -19,15 +20,18 @@ use remothing_core::geom::Rect;
 use remothing_core::platform::GpuSurface;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorInputView,
-    ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
-    D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_BOX, D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
     D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2DARRAY,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_B8G8R8A8_UNORM,
+    DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
 
 /// Leading fields of FFmpeg's AVD3D11VADeviceContext (hwcontext_d3d11va.h).
 /// Mirrored rather than taken from the bindings, which only exist when bindgen
@@ -72,7 +76,8 @@ pub struct D3D11Input {
     /// Input (display) size: where changed regions are copied.
     width: u32,
     height: u32,
-    /// With a smaller encoded size: the full-size copy and its scaler.
+    /// With a smaller encoded size or NV12: the full-size copy and the
+    /// video processor that scales and converts it.
     scaler: Option<Scaler>,
     /// Keeps the capture frame alive: FFmpeg's lock callbacks point at its
     /// `context_lock` and the device context references its device. Dropped last.
@@ -91,7 +96,9 @@ struct Scaler {
 unsafe impl Send for D3D11Input {}
 
 impl D3D11Input {
-    pub fn new(surface: &GpuSurface, (width, height): (u32, u32), (out_w, out_h): (u32, u32)) -> Result<Self> {
+    /// `nv12`: the encoder gets NV12 in BT.709, converted by the video
+    /// processor (NVENC would otherwise convert BGRA itself, in BT.601).
+    pub fn new(surface: &GpuSurface, (width, height): (u32, u32), (out_w, out_h): (u32, u32), nv12: bool) -> Result<Self> {
         let capture = surface.downcast_ref::<D3D11Frame>().context("no D3D11 capture surface")?;
         unsafe {
             let mut device = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
@@ -119,15 +126,20 @@ impl D3D11Input {
             }
             let fc = &mut *((*frames).data as *mut ffi::AVHWFramesContext);
             fc.format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
-            fc.sw_format = ffi::AVPixelFormat::AV_PIX_FMT_BGRA;
+            fc.sw_format = if nv12 { ffi::AVPixelFormat::AV_PIX_FMT_NV12 } else { ffi::AVPixelFormat::AV_PIX_FMT_BGRA };
             fc.width = out_w as c_int;
             fc.height = out_h as c_int;
             // A single persistent texture, updated in place with dirty regions.
             fc.initial_pool_size = 1;
             let fh = &mut *(fc.hwctx as *mut AvD3D11VaFramesContext);
             // AMF converts BGRA to NV12 with a shader (needs SRV); render
-            // target lets NVENC/AMF register the texture as an input resource.
-            fh.bind_flags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+            // target lets NVENC/AMF register the texture as an input
+            // resource, and the video processor write NV12 into it.
+            fh.bind_flags = if nv12 {
+                D3D11_BIND_RENDER_TARGET.0 as u32
+            } else {
+                (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32
+            };
             let r = ffi::av_hwframe_ctx_init(frames);
             if r < 0 {
                 ffi::av_buffer_unref(&mut frames);
@@ -149,8 +161,9 @@ impl D3D11Input {
                 .context("D3D11 frame without texture")?;
             // Array slice of a single-mip texture == subresource index.
             let subresource = f.data[1] as usize as u32;
-            let scaler = ((width, height) != (out_w, out_h))
-                .then(|| scaler(capture, &texture, subresource, (width, height), (out_w, out_h)))
+            // NV12 is made by the video processor at every size.
+            let scaler = ((width, height) != (out_w, out_h) || nv12)
+                .then(|| scaler(capture, &texture, subresource, (width, height), (out_w, out_h), nv12))
                 .transpose()?;
             Ok(Self { device, frames, frame, texture, subresource, width, height, scaler, surface: surface.clone() })
         }
@@ -208,13 +221,15 @@ impl D3D11Input {
 }
 
 /// A full-size copy texture and a video processor scaling it into the
-/// encoder texture (`subresource` of `texture`).
+/// encoder texture (`subresource` of `texture`), and converting it to NV12
+/// when that is the encoder texture's format.
 fn scaler(
     capture: &D3D11Frame,
     texture: &ID3D11Texture2D,
     subresource: u32,
     (width, height): (u32, u32),
     (out_w, out_h): (u32, u32),
+    nv12: bool,
 ) -> Result<Scaler> {
     let device = &capture.device;
     let desc = D3D11_TEXTURE2D_DESC {
@@ -265,6 +280,15 @@ fn scaler(
         };
         let mut output = None;
         video.CreateVideoProcessorOutputView(texture, &enumerator, &output_desc, Some(&mut output)).context("output view")?;
+        // The desktop is sRGB-like full-range RGB; NV12 output is BT.709
+        // studio range, what the stream signals.
+        capture.with_context(|ctx| -> Result<()> {
+            let video: ID3D11VideoContext1 = ctx.cast().context("no D3D11 video context 1")?;
+            video.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            let out = if nv12 { DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 };
+            video.VideoProcessorSetOutputColorSpace1(&processor, out);
+            Ok(())
+        })?;
         Ok(Scaler {
             full,
             processor,

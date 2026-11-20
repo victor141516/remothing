@@ -544,6 +544,42 @@ forced) decode without errors (200/200 frames, dav1d and FFmpeg's HEVC
 decoder). Decoded and compared with the source, HEVC (split disabled or
 the driver's choice) has the MAE of H.264 (1.4-1.8).
 
+## Video colour matrix
+
+This PC (RTX 4080 SUPER), Edge 156. Flat colour patches encoded by each
+path, decoded, and compared at the patch centres (largest channel error,
+levels of 255):
+
+| path | YUV it produces | what the stream signals | read as BT.709 | read as BT.601 |
+|---|---|---|---|---|
+| NVENC, D3D11 BGRA or system-memory BGRZ (H.264, HEVC, AV1) | BT.601 | BT.601 (H.264) | 39 | 1 |
+| x264 with swscale's default (before) | BT.601 | BT.709 | 39 | 1 |
+| x264 with swscale set to BT.709 | BT.709 | BT.709 | 1 | 42 |
+| NVENC fed NV12 from the D3D11 video processor (BT.709) | BT.709 | BT.709 | 1-3 | 42-43 |
+
+Edge decoding NVENC's streams with WebCodecs and drawing them through
+WebGL `texSubImage2D` (the client's path), hardware and software decoders:
+every codec came out as BT.709 (`VideoFrame.colorSpace.matrix`), whatever
+the stream signals, 39 levels off on saturated colours (0,248,0 shown as
+0,209,0; 184,72,48 as 194,81,45), greys exact. With `colorSpace` set to
+BT.601 in the decoder's configuration: H.264 and AV1 exact (error at most
+1); HEVC unchanged (the setting is ignored).
+
+Cost of converting to BT.709 ourselves, ms per frame with the whole
+picture changing every frame (p50 / p99, two runs; this PC's own AV1 4K
+stream shared NVENC meanwhile):
+
+| codec | size | NVENC converts BGRA (BT.601) | video processor to NV12 (BT.709) |
+|---|---|---|---|
+| AV1 | 1920x1080 | 0.87-0.89 / 2.5 | 0.91-0.95 / 2.7 |
+| AV1 | 3840x2160 | 2.18-2.25 / 5.1-9.4 | 2.24-2.37 / 5.7-8.8 |
+| H.264 | 1920x1080 | 1.66-1.70 / 3.0 | 1.71-1.77 / 3.5 |
+| H.264 | 3840x2160 | 4.39-4.46 / 5.8-6.0 | 5.46-5.52 / 7.1-7.4 |
+
+Frames came out 3 % smaller through NV12. swscale BGRZ to YUV420P (x264):
+2.0-2.4 ms at 1080p and 8.6-10.1 ms at 4K with either matrix, x264's
+frames 8 % smaller with BT.709.
+
 ## HDR
 
 This PC's main display (3840x2160) in HDR mode, SDR content brightness

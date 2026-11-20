@@ -191,6 +191,11 @@ pub const C_VIRTUAL: u8 = 24;
 /// next keys) and answers S_PASTED. It travels on this socket because a
 /// clipboard may be larger than an input message can be.
 pub const C_PASTE: u8 = 25;
+/// Empty: this browser shows BT.601 video (FLAG_BT601) in the wrong colours
+/// (its decoder or renderer ignores the colour space it is given). From
+/// then on this client's video is BT.709, converted by the server where
+/// that costs (NVENC).
+pub const C_BT709: u8 = 26;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server
@@ -214,6 +219,10 @@ pub const FLAG_MOTION: u8 = 4;
 /// A change of codec comes with a keyframe; the client reconfigures its
 /// decoder for it.
 pub const FLAG_CODEC_SHIFT: u8 = 3;
+/// The video's YUV is BT.601 (NVENC converting RGB input itself), not
+/// BT.709: the client decodes it with that matrix, or asks for BT.709
+/// (C_BT709) when its browser cannot.
+pub const FLAG_BT601: u8 = 32;
 
 /// FRAME header: type u8, flags u8, n_rects u16, seq u32,
 /// capture_oldest_us u64, capture_newest_us u64, send_us u64,
