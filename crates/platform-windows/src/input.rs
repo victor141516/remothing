@@ -257,24 +257,12 @@ impl InputProvider for SendInputProvider {
         self.send(&[mouse_input(normalize(px - vx, cx), normalize(py - vy, cy), flags, 0)])
     }
 
-    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()> {
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
         // Relative SendInput moves the cursor with the remote user's pointer
-        // speed and "enhance pointer precision" setting; programs reading
-        // raw input (games) get the counts as sent.
-        self.send(&[mouse_input(dx, dy, MOUSEEVENTF_MOVE, 0)])?;
-        let mut p = POINT::default();
-        // SAFETY: valid out pointer. Fails on a desktop this thread cannot
-        // read (secure desktop): nothing to keep then.
-        if unsafe { GetCursorPos(&mut p) }.is_err() {
-            return Ok(());
-        }
-        // Display positions and the cursor are both virtual-desktop pixels.
-        let on = |x: i32, y: i32, w: u32, h: u32| (x..x + w as i32).contains(&p.x) && (y..y + h as i32).contains(&p.y);
-        if on(self.x, self.y, self.width, self.height) || shown.iter().any(|d| on(d.x, d.y, d.width, d.height)) {
-            return Ok(());
-        }
-        // Left for a display no client shows, where nobody would see it: back on the edge.
-        self.motion((p.x - self.x).max(0) as u32, (p.y - self.y).max(0) as u32)
+        // speed and "enhance pointer precision" setting, across monitors as
+        // a real mouse does; programs reading raw input (games) get the
+        // counts as sent.
+        self.send(&[mouse_input(dx, dy, MOUSEEVENTF_MOVE, 0)])
     }
 
     fn pointer(&self) -> Result<Option<(u32, u32)>> {

@@ -11,7 +11,7 @@ use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType,
     CGMouseButton, CGScrollEventUnit,
 };
-use remothing_core::platform::{Button, DisplayInfo, InputProvider};
+use remothing_core::platform::{Button, InputProvider};
 use remothing_core::proto::WHEEL_NOTCH;
 
 use crate::display::{self, Geometry};
@@ -105,18 +105,19 @@ impl InputProvider for QuartzInput {
         self.move_to(&mut s, to, None)
     }
 
-    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()> {
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         let from = Self::desktop_pointer().or(s.position).unwrap_or(self.geometry.bounds.origin);
         let (sx, sy) = self.geometry.scale();
         // Counts are display pixels of movement; the pointer moves in points.
         let to = CGPoint::new(from.x + dx as f64 / sx, from.y + dy as f64 / sy);
-        // On another display some client shows it may go; anywhere else,
-        // where nobody would see it, it stays on this display's edge.
+        // On to any display, as a real mouse goes; a point on none (past
+        // the desktop's outer edges) stays on this display's edge.
         let elsewhere = || {
-            shown
-                .iter()
-                .filter_map(|d| display::parse_id(&d.id).and_then(Geometry::of).ok())
+            display::active_ids()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|id| Geometry::of(id).ok())
                 .any(|g| g.contains(to))
         };
         let to = if self.geometry.contains(to) || elsewhere() { to } else { self.geometry.clamp(to) };

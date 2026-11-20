@@ -25,7 +25,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::app::{App, VirtualRequest, Watching};
-use crate::capture::{DisplayStream, Streams};
+use crate::capture::DisplayStream;
 use crate::config::constant_time_eq;
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
@@ -1488,16 +1488,15 @@ fn u16_at(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[i], b[i + 1]])
 }
 
-/// `stream`: the display the input is for; `streams`: the pointer may move
-/// on to another display some client shows (`InputProvider::motion_relative`).
-fn handle_input(b: &[u8], stream: &DisplayStream, streams: &Streams, held: &mut Held) -> Result<()> {
+/// `stream`: the display the input is for.
+fn handle_input(b: &[u8], stream: &DisplayStream, held: &mut Held) -> Result<()> {
     let Some(input) = stream.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
         (Some(proto::C_MOVE_REL), 6..) => {
             let (dx, dy) = (u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32);
             if b[1] & proto::MOVE_AS_POSITION == 0 {
-                input.motion_relative(dx, dy, &streams.shown())?
+                input.motion_relative(dx, dy)?
             } else if let (Some((x, y)), Some(d)) = (input.pointer()?, stream.control.current()) {
                 let x = (x as i32 + dx).clamp(0, d.width as i32 - 1) as u32;
                 let y = (y as i32 + dy).clamp(0, d.height as i32 - 1) as u32;

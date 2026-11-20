@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
-use remothing_core::platform::{Button, DisplayInfo, InputProvider};
+use remothing_core::platform::{Button, InputProvider};
 use remothing_core::proto::WHEEL_NOTCH;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt as _, Window};
@@ -99,23 +99,11 @@ impl InputProvider for XTestInput {
         self.fake(xproto::MOTION_NOTIFY_EVENT, 0, (ox + x as i32) as i16, (oy + y as i32) as i16)
     }
 
-    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()> {
-        // XTEST motion with detail 1 is relative to where the pointer is.
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()> {
+        // XTEST motion with detail 1 is relative to where the pointer is; the
+        // X server keeps it on the screen, across outputs as a real mouse goes.
         let clamp = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        self.fake(xproto::MOTION_NOTIFY_EVENT, 1, clamp(dx), clamp(dy))?;
-        let p = self.conn.query_pointer(self.root)?.reply()?;
-        let (px, py) = (p.root_x as i32, p.root_y as i32);
-        let on = |(x, y): (i32, i32), (w, h): (u32, u32)| (x..x + w as i32).contains(&px) && (y..y + h as i32).contains(&py);
-        // Other outputs of this X screen; displays of other X servers (other
-        // Xvfb instances) are out of the pointer's reach anyway.
-        let same_screen = format!("x11:{}:", self.display);
-        let elsewhere = shown.iter().filter(|d| d.id.starts_with(&same_screen)).any(|d| on((d.x, d.y), (d.width, d.height)));
-        if on(self.origin, self.size) || elsewhere {
-            return Ok(());
-        }
-        // Left for an output no client shows, where nobody would see it: back on the edge.
-        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
-        self.motion((px - self.origin.0).clamp(0, w - 1) as u32, (py - self.origin.1).clamp(0, h - 1) as u32)
+        self.fake(xproto::MOTION_NOTIFY_EVENT, 1, clamp(dx), clamp(dy))
     }
 
     fn pointer(&self) -> Result<Option<(u32, u32)>> {

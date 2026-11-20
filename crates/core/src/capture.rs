@@ -235,8 +235,6 @@ pub struct Streams {
     map: Mutex<HashMap<String, Arc<DisplayStream>>>,
     /// See `list_changes`.
     list: watch::Sender<()>,
-    /// See `shown`.
-    shown: RwLock<Arc<Vec<DisplayInfo>>>,
     /// Clients with the mouse captured (see `set_capturing`).
     capturing: Mutex<HashSet<u64>>,
 }
@@ -250,7 +248,6 @@ impl Streams {
             tile,
             map: Mutex::default(),
             list: watch::channel(()).0,
-            shown: RwLock::default(),
             capturing: Mutex::default(),
         });
         let watcher = Arc::downgrade(&streams);
@@ -266,9 +263,7 @@ impl Streams {
         let mut map = self.map.lock().unwrap();
         if let Some(s) = map.get(id).filter(|s| !s.gone()) {
             s.watchers.fetch_add(1, Ordering::AcqRel);
-            let s = s.clone();
-            self.publish_shown(&map);
-            return s;
+            return s.clone();
         }
         let stream = Arc::new(DisplayStream {
             id: id.to_string(),
@@ -288,9 +283,9 @@ impl Streams {
     }
 
     pub fn unwatch(&self, stream: &DisplayStream) {
-        let map = self.map.lock().unwrap();
+        // Under the map lock, as `watch` and `finish` change and read the count.
+        let _map = self.map.lock().unwrap();
         stream.watchers.fetch_sub(1, Ordering::AcqRel);
-        self.publish_shown(&map);
     }
 
     /// Client `id` captured the mouse or let it go: while any client has it
@@ -330,26 +325,8 @@ impl Streams {
         if let Some(s) = map.remove(id) {
             s.set_gone();
         }
-        self.publish_shown(&map);
         drop(map);
         self.list_changed();
-    }
-
-    /// The displays some client shows: the pointer may move on to them
-    /// (`InputProvider::motion_relative`).
-    pub fn shown(&self) -> Arc<Vec<DisplayInfo>> {
-        self.shown.read().unwrap().clone()
-    }
-
-    /// A display was opened (again): its place on the desktop may be new.
-    fn refresh_shown(&self) {
-        self.publish_shown(&self.map.lock().unwrap());
-    }
-
-    /// Kept ready because it is read on every relative mouse move.
-    fn publish_shown(&self, map: &HashMap<String, Arc<DisplayStream>>) {
-        let shown = map.values().filter(|s| s.watchers() > 0).filter_map(|s| s.control.current()).collect();
-        *self.shown.write().unwrap() = Arc::new(shown);
     }
 
     /// Fires when displays were added, changed or removed, or the default
@@ -513,7 +490,6 @@ impl CaptureLoop {
         let gpu = capture.gpu_surface().is_some();
         *self.stream.control.input.write().unwrap() = Some(input);
         *self.stream.control.current.write().unwrap() = Some(info);
-        self.streams.refresh_shown();
         if let Some(c) = &clipboard {
             let control = self.stream.control.clone();
             c.watch(Box::new(move |copied, changed| control.copied(copied, changed)));

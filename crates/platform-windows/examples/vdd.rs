@@ -68,8 +68,8 @@ fn capture(displays: &remothing_platform_windows::WindowsDisplays, id: &str, siz
 }
 
 /// Captured-mouse moves from another display towards virtual display `id`
-/// stay on that display unless `id` is among the displays shown, and then
-/// reach it (`InputProvider::motion_relative`), with the runner's real cursor.
+/// reach it, as a real mouse goes from one monitor to the next
+/// (`InputProvider::motion_relative`), with the runner's real cursor.
 #[cfg(windows)]
 fn crossing(displays: &remothing_platform_windows::WindowsDisplays, id: &str) -> anyhow::Result<()> {
     use anyhow::{ensure, Context};
@@ -97,21 +97,15 @@ fn crossing(displays: &remothing_platform_windows::WindowsDisplays, id: &str) ->
     // there, as between physical monitors (a diagonal ends in a corner).
     let step = if dx.abs() >= dy.abs() { (dx.signum() * 20, 0) } else { (0, dy.signum() * 20) };
     println!("{} at ({}, {}) {}x{}; {id} at ({}, {}) {}x{}", from.id, from.x, from.y, from.width, from.height, to.x, to.y, to.width, to.height);
-    for (shown, should_reach) in [(vec![from.clone()], false), (vec![from.clone(), to.clone()], true)] {
-        input.motion(from.width / 2, from.height / 2)?;
-        let mut reached = false;
-        for _ in 0..1000 {
-            input.motion_relative(step.0, step.1, &shown)?;
-            let p = cursor()?;
-            if on(&to, p) {
-                reached = true;
-                break;
-            }
-            ensure!(on(&from, p), "the cursor went to {p:?}, on neither display");
+    input.motion(from.width / 2, from.height / 2)?;
+    for _ in 0..1000 {
+        input.motion_relative(step.0, step.1)?;
+        let p = cursor()?;
+        if on(&to, p) {
+            println!("towards {id}: reached it, cursor at {p:?}");
+            return Ok(());
         }
-        let what = if reached { "reached it" } else { "stayed on the edge" };
-        println!("towards {id} with {} display(s) shown: {what}, cursor at {:?}", shown.len(), cursor()?);
-        ensure!(reached == should_reach, "the cursor should{} have reached {id}", if should_reach { "" } else { " not" });
+        ensure!(on(&from, p), "the cursor went to {p:?}, on neither display");
     }
-    Ok(())
+    anyhow::bail!("the cursor never reached {id}, it stayed at {:?}", cursor()?)
 }

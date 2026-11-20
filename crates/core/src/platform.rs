@@ -289,12 +289,14 @@ pub enum Button {
 
 /// Input injection into one display. Coordinates are display-relative pixels.
 pub trait InputProvider: Send + Sync {
+    /// To display pixel (x, y), clamped to the display: the pointer of a
+    /// client that has not captured the mouse stays on the display it controls.
     fn motion(&self, x: u32, y: u32) -> Result<()>;
     /// Moves the pointer by `dx`, `dy` mouse counts, as a mouse does (a game
-    /// reads them as they are). It may go on to one of `shown` (displays
-    /// some client shows, so the user still sees it); a move that would take
-    /// it anywhere else ends on this display's edge.
-    fn motion_relative(&self, dx: i32, dy: i32, shown: &[DisplayInfo]) -> Result<()>;
+    /// reads them as they are), on to any display of the desktop as a real
+    /// mouse goes: with the mouse captured, the client's mouse is the
+    /// computer's (the user moves it to the screens around the streamed one).
+    fn motion_relative(&self, dx: i32, dy: i32) -> Result<()>;
     /// Where the pointer is now, display pixels, clamped to this display;
     /// None where it cannot be read (Windows' secure desktop).
     fn pointer(&self) -> Result<Option<(u32, u32)>>;

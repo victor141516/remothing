@@ -431,11 +431,16 @@ for capture on X11, where an output is captured by its area of the screen.
   click is not sent. While trapped the client sends counts (`C_MOVE_REL`)
   instead of positions: Windows injects them as a relative `SendInput`
   (the remote pointer speed applies to the cursor, games reading raw
-  input get the counts), X11 as relative XTEST motion. The cursor may move
-  on to another display some client shows (another window), as a real
-  mouse goes from one monitor to the next; a move that would take it to a
-  display nobody sees puts it back on the streamed display's edge.
-  `Streams::shown` keeps that list ready, since every count reads it. While
+  input get the counts), X11 as relative XTEST motion. The cursor goes on
+  to any display of the desktop, as a real mouse goes from one monitor to
+  the next: with the mouse captured, the client's mouse is the computer's,
+  and its user moves it to the screens around the streamed one (only a
+  point past the desktop's outer edge is kept on the display, on macOS,
+  where the move is computed). It used to be put back on the streamed
+  display's edge when it reached a display no client showed, so nobody
+  far away lost it; a user at the computer could not reach its own
+  monitors. Without capture positions are absolute and clamped to the
+  display the client controls, so the pointer stays there. While
   a client has the mouse captured, every other client (other windows, on
   any display) gets `S_CURSOR_POS` too, with `CURSOR_FOLLOW`, and draws the
   remote cursor where the server says, as its own mouse is not there; the
