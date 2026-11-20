@@ -1,6 +1,6 @@
 # Link model on links whose delay wanders (phones on 5G)
 
-- Status: under discussion
+- Status: agreed
 - Created: 2026-11-20
 
 ## Goal
@@ -8,10 +8,14 @@ A phone on 5G gets the frame rate its link carries. Today it gets half of
 the refreshes or less, because the link model cuts its estimate to the
 floor on delay the link adds whatever we send.
 
+## Decisions
+- The server backs off whenever what reaches the client suffers, also for
+  queues it did not cause (another device downloading on the same Wi-Fi),
+  down to a rate at which the stream works; and it must not stay down: it
+  tries again periodically (every 30 s to a minute) and returns to the
+  higher bitrate once the connection is good again (user, 2026-11-20).
+
 ## Open questions
-- Should the server keep backing off for queues it did not cause (another
-  device downloading on the same Wi-Fi)? A queue-only signal yields to them;
-  any fix that ignores delay we cannot have caused stops yielding.
 
 ## What was measured
 OnePlus CPH2653 on 5G (Wi-Fi off, through the router's forwarded ports),
@@ -56,14 +60,20 @@ absorbed into the floor, and with ACKs seconds apart each window became its
 own floor (`rate_drop_is_detected`). Delay alone cannot tell a steady queue
 of ours from the radio's.
 
-## Directions
-- Bound the queue a frame can have met behind our own traffic: the bytes
-  ahead of it when it was sent, over the delivery rate measured (not the
-  estimate, which a slow link would make too high). Delay beyond that is
-  not ours.
+## Design (agreed)
 - Cut only when the cut can be seen to work: if the delay does not fall in
-  the round trips after a cut while we send less, take it as the path's,
-  undo the cut and raise the floor.
-- Either way: the simulator cases above as tests, all current pacer tests
-  passing, and the bad-link runs of RESULTS ("Bad links", "Stutters")
-  repeated in the container before and after.
+  the round trips after a cut while we send less, it is the path's (a 5G
+  radio): undo the cut and take that delay as the path's floor until it
+  falls again. A queue that does fall after a cut, whoever else fills the
+  link, keeps the estimate down.
+- Every 30 s, while the estimate sits below where it was before its cuts,
+  try the higher level again for a few round trips; keep it if the queue
+  stays short, go back down otherwise. A link that recovers (the other
+  download ended) gets its bitrate back within 30 s, without waiting for
+  growth that a short-queue signal alone may never allow.
+- Not pursued: bounding the queue by the bytes we have in flight. It
+  ignores queues others build, which the user wants the server to yield to.
+- Tests: the simulator cases above, a link that drops to a third for 20 s
+  and comes back (recovered within 30 s), all current pacer tests passing,
+  and the bad-link runs of RESULTS ("Bad links", "Stutters") repeated in
+  the container before and after.
