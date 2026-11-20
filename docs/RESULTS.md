@@ -681,3 +681,31 @@ recording device was `CABLE Output` while a client talked and the previous
 one afterwards. The restart offer (cable installed but not there yet) did
 not come up and was not exercised. Latency from mouth to program was not
 measured.
+
+## Frames held to the client's refresh
+
+Container bench (`--fps 240`, x264), headless Edge on this PC reporting
+165 Hz, per-frame trace (`debug.frame_trace`); intervals between frames
+built (sent for the first row), after the first second:
+
+| scene | server | capture fps | sent fps | shown / superseded per s | interval p10 / p50 ms |
+|---|---|---|---|---|---|
+| scroll 1280x720 | only frames with new changes held to the grid, two catch up after a gap | 240 | 165 | 126–161 / 4–39 | 5.3 / 6.1 |
+| scroll 1280x720 | every frame held, grid lags at most one refresh | 240 | 165 | 164 / 1 | 6.0 / 6.1 |
+| box 1920x1080 | every frame held, grid never behind now | 310 | 126 | – | 7.1 / 7.5 |
+| box 1920x1080 | every frame held, grid lags at most one refresh | 283 | 128 | 125 / 0 | 7.2 / 7.7 |
+
+In the box scene no frame was built less than 7 ms after the previous one
+with either grid: the limit there is elsewhere (x264 in the container,
+not measured). That a grid never behind now loses rate to late wake-ups
+comes from a simulation, not from these runs.
+
+Real session (Mac, Helium, Wi-Fi, 120 Hz, WebSocket) with the first policy:
+1 700 frames of ~340 bytes in the first 3.5 s (tiles returning to lossless
+after the keyframe, ~500 a second), then a change held 9.35 s while
+captures kept coming. In a later 20 s window dragging a window: 115 frames
+drawn a second, 69 % of refreshes with a new picture, 30 refreshes a second
+with two or more frames; of the time draw gaps exceeded a refresh, 146 ms a
+second came from the server's send gaps, 75 from the network, 20 from the
+client. 61 of the server's gaps over two refreshes held a captured change,
+47 had nothing new captured.
