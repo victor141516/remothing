@@ -265,14 +265,19 @@ pixels that is thrown away a moment later.
   frame; the system-memory and CUDA inputs scale on the CPU (swscale,
   fast bilinear), the CUDA one then uploads the whole scaled picture.
 - **Frame rate per client**: frames go at most once per client refresh,
-  lossless ones too and in every mode (more than the screen shows are
-  replaced before it shows them, and decoding them costs the client
-  refreshes): changes wait and go together in the next frame, on a grid
-  of slots that moves one refresh per frame. A capture up to half a
-  refresh early for its slot goes at once (a short wait costs a thread
-  wake-up that often comes milliseconds late), and after a gap up to two
-  frames catch up. `?bench` reports no view: it measures the pipeline at
-  the display's size and the capture rate.
+  whatever they carry (new changes, refinement, layer switches) and in
+  every mode (more than the screen shows are replaced before it shows
+  them, and decoding them costs the client refreshes): what is due waits
+  and goes together in the next frame, on a grid of slots that moves one
+  refresh per frame. A frame up to half a refresh early for its slot goes
+  at once (a short wait costs a thread wake-up that often comes
+  milliseconds late); the grid lags at most one refresh behind, so a late
+  wake-up does not cost rate and after a gap at most one more frame
+  follows at once. Every frame counts: when only frames with new changes
+  were held to the grid, the trickle of tiles returning to lossless after
+  a keyframe (hundreds of tiny frames a second) moved the grid seconds
+  ahead and froze the next change for 9 s. `?bench` reports no view: it
+  measures the pipeline at the display's size and the capture rate.
 - Clients without a video encoder are not affected: lossless is all they
   have. FRAME carries the mode as a flag, for the overlay and the event
   log.

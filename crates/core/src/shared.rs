@@ -628,14 +628,15 @@ impl Shared {
             return Ok(Pull::Reset { geometry, first_seq: c.seq.wrapping_add(1), hdr_max: *hdr_max });
         }
 
-        // No more frames than the client's screen refreshes (`min_frame_us`):
-        // changes wait and go together in the next one, on a grid that moves
-        // one refresh per frame. A capture up to half a refresh early for its
-        // slot goes now: a short wait costs a thread wake-up that often comes
-        // milliseconds late (measured ~4 ms in the container).
+        // No more frames than the client's screen refreshes (`min_frame_us`),
+        // whatever they carry (new changes, refinement, layer switches): what
+        // is due waits and goes together in the next one, on a grid that
+        // moves one refresh per frame. A frame up to half a refresh early for
+        // its slot goes now: a short wait costs a thread wake-up that often
+        // comes milliseconds late (measured ~4 ms in the container).
         let min = codec.min_frame_us;
         let frame_due = (codec.frame_slot + min).saturating_sub(min / 2);
-        if c.pending && now < frame_due {
+        if now < frame_due {
             return Ok(Pull::Idle { wake_at_us: Some(frame_due) });
         }
 
@@ -884,9 +885,11 @@ impl Shared {
             msg[1] |= FLAG_MOTION;
         }
         // The grid moves one refresh per frame, so a frame that waited for
-        // its slot does not push the next one later; after a gap (captures
-        // come unevenly) up to two catch up.
-        codec.frame_slot = (codec.frame_slot + min).max(now.saturating_sub(2 * min));
+        // its slot does not push the next one later. It lags at most one
+        // refresh behind now: a frame built late (wake-ups come milliseconds
+        // late) keeps the grid, and after a gap at most one more frame follows
+        // at once (more would land in one client refresh and never be seen).
+        codec.frame_slot = (codec.frame_slot + min).max(now.saturating_sub(min));
         msg[0] = proto::S_FRAME;
         msg[2..4].copy_from_slice(&(codec.rects.len() as u16).to_le_bytes());
         msg[4..8].copy_from_slice(&seq.to_le_bytes());
