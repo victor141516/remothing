@@ -20,9 +20,12 @@ before changing a subsystem:
   messages, this file and task files are in English.
 - The Windows demo streams this PC's real desktop, and the user is often
   working on it remotely while you run. Never type or click into the live
-  session, leave the clipboard as you found it, play nothing audible. Test
-  intrusive things on a private instance (other ports, e.g. 9180/9181, own
-  config under `.tools/`) with inert input, or in the Linux container.
+  session, leave the clipboard as you found it, play nothing audible.
+  Deleting the current entry from Windows clipboard history empties the
+  clipboard. Test intrusive things on a private instance (other ports,
+  e.g. 9180/9181, own config under `.tools/`) with inert input, or in the
+  Linux container. Each agent its own ports and config: two agents on
+  9180/9181 restarted each other's instance.
 - Say what was measured, what was only reasoned, and what was not verified.
 
 ## Layout
@@ -30,7 +33,7 @@ before changing a subsystem:
 | path | what |
 |---|---|
 | `crates/core` | Everything platform-independent: provider traits (`platform.rs`, `encode.rs`), tiles and policy (`shared.rs`, `pixels.rs`), capture loop (`capture.rs`), per-client link model (`pacer.rs`), sessions and transports (`stream.rs`, `rtc.rs`), sound hub (`audio.rs`), wire protocol (`proto.rs`), admin API, config, TLS |
-| `crates/encoder` | FFmpeg: H.264 (NVENC, AMF, QuickSync, x264), Opus / AAC; VideoToolbox directly on macOS |
+| `crates/encoder` | FFmpeg: H.264 (NVENC, AMF, QuickSync, x264), Opus / AAC; NVENC through NVIDIA's SDK in `src/nvenc/` (FFmpeg's stays as fallback); VideoToolbox directly on macOS |
 | `crates/platform-linux` | Xvfb and X11 capture, XTest input, X selections, sound helpers. Whole crate is `cfg(target_os = "linux")` |
 | `crates/platform-windows` | DXGI duplication, SendInput, clipboard, WASAPI loopback, Windows service. Whole crate is `cfg(windows)` |
 | `crates/platform-macos` | ScreenCaptureKit capture and sound, Quartz input, NSCursor, NSPasteboard, launch agent. Whole crate is `cfg(target_os = "macos")` |
@@ -112,6 +115,10 @@ docker build --target desktop -t remothing-desktop .
   Windows FFmpeg; decode the dump with dav1d in a container).
 - The admin API (`/api/status`, Bearer admin token) lists per-client events,
   errors and the sound status: the first place to look after a hiccup.
+- Video losses without losing the path: in the container a `tc` prio band
+  with netem loss for packets over 1024 bytes (`u32 match u16 0x0400
+  0xfc00 at 2`), so pings and ACKs pass (plain netem loss takes
+  WebTransport down); `--gpus all` for NVENC.
 - Remote input can be checked without touching this PC: in a container,
   send `C_MOVE`/`C_MOVE_REL` over `/input` and read `xdotool
   getmouselocation` (`apt-get install xdotool`).
