@@ -53,6 +53,22 @@ const NEEDS: (u32, u32) = (NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
 /// The driver's function table.
 pub(super) struct Api {
     pub(super) f: NV_ENCODE_API_FUNCTION_LIST,
+    create: CreateInstance,
+}
+
+impl Api {
+    /// Asks for the table again, for this build's API version. The driver
+    /// keeps the version of the last such request for the whole process:
+    /// after FFmpeg's NVENC (older headers) opened in it, every session this
+    /// build opened failed with NV_ENC_ERR_INVALID_VERSION.
+    pub(super) fn claim_version(&self) -> Result<()> {
+        let mut f = NV_ENCODE_API_FUNCTION_LIST { version: FUNCTION_LIST_VER, ..Default::default() };
+        // SAFETY: the entry point has this signature and fills the table it is given.
+        if unsafe { (self.create)(&mut f) } != NVENCSTATUS::NV_ENC_SUCCESS {
+            bail!("NvEncodeAPICreateInstance failed");
+        }
+        Ok(())
+    }
 }
 
 // SAFETY: a table of function pointers into the driver, written once and only read after.
@@ -116,7 +132,7 @@ fn load() -> Result<Api> {
         if used.contains(&false) {
             bail!("the driver's NVENC table lacks entry points this build uses");
         }
-        Ok(Api { f })
+        Ok(Api { f, create })
     }
 }
 

@@ -91,9 +91,10 @@ flowchart LR
      and pacing sent half of them, each one waiting for its turn (a game
      at 4K: 280 KB frames, 60 a second, 7-10 ms of waiting; RESULTS,
      "A game at 4K for a 120 Hz client").
-     Cap changes cost an IDR with NVENC, so they need a clear shift and hold
-     3 s unless the link collapses; a change of the client's frame rate is
-     applied at once.
+     Cap changes cost an IDR through FFmpeg, so they need a clear shift and
+     hold 3 s unless the link collapses; an encoder that changes its rate
+     for free (NVENC through the SDK) follows shifts of 10 % within 250 ms.
+     A change of the client's frame rate is applied at once.
 6. **Client** (`worker.ts`): frames are applied in order and atomically —
    moves, then lossless rects to one texture, decoded VideoFrame to another;
    a per-tile mask picks the layer in the WebGL2 shader. At most one draw
@@ -155,7 +156,9 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   The cap alone misses slow links that video does not fill (the estimate
   stays above them). Switching needs another encoder, and opening one
   takes NVENC about 250 ms: it opens on its own thread while the current
-  one keeps encoding, then takes over with a keyframe. HEVC and AV1 gained
+  one keeps encoding, then takes over with a keyframe. A switch waits 10 s
+  after the last one: with a cap that follows the estimate closely it
+  flipped every few seconds on a lossy link. HEVC and AV1 gained
   nothing measurable from it.
 - **Colour matrix.** Tiles carry exact RGB; video turns it into YUV and
   the browser turns it back, so both ends must use the same matrix or
@@ -187,10 +190,14 @@ FFmpeg's NVENC, which stays the fallback (its open error is the encoder's
 `fallback_reason`). The driver's `nvEncodeAPI64.dll` /
 `libnvidia-encode.so.1` is loaded at runtime as FFmpeg does; the bindings
 are generated from FFmpeg's nv-codec-headers (API 13.1), so an older
-driver falls back with that reason. System-memory input (Windows without a
-D3D11 capture, and BT.709 on Linux, which needs swscale's NV12) and AMF,
-QuickSync and x264 stay on FFmpeg. What FFmpeg cannot do without
-restarting the encoder (a keyframe each time) this path does in place:
+driver falls back with that reason. Before opening a session the table is
+asked for again: the driver keeps the API version of the last request for
+the whole process, and once FFmpeg's NVENC (older headers) had opened in
+it every session failed with NV_ENC_ERR_INVALID_VERSION. System-memory
+input (Windows without a D3D11 capture, and BT.709 on Linux, which needs
+swscale's NV12) and AMF, QuickSync and x264 stay on FFmpeg. What FFmpeg
+cannot do without restarting the encoder (a keyframe each time) this path
+does in place:
 
 - **Same encoder as FFmpeg's.** The settings of the FFmpeg NVENC arm
   written out: preset P1 (P2 and P3 measured again here: at most 1.1 dB
@@ -1094,7 +1101,22 @@ say so): the client drops it for a new one.
   of tiles whose switch was lost. Tiles shown from video on both sides need
   only the keyframe that a lost video frame triggers anyway; re-sending
   them losslessly turned a fallback during full-screen video into a 2.5 s
-  freeze (now ~0.6 s, mostly detection).
+  freeze (now ~0.6 s, mostly detection). With an encoder that can drop
+  frames from its references (NVENC through the SDK, "Losses without
+  keyframes") the lost video frame is dropped instead (`ClientCodec::
+  invalidate_from`, from the producer) and the next video frame carries
+  FLAG_RECOVERY with the seq of the first frame lost: the client, which
+  stopped feeding its decoder at its own first loss, starts again with it
+  when that loss is no earlier, and otherwise waits for a keyframe as
+  before. While it waits for a loss it does not ask for keyframes: the
+  server answers every loss its ACKs list, and a request sent ahead of the
+  ACK (the client gives a frame up, then the next one cannot be decoded)
+  made it a keyframe every time. Losses until the client acknowledges a
+  recovery frame are one episode: a recovery frame lost too is dropped from
+  the references in turn, and the next one still names the episode's first
+  loss, the point from which the encoder forgot everything. Frames from
+  the loss on are never acknowledged to the encoder (the client drew them
+  without their video), so no anchor it lacks is pinned.
 - Unreliable delivery with NACK-based retransmission was tried and dropped:
   abandoned SCTP packets still count as losses for its congestion control,
   so it gained nothing over reliable unordered delivery and added repair

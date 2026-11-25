@@ -1006,3 +1006,30 @@ under 20-30 ms are not resolved here.
   the client dropped it after 4.98 s and was streaming again 0.6 s after
   the link came back. After `docker restart` of the server the client was
   back 1.1 s after the restart returned.
+
+## Video losses without keyframes (NVENC through the SDK)
+
+`MODE=bench --mode full --fps 120` containers with `--gpus all` (NVENC
+through CUDA), headless Edge 158 on this PC decoding in hardware, 20 ms
+each way. Frame losses without losing the path: packets over 1024 bytes
+(frame pieces, not pings or ACKs) go through 50 % loss for 1.5 s every
+4.5 s, so some frames run out of repair requests and are given up.
+"Before" is commit `e88748e` (FFmpeg's NVENC, a keyframe per video loss),
+"after" this change. 20 s runs, alternating; keyframes include the first
+one and two-pass switches (H.264).
+
+| codec | before: keyframes, fps, total p50/p95/p99 ms | after: keyframes, recovery frames, fps, total |
+|---|---|---|
+| H.264 | 6, 110.5, 20/92/143 | 2, 2, 125.3, 20/47/89 |
+| H.264 | 4, 123.1, 20/52/101 | 2, 1, 120.5, 20/53/97 |
+| AV1 | 3, 134.6, 19/26/61 | 1, 1, 135.9, 18/24/64 |
+| AV1 | 3, 100.2, 22/101/136 | 1, 0 (the loss came as the run ended), 117.3, 19/66/133 |
+
+Every invalidation that found the lost frame gave a recovery frame the
+client decoded (no decoder error, no wait for a keyframe). Before two
+fixes a loss still cost a keyframe: the client's keyframe request,
+sent just ahead of the ACK listing the loss, reached the server first;
+and a cap following the estimate within 250 ms switched H.264's two-pass
+on and off five times in 20 s, each time a new encoder and a keyframe.
+HEVC was not measured here: Edge asks for BT.709, which on Linux takes
+FFmpeg's system-memory NVENC.

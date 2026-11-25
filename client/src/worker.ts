@@ -20,7 +20,7 @@ import {
   BT601, BT709, C_ACK, C_AUDIO, C_BT709, C_CAPTURE, C_CLIPBOARD, C_CLIPBOARD_IMAGE, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME,
   C_MIC_INFO, C_PING, C_SIGNAL, CLIPBOARD_PASTE, CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
   C_PASTE, C_STATS, C_TRACE, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_BT601,
-  FLAG_CODEC_MASK, FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
+  FLAG_CODEC_MASK, FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_RECOVERY, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
   MAX_IMAGE, S_CLIPBOARD_FILES, S_CLIPBOARD_IMAGE, S_PASTED, S_SIGNAL, VIEW_HDR, now,
 } from './proto';
@@ -144,6 +144,17 @@ let bt709Asked = false;
 /** Codecs besides H.264 offered to the server: those decoded in hardware here. */
 let offered: string[] = [];
 let awaitingKey = true;
+/** The first video frame lost while the decoder had all its references
+ * (-1: waiting for a keyframe for another reason): a recovery frame for it
+ * or an earlier frame ends the wait. */
+let lostVideoFrom = -1;
+
+/** Video frame `seq` never arrives: later ones reference a missing picture
+ * until a keyframe, or a recovery frame (FLAG_RECOVERY), comes. */
+function videoLost(seq: number): void {
+  if (!awaitingKey) lostVideoFrom = seq;
+  awaitingKey = true;
+}
 /** The hardware decoder got stuck: H.264 is decoded in software (`watchDecoder`). */
 let decoderSoftware = false;
 /** Waiting this long for a picture, with this many video frames behind it: stuck. */
@@ -541,7 +552,7 @@ function watchGap(): void {
     lostTotal++;
     // Its video is gone (unknown without any chunk: maybe), so later P-frames
     // reference a missing picture: wait for the keyframe the server now sends.
-    if (!a || a.video) awaitingKey = true;
+    if (!a || a.video) videoLost(expected);
     expected = (expected + 1) >>> 0;
   }
   gapSince = 0;
@@ -619,7 +630,7 @@ function release(): void {
     lostTotal++;
     // Later P-frames reference the missing picture: wait for the keyframe
     // the server sends once it hears of the loss.
-    if (video) awaitingKey = true;
+    if (video) videoLost(expected);
     expected = (expected + 1) >>> 0;
   }
   if (!before(expected, newest)) gapSince = 0;
@@ -716,6 +727,7 @@ function createDecoder(): void {
   });
   configureDecoder();
   awaitingKey = true;
+  lostVideoFrom = -1;
 }
 
 function configureDecoder(): void {
@@ -771,7 +783,9 @@ function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
   };
   if (flags & FLAG_VIDEO) {
     const sw = v.getUint16(off, true);
-    const videoAt = off + 2 + sw * 2;
+    let videoAt = off + 2 + sw * 2;
+    const recovers = flags & FLAG_RECOVERY ? v.getUint32(videoAt, true) : -1;
+    if (recovers >= 0) videoAt += 4;
     const len = v.getUint32(videoAt, true);
     const key = (flags & FLAG_KEY) !== 0;
     const codec = (flags >> FLAG_CODEC_SHIFT) & FLAG_CODEC_MASK;
@@ -786,10 +800,16 @@ function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
         bt601From = f.seq;
       } else {
         awaitingKey = true;
+        lostVideoFrom = -1;
       }
     }
     if (bt601 && bt601Broken !== null) askBt709();
     if (key && codec === decoderCodec) awaitingKey = false;
+    // A recovery frame predicts only from frames before `recovers`: it ends
+    // a wait for a loss no earlier than that.
+    else if (awaitingKey && recovers >= 0 && lostVideoFrom >= 0 && codec === decoderCodec && !before(lostVideoFrom, recovers)) {
+      awaitingKey = false;
+    }
     if (!awaitingKey) {
       f.hasVideo = true;
       decoder.decode(new EncodedVideoChunk({
@@ -797,7 +817,10 @@ function onFrame(buf: ArrayBuffer, received: number, repaired: boolean): void {
         timestamp: f.seq,
         data: new Uint8Array(buf, videoAt + 4, len),
       }));
-    } else {
+    } else if (lostVideoFrom < 0) {
+      // A loss is answered by the server from the ACK that lists it (a
+      // recovery frame, or a keyframe): asking here as well came first and
+      // made it a keyframe.
       requestKey();
     }
   }

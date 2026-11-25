@@ -253,6 +253,11 @@ pub const FLAG_CODEC_SHIFT: u8 = 3;
 /// BT.709: the client decodes it with that matrix, or asks for BT.709
 /// (C_BT709) when its browser cannot.
 pub const FLAG_BT601: u8 = 32;
+/// The video predicts only from frames before a loss (the encoder dropped
+/// the lost ones from its references instead of sending a keyframe): a
+/// client that lost no frame before `recovers` decodes it, and the frames
+/// after it, again.
+pub const FLAG_RECOVERY: u8 = 64;
 
 /// FRAME header: type u8, flags u8, n_rects u16, seq u32,
 /// capture_oldest_us u64, capture_newest_us u64, send_us u64,
@@ -262,7 +267,8 @@ pub const FLAG_BT601: u8 = 32;
 ///   replay on the lossless layer, in order, before the rects
 /// - rects, each: x u16, y u16, w u16, h u16, enc u8, pad u8, pad u16, len u32, data
 /// - n_switches u16, then u16 each: tile index | 0x8000 when the tile moves to video
-/// - if FLAG_VIDEO: len u32 + one access unit of the codec in the flags
+/// - if FLAG_VIDEO: with FLAG_RECOVERY recovers u32 (seq of the first frame
+///   lost), then len u32 + one access unit of the codec in the flags
 pub const FRAME_HEADER_LEN: usize = 48;
 
 pub fn now_us() -> u64 {

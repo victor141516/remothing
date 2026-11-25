@@ -83,6 +83,8 @@ export const FLAG_CODEC_SHIFT = 3;
 export const FLAG_CODEC_MASK = 3;
 /** The video's YUV is BT.601 rather than BT.709 (see proto.rs). */
 export const FLAG_BT601 = 32;
+/** The video predicts only from frames before `recovers` (u32 before its length, see proto.rs). */
+export const FLAG_RECOVERY = 64;
 /** How the video's YUV is to be turned into RGB, by FLAG_BT601. */
 export const BT601: VideoColorSpaceInit = { matrix: 'smpte170m', primaries: 'bt709', transfer: 'bt709', fullRange: false };
 export const BT709: VideoColorSpaceInit = { matrix: 'bt709', primaries: 'bt709', transfer: 'bt709', fullRange: false };

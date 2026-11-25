@@ -246,6 +246,7 @@ impl NvencEncoder {
             ..Default::default()
         };
         let _current = source.current()?;
+        api.claim_version()?;
         let mut session = ptr::null_mut();
         // SAFETY: valid parameters; the device outlives the session (`input` holds it).
         let status = unsafe { nv!(api, nvEncOpenEncodeSessionEx(&mut params, &mut session)) };

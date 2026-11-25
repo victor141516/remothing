@@ -12,6 +12,7 @@
 //! stop changing they are re-sent losslessly, so anything that stands still
 //! ends up pixel-exact.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread::Thread;
 
@@ -22,10 +23,13 @@ use crate::geom::{MovedRect, Rect};
 pub use crate::pixels::Geometry;
 use crate::pixels::{Differ, Pixels};
 use crate::platform::GpuSurface;
-use crate::proto::{self, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN};
+use crate::proto::{self, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_KEY, FLAG_MOTION, FLAG_RECOVERY, FLAG_VIDEO, FRAME_HEADER_LEN};
 
 /// A tile is "moving" when its 3rd most recent change is this recent (>= ~20 Hz).
 const HOT_WINDOW_US: u64 = 150_000;
+/// Unacknowledged video frames remembered for invalidation (several seconds
+/// at any frame rate; ACKs normally keep it to a round trip's worth).
+const VIDEO_SEQS_KEPT: usize = 1024;
 /// A video tile unchanged for this long is refined back to lossless.
 const COOL_US: u64 = 250_000;
 /// Moves queued for one client before falling back to resending destinations.
@@ -782,6 +786,17 @@ impl Shared {
             contents.tiles.extend((first..first + n).map(|t| t as u32));
         }
         contents.switches.extend(switches.iter().map(|s| (s & 0x7fff) as u32));
+        // What the client does not show from video, for an encoder that can
+        // spend fewer bits there: after every switch of layer, and for a new
+        // encoder.
+        let unseen_changed = video_dirty && codec.encoder.is_some() && (codec.unseen_stale || !switches.is_empty());
+        if unseen_changed {
+            codec.unseen.clear();
+            codec.unseen.extend(c.video.iter().map(|&v| !v));
+            codec.unseen_rects.clear();
+            let rects = &mut codec.unseen_rects;
+            for_each_run(&mut codec.unseen, &geometry, false, |_, _, r| rects.push(r));
+        }
         let (pixels, surface) = (pixels.clone(), surface.clone());
         drop(guard);
 
@@ -794,7 +809,12 @@ impl Shared {
         let load_start = proto::now_us();
         let encoder = if video_dirty { codec.encoder.as_mut() } else { None };
         let loaded = encoder.is_some();
+        let unseen = unseen_changed.then_some(codec.unseen_rects.as_slice());
         if let Some(e) = encoder {
+            if let Some(unseen) = unseen {
+                e.set_unseen(unseen);
+                codec.unseen_stale = false;
+            }
             match (e.gpu_input(), surface.as_ref()) {
                 (true, Some(s)) => e.load_gpu(s, &codec.encoder_rects)?,
                 _ => {
@@ -875,9 +895,32 @@ impl Shared {
             let paced = (v.data.len() as f64 / (rate * VIDEO_SHARE) * 1e6) as u64;
             codec.next_video_us = now + paced;
             key = v.key;
+            // Frames from a keyframe on predict only from it and later ones.
+            if key {
+                codec.video_seqs.clear();
+                (codec.recovering, codec.episode, codec.recovery_seq) = (None, None, None);
+            }
+            codec.video_seqs.push_back((v.index, seq));
+            if codec.video_seqs.len() > VIDEO_SEQS_KEPT {
+                codec.video_seqs.pop_front();
+            }
+            // The frame that predicts only from before a loss, as the seq of
+            // the first frame lost: a client that lost no earlier one decodes it.
+            let recovers = match (v.recovers, codec.recovering) {
+                (Some(first), Some((index, lost))) if first == index => Some(lost),
+                _ => None,
+            };
+            if v.recovers.is_some() {
+                codec.recovering = None;
+                codec.recovery_seq = recovers.map(|_| seq);
+            }
             let encoder = codec.encoder.as_ref().expect("loaded implies encoder");
             let bt601 = if encoder.bt601() { proto::FLAG_BT601 } else { 0 };
-            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 } | encoder.codec().wire() << proto::FLAG_CODEC_SHIFT | bt601;
+            let recovery = if recovers.is_some() { FLAG_RECOVERY } else { 0 };
+            msg[1] = FLAG_VIDEO | if v.key { FLAG_KEY } else { 0 } | encoder.codec().wire() << proto::FLAG_CODEC_SHIFT | bt601 | recovery;
+            if let Some(lost) = recovers {
+                msg.extend_from_slice(&lost.to_le_bytes());
+            }
             msg.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
             msg.extend_from_slice(&v.data);
         }
@@ -964,6 +1007,21 @@ pub struct ClientCodec {
     frame_slot: u64,
     /// The last pull held content back for pacing (video or refinement).
     paced: bool,
+    /// (encoder frame index, frame seq) of the video frames not acknowledged
+    /// yet, oldest first.
+    video_seqs: VecDeque<(u64, u32)>,
+    /// The encoder was told to stop predicting from this (index, seq) on;
+    /// its next frame that says so recovers the client's decoder.
+    recovering: Option<(u64, u32)>,
+    /// First frame lost of a loss episode the client has not recovered
+    /// from (see `invalidate_from`), and the seq of its last recovery frame.
+    episode: Option<u32>,
+    recovery_seq: Option<u32>,
+    /// The encoder does not know what the client shows from video yet.
+    unseen_stale: bool,
+    /// Scratch: tiles not shown from video, and their rects.
+    unseen: Vec<bool>,
+    unseen_rects: Vec<Rect>,
 }
 
 impl ClientCodec {
@@ -984,12 +1042,72 @@ impl ClientCodec {
             min_frame_us: 0,
             frame_slot: 0,
             paced: false,
+            video_seqs: VecDeque::new(),
+            recovering: None,
+            episode: None,
+            recovery_seq: None,
+            unseen_stale: false,
+            unseen: Vec::new(),
+            unseen_rects: Vec::new(),
         }
     }
 
     /// The last pull held content back to stay within the link estimate.
     pub fn paced(&self) -> bool {
         self.paced
+    }
+
+    /// A new encoder (or none): its frame indices start afresh, and it has to
+    /// be told what the client does not show from video.
+    pub fn set_encoder(&mut self, e: Option<Box<dyn VideoEncoder>>) {
+        self.encoder = e;
+        self.video_seqs.clear();
+        (self.recovering, self.episode, self.recovery_seq) = (None, None, None);
+        self.unseen_stale = true;
+    }
+
+    /// Video frame `seq` and those after it never reached the client's
+    /// decoder: the encoder stops predicting from them. False when it cannot
+    /// (a keyframe is needed). Either way none of them is a reference the
+    /// client has, so ACKs of them acknowledge nothing to the encoder.
+    ///
+    /// Losses until the client decoded a recovery frame are one episode: the
+    /// client waits from its first loss, and the encoder already forgot
+    /// everything from there, so every recovery frame of the episode is
+    /// marked as recovering from that first loss.
+    pub fn invalidate_from(&mut self, seq: u32) -> bool {
+        let Some(at) = self.video_seqs.iter().position(|&(_, s)| s == seq) else {
+            // Gone from `video_seqs` with the episode's first loss: forgotten already.
+            return self.episode.is_some_and(|start| (seq.wrapping_sub(start) as i32) >= 0);
+        };
+        let index = self.video_seqs[at].0;
+        self.video_seqs.truncate(at);
+        let done = self.encoder.as_mut().is_some_and(|e| e.invalidate_from(index));
+        // A recovery frame sent before this loss does not end the episode.
+        self.recovery_seq = None;
+        if done {
+            let start = *self.episode.get_or_insert(seq);
+            self.recovering = Some((index, start));
+        } else {
+            (self.episode, self.recovering) = (None, None);
+        }
+        done
+    }
+
+    /// The client drew every frame up to `seq`, its video decoded (frames
+    /// after a loss are out of `video_seqs` by then).
+    pub fn acknowledge(&mut self, seq: u32) {
+        let mut newest = None;
+        while let Some(&(index, _)) = self.video_seqs.front().filter(|&&(_, s)| (seq.wrapping_sub(s) as i32) >= 0) {
+            newest = Some(index);
+            self.video_seqs.pop_front();
+        }
+        if let (Some(index), Some(e)) = (newest, self.encoder.as_mut()) {
+            e.acknowledge(index);
+        }
+        if self.recovery_seq.is_some_and(|r| (seq.wrapping_sub(r) as i32) >= 0) {
+            (self.episode, self.recovery_seq) = (None, None);
+        }
     }
 }
 

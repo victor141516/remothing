@@ -68,6 +68,10 @@ const CAP_DEADBAND: (f64, f64) = (0.67, 1.5);
 const CAP_COLLAPSE: f64 = 0.33;
 const CAP_JUMP: f64 = 2.5;
 const CAP_JUMP_HOLD_US: u64 = 500_000;
+/// An encoder that changes its rate without a keyframe follows the estimate
+/// closely: only the encoder's own rate control limits how fast.
+const CAP_FREE_HOLD_US: u64 = 250_000;
+const CAP_FREE_DEADBAND: (f64, f64) = (0.9, 1.1);
 /// During slow start the cap is this many times the video share: frame
 /// pacing keeps the bytes within the share (fewer, better pictures), and
 /// video that fills it is what lets the estimate grow; capped at the share
@@ -218,6 +222,26 @@ struct WtLink {
     queue: mpsc::UnboundedSender<Datagram>,
 }
 
+/// What the encoder of a client has to hear from its ACKs.
+#[derive(Default)]
+struct VideoLoss {
+    /// The first video frame lost (`repair`) not handled yet.
+    invalidate: Option<u32>,
+    /// The newest frame acknowledged since the producer last looked.
+    acked: Option<u32>,
+    /// The encoder dropped a loss from its references; its next video
+    /// frame (the recovery frame) has not gone out yet.
+    recovering: bool,
+}
+
+impl VideoLoss {
+    /// The client's keyframe requests are answered by what is coming: the
+    /// recovery frame, or a keyframe when the encoder cannot invalidate.
+    fn answers_requests(&self) -> bool {
+        self.invalidate.is_some() || self.recovering
+    }
+}
+
 struct ClientLink {
     id: u64,
     /// The display it streams (shared with its input socket's route).
@@ -241,6 +265,8 @@ struct ClientLink {
     key_request: AtomicBool,
     /// Sequence of the last keyframe sent.
     last_key: Mutex<Option<u32>>,
+    /// Video losses and ACKs on their way to the encoder (producer thread).
+    video_loss: Mutex<VideoLoss>,
     /// The client's tab is hidden: nothing is sent until it shows again.
     paused: AtomicBool,
     /// The client applied the last HELLO: frames of that display may go out.
@@ -311,6 +337,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         fec: Mutex::new(Fec::default()),
         key_request: AtomicBool::new(false),
         last_key: Mutex::new(None),
+        video_loss: Mutex::new(VideoLoss::default()),
         paused: AtomicBool::new(false),
         // Open: the first pull is what produces the first HELLO.
         hello_acked: AtomicBool::new(true),
@@ -551,7 +578,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         // is already on its way, and each one more would be
                         // another burst.
                         let seen = u32::from_le_bytes(b[4..8].try_into().unwrap());
-                        let answered = link.last_key.lock().unwrap().is_some_and(|k| (k.wrapping_sub(seen) as i32) > 0);
+                        let answered = link.last_key.lock().unwrap().is_some_and(|k| (k.wrapping_sub(seen) as i32) > 0)
+                            || link.video_loss.lock().unwrap().answers_requests();
                         if !answered && !link.key_request.swap(true, Ordering::AcqRel) {
                             app.telemetry.event(link.id, "keyframe requested by the client");
                             waker.unpark();
@@ -875,6 +903,9 @@ fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
         b[20..].chunks_exact(4).take(b[1] as usize).map(|s| u32::from_le_bytes(s.try_into().unwrap())).collect();
     repair(app, link, &lost);
     link.sent.lock().unwrap().ack(seq);
+    // After `repair`: the producer drops a loss from the encoder before it
+    // acknowledges anything past it.
+    link.video_loss.lock().unwrap().acked = Some(seq);
     // Nothing up to `seq` will be asked for again.
     link.wt_frames.lock().unwrap().retain(|k| (k.seq.wrapping_sub(seq) as i32) > 0);
     let (cut, notice) = {
@@ -995,7 +1026,7 @@ fn repair(app: &App, link: &ClientLink, seqs: &[u32]) {
         return;
     }
     let geometry = link.watching.read().unwrap().shared.geometry();
-    let (mut frames, mut tiles, mut layers, mut keyframe) = (0, BTreeSet::new(), BTreeSet::new(), false);
+    let (mut frames, mut tiles, mut layers, mut video_lost) = (0, BTreeSet::new(), BTreeSet::new(), None);
     for &seq in seqs {
         let Some(r) = link.sent.lock().unwrap().lost(seq, &geometry) else { continue };
         link.pacer.lock().unwrap().on_lost(seq);
@@ -1003,19 +1034,24 @@ fn repair(app: &App, link: &ClientLink, seqs: &[u32]) {
         frames += 1;
         tiles.extend(r.tiles);
         layers.extend(r.layers);
-        keyframe |= r.keyframe;
+        if r.keyframe && video_lost.is_none_or(|f: u32| (seq.wrapping_sub(f) as i32) < 0) {
+            video_lost = Some(seq);
+        }
     }
     if frames == 0 {
         return;
     }
     let (tiles, layers): (Vec<u32>, Vec<u32>) = (tiles.into_iter().collect(), layers.into_iter().collect());
     link.watching.read().unwrap().shared.resync(link.id, &tiles, &layers);
-    if keyframe {
-        link.key_request.store(true, Ordering::Release);
+    if let Some(first) = video_lost {
+        // The producer drops it from the encoder's references, or asks for
+        // a keyframe when the encoder cannot.
+        let mut loss = link.video_loss.lock().unwrap();
+        loss.invalidate = Some(loss.invalidate.map_or(first, |o| if (first.wrapping_sub(o) as i32) < 0 { first } else { o }));
     }
-    let key = if keyframe { ", keyframe" } else { "" };
+    let video = if video_lost.is_some() { ", video lost" } else { "" };
     let lost = if frames == 1 { "1 frame lost".to_string() } else { format!("{frames} frames lost") };
-    app.telemetry.event(link.id, &format!("{lost}: {} tiles to repair{key}", tiles.len()));
+    app.telemetry.event(link.id, &format!("{lost}: {} tiles to repair{video}", tiles.len()));
 }
 
 /// How long a data-channel frame may stay unacknowledged before it counts as lost.
@@ -1182,12 +1218,14 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
             }
         }
         let before = (video_cap.bps, video_cap.fps);
-        if codec.encoder.is_some() && video_cap.update(video_rate(model, &codec.tuning), fps, proto::now_us()) {
+        let free = codec.encoder.as_ref().is_some_and(|e| e.free_rate_changes());
+        if codec.encoder.is_some() && video_cap.update(video_rate(model, &codec.tuning), fps, proto::now_us(), free) {
             let (from, to) = (before.0 as f64 / 1e6, video_cap.bps as f64 / 1e6);
             let text = format!("video cap {from:.1} Mbit/s for {} frames a second -> {to:.1} for {fps}", before.1);
             app.telemetry.event(link.id, &text);
             if let Some(e) = codec.encoder.as_mut() {
-                // A keyframe with NVENC (FFmpeg resets the encoder).
+                // A keyframe through FFmpeg (it resets the encoder); free
+                // with NVENC through the SDK (`free_rate_changes`).
                 e.set_max_bitrate(video_cap.bps, fps);
             }
         }
@@ -1215,6 +1253,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     // The new encoder's input is blank: everything is copied in again.
                     shared.encoder_reset(link.id);
                     need_key = true;
+                    two_pass_retry_us = proto::now_us() + TWO_PASS_HOLD_US;
                 }
                 Err(err) => {
                     two_pass_retry_us = proto::now_us() + TWO_PASS_RETRY_US;
@@ -1244,6 +1283,23 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
         // out as one frame when it shows again.
         if can_send && link.hello_acked.load(Ordering::Acquire) && !link.paused.load(Ordering::Acquire) {
             need_key |= link.key_request.swap(false, Ordering::AcqRel);
+            {
+                // Under the lock: a keyframe request sees the invalidation
+                // either pending or done, and an ACK past a loss is never
+                // applied before the loss.
+                let mut loss = link.video_loss.lock().unwrap();
+                if let Some(lost) = loss.invalidate.take() {
+                    if codec.invalidate_from(lost) {
+                        loss.recovering = true;
+                        app.telemetry.event(link.id, &format!("video lost from frame {lost}: encoder references dropped instead of a keyframe"));
+                    } else {
+                        need_key = true;
+                    }
+                }
+                if let Some(seq) = loss.acked.take() {
+                    codec.acknowledge(seq);
+                }
+            }
             let pulled = shared.pull(link.id, &mut codec, need_key, model);
             if codec.paced() {
                 link.pacer.lock().unwrap().note_limited();
@@ -1261,11 +1317,18 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                         app.telemetry.event(link.id, text);
                     }
                     let seq = u32::from_le_bytes(msg[4..8].try_into().unwrap());
-                    if key {
+                    let recovery = msg[1] & proto::FLAG_RECOVERY != 0;
+                    if key || recovery {
                         // Requests made before this one are answered by it.
                         *link.last_key.lock().unwrap() = Some(seq);
                         link.key_request.store(false, Ordering::Release);
-                        app.telemetry.event(link.id, &format!("keyframe sent ({} KB)", msg.len() / 1024));
+                        let kind = if key { "keyframe" } else { "recovery frame (no keyframe)" };
+                        app.telemetry.event(link.id, &format!("{kind} sent ({} KB)", msg.len() / 1024));
+                    }
+                    // The first video frame after an invalidation recovers the
+                    // client or it does not; either way its requests count again.
+                    if msg[1] & proto::FLAG_VIDEO != 0 {
+                        link.video_loss.lock().unwrap().recovering = false;
                     }
                     let now = proto::now_us();
                     link.pacer.lock().unwrap().on_send(seq, msg.len() as u64, now);
@@ -1289,6 +1352,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                     let two_pass = next_two_pass(&codec, video_cap.bps, rtt_us);
                     create_encoder(app, shared, link, &mut codec, size, encoded, &encoder_conf, &video_cap, two_pass);
                     need_key = true;
+                    *link.video_loss.lock().unwrap() = VideoLoss::default();
                     // Frames of the previous display will never be acked meaningfully.
                     link.pacer.lock().unwrap().forget_inflight();
                     link.sent.lock().unwrap().clear();
@@ -1301,7 +1365,7 @@ fn produce(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>) {
                 Ok(Pull::Idle { wake_at_us: w }) => wake_at_us = w,
                 Err(e) => {
                     app.telemetry.error("video encode (falling back to lossless)", e);
-                    codec.encoder = None;
+                    codec.set_encoder(None);
                     app.telemetry.client_encoder(link.id, None, Some("encoder failed".into()));
                     shared.drop_video(link.id);
                     continue;
@@ -1374,11 +1438,16 @@ impl VideoCap {
     /// Moves the cap when the target left the dead band (or collapsed).
     /// True when the encoder has to be told: the cap moved, or the frame
     /// rate it is for changed (the client's window went to another screen).
-    fn update(&mut self, rate: f64, fps: u32, now: u64) -> bool {
+    /// `free`: the encoder changes its rate without a keyframe.
+    fn update(&mut self, rate: f64, fps: u32, now: u64, free: bool) -> bool {
         let target = Self::target(rate);
         let ratio = target as f64 / self.bps.max(1) as f64;
-        let shifted = ratio < CAP_DEADBAND.0 || ratio > CAP_DEADBAND.1;
-        let hold = if ratio >= CAP_JUMP { CAP_JUMP_HOLD_US } else { CAP_HOLD_US };
+        let (band, hold) = match (free, ratio >= CAP_JUMP) {
+            (true, _) => (CAP_FREE_DEADBAND, CAP_FREE_HOLD_US),
+            (false, true) => (CAP_DEADBAND, CAP_JUMP_HOLD_US),
+            (false, false) => (CAP_DEADBAND, CAP_HOLD_US),
+        };
+        let shifted = ratio < band.0 || ratio > band.1;
         let moved = ratio < CAP_COLLAPSE || (shifted && now.saturating_sub(self.changed_us) >= hold);
         if moved {
             self.bps = target;
@@ -1427,6 +1496,10 @@ const TWO_PASS_CAP: (u64, u64) = (20_000_000, 30_000_000);
 const TWO_PASS_RTT_US: (u64, u64) = (50_000, 35_000);
 /// A failed attempt to open the other encoder is not repeated sooner.
 const TWO_PASS_RETRY_US: u64 = 30_000_000;
+/// Nor is a switch made sooner after another: each one opens an encoder,
+/// a keyframe, and a cap that follows the estimate closely (encoders with
+/// free rate changes) crossed the band every few seconds on a lossy link.
+const TWO_PASS_HOLD_US: u64 = 10_000_000;
 
 fn wants_two_pass(on: bool, cap_bps: u64, rtt_us: u64) -> bool {
     match on {
@@ -1458,7 +1531,7 @@ fn create_encoder(
     two_pass: bool,
 ) {
     let id = link.id;
-    codec.encoder = None;
+    codec.set_encoder(None);
     shared.set_gpu_input(id, false);
     let encoders = app.platform.encoders();
     let (pref, setting) = conf;
@@ -1509,7 +1582,7 @@ fn encoder_request(
 fn install_encoder(app: &App, shared: &Shared, id: u64, codec: &mut ClientCodec, e: Box<dyn VideoEncoder>) {
     app.telemetry.client_encoder(id, Some(e.name()), e.fallback_reason());
     shared.set_gpu_input(id, e.gpu_input());
-    codec.encoder = Some(e);
+    codec.set_encoder(Some(e));
 }
 
 /// An encoder opening on its own thread: NVENC takes about 250 ms to open,
