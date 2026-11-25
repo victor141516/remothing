@@ -11,6 +11,10 @@ export const CURSOR_FOLLOW = 1;
 export const S_PASTED = 14;
 /** UTF-8 JSON: the files on the remote clipboard (see proto.rs). */
 export const S_CLIPBOARD_FILES = 15;
+/** flags u8 as S_CLIPBOARD (CLIPBOARD_CHANGED), then the PNG picture now on the remote clipboard (see proto.rs). */
+export const S_CLIPBOARD_IMAGE = 16;
+/** Longest clipboard picture (PNG bytes) either side sends (platform::MAX_IMAGE). */
+export const MAX_IMAGE = 16 << 20;
 export const S_PONG = 4;
 /** UTF-8 JSON: WebRTC signaling (`config`, `answer`). */
 export const S_SIGNAL = 5;
@@ -113,6 +117,9 @@ export const C_PASTE = 25;
 export const C_BT709 = 26;
 /** UTF-8 JSON, a batch of the frame trace the server asked for (see proto.rs). */
 export const C_TRACE = 27;
+/** flags u8, then a PNG picture for the remote clipboard; with CLIPBOARD_PASTE for a Ctrl+V, as C_PASTE (see proto.rs). */
+export const C_CLIPBOARD_IMAGE = 28;
+export const CLIPBOARD_PASTE = 1;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 

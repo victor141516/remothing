@@ -13,3 +13,5 @@ windows.workspace = true
 sha2 = "0.10"
 # The `#[interface]` macro (IPolicyConfig) names this crate directly.
 windows-core = "0.61"
+# Clipboard pictures: CF_DIB to PNG and back.
+png = "0.18"

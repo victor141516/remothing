@@ -1,25 +1,28 @@
-//! Clipboard (the CLIPBOARD selection) of one X server: text, and the
-//! files a file manager copies (`text/uri-list`, read only).
+//! Clipboard (the CLIPBOARD selection) of one X server: text, pictures
+//! (`image/png`), and the files a file manager copies (`text/uri-list`,
+//! read only).
 //!
 //! X has no clipboard storage: the owner of the selection hands the data to
 //! whoever asks. So an unmapped window on its own connection does both
 //! sides: XFixes tells it when another client takes the selection, and it
-//! asks that owner what it offers (TARGETS), then for the file list or else
-//! the text (UTF8_STRING), in INCR pieces when large;
-//! when a client sets text it takes the selection itself and answers the
-//! requests of pasting applications.
+//! asks that owner what it offers (TARGETS), then for the file list, else
+//! the text (UTF8_STRING), else the picture, in INCR pieces when large;
+//! when a client sets text or a picture it takes the selection itself and
+//! answers the requests of pasting applications, in INCR pieces what does
+//! not fit one request.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use remothing_core::capture::Clip;
 use remothing_core::files::file_uri_path;
-use remothing_core::platform::{Clipboard, ClipboardSink, Copied};
+use remothing_core::platform::{Clipboard, ClipboardSink, Copied, MAX_IMAGE};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEventMask};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Property,
-    SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask,
+    PropMode, Property, SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass, SELECTION_NOTIFY_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -27,12 +30,15 @@ use x11rb::wrapper::ConnectionExt as _;
 
 /// Longest text (or file list) accepted from another client (INCR transfers are cut here).
 const MAX_TEXT: usize = 1 << 20;
+/// Size of the pieces an INCR transfer to a pasting client goes in.
+const PIECE: usize = 256 << 10;
 
 struct Atoms {
     clipboard: Atom,
     utf8_string: Atom,
     /// MIME spelling of the same, asked for by some toolkits.
     text_plain_utf8: Atom,
+    png: Atom,
     targets: Atom,
     incr: Atom,
     /// What file managers offer for copied files.
@@ -45,12 +51,36 @@ struct Inner {
     conn: RustConnection,
     window: Window,
     atoms: Atoms,
-    /// Text we own the selection with (None: someone else owns it).
-    text: Mutex<Option<String>>,
+    /// What we own the selection with (None: someone else owns it).
+    owned: Mutex<Option<Clip>>,
     on_change: Mutex<Option<ClipboardSink>>,
     /// The next text received is what was there when watching started.
     found: AtomicBool,
     stop: AtomicBool,
+}
+
+/// An INCR transfer from the owner: its target and the pieces so far.
+struct Incoming {
+    target: Atom,
+    data: Vec<u8>,
+    /// More came than is accepted: text is cut, a picture dropped.
+    cut: bool,
+}
+
+/// An INCR transfer to a pasting client: the next piece goes when it
+/// deleted the last one from `property` of `requestor`.
+struct Outgoing {
+    requestor: Window,
+    property: Atom,
+    target: Atom,
+    data: Clip,
+    sent: usize,
+}
+
+#[derive(Default)]
+struct Transfers {
+    incoming: Option<Incoming>,
+    outgoing: Vec<Outgoing>,
 }
 
 pub struct X11Clipboard {
@@ -81,6 +111,7 @@ impl X11Clipboard {
             clipboard: atom(b"CLIPBOARD")?,
             utf8_string: atom(b"UTF8_STRING")?,
             text_plain_utf8: atom(b"text/plain;charset=utf-8")?,
+            png: atom(b"image/png")?,
             targets: atom(b"TARGETS")?,
             incr: atom(b"INCR")?,
             transfer: atom(b"REMOTHING_CLIPBOARD")?,
@@ -93,7 +124,7 @@ impl X11Clipboard {
             conn,
             window,
             atoms,
-            text: Mutex::new(None),
+            owned: Mutex::new(None),
             on_change: Mutex::new(None),
             found: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -102,17 +133,26 @@ impl X11Clipboard {
         std::thread::Builder::new().name("clipboard".into()).spawn(move || thread_inner.run())?;
         Ok(Self { inner })
     }
-}
 
-impl Clipboard for X11Clipboard {
-    fn set_text(&self, text: &str) -> Result<()> {
+    /// Takes the selection, to answer pasting clients with `clip`.
+    fn own(&self, clip: Clip) -> Result<()> {
         let inner = &self.inner;
-        *inner.text.lock().unwrap() = Some(text.to_string());
+        *inner.owned.lock().unwrap() = Some(clip);
         inner.conn.set_selection_owner(inner.window, inner.atoms.clipboard, x11rb::CURRENT_TIME)?;
         // A round trip: the X server has made us the owner before a paste
         // pressed next (on the input connection) asks the owner.
         inner.conn.get_selection_owner(inner.atoms.clipboard)?.reply()?;
         Ok(())
+    }
+}
+
+impl Clipboard for X11Clipboard {
+    fn set_text(&self, text: &str) -> Result<()> {
+        self.own(Clip::Text(Arc::from(text)))
+    }
+
+    fn set_image(&self, png: &[u8]) -> Result<()> {
+        self.own(Clip::Image(Arc::from(png)))
     }
 
     fn watch(&self, on_change: ClipboardSink) {
@@ -140,14 +180,13 @@ impl Drop for X11Clipboard {
 
 impl Inner {
     fn run(&self) {
-        // An INCR transfer in progress: its target and the pieces so far.
-        let mut incoming: Option<(Atom, Vec<u8>)> = None;
+        let mut transfers = Transfers::default();
         loop {
             let Ok(event) = self.conn.wait_for_event() else { return };
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
-            if let Err(e) = self.handle(event, &mut incoming) {
+            if let Err(e) = self.handle(event, &mut transfers) {
                 eprintln!("clipboard: {e:#}");
             }
         }
@@ -160,12 +199,12 @@ impl Inner {
         Ok(())
     }
 
-    fn handle(&self, event: Event, incoming: &mut Option<(Atom, Vec<u8>)>) -> Result<()> {
+    fn handle(&self, event: Event, transfers: &mut Transfers) -> Result<()> {
         let a = &self.atoms;
         match event {
             // Another client copied something: ask it what it offers.
             Event::XfixesSelectionNotify(e) if e.owner != self.window && e.owner != x11rb::NONE => {
-                *self.text.lock().unwrap() = None;
+                *self.owned.lock().unwrap() = None;
                 self.ask(a.targets, e.selection_timestamp)?;
             }
             // Its answer.
@@ -175,11 +214,21 @@ impl Inner {
                 self.conn.delete_property(self.window, a.transfer)?;
                 self.conn.flush()?;
                 if reply.type_ == a.incr {
-                    *incoming = Some((e.target, Vec::new()));
+                    transfers.incoming = Some(Incoming { target: e.target, data: Vec::new(), cut: false });
                 } else if e.target == a.targets {
-                    // Files (a file manager's copy) when offered, else text.
+                    // Files (a file manager's copy) when offered, else text,
+                    // else a picture: an office program offers a picture of
+                    // the text it copies besides it.
                     let offered = reply.value32().map(|atoms| atoms.collect::<Vec<_>>()).unwrap_or_default();
-                    self.ask(if offered.contains(&a.uri_list) { a.uri_list } else { a.utf8_string }, e.time)?;
+                    let text = [a.utf8_string, a.text_plain_utf8, AtomEnum::STRING.into()].iter().any(|t| offered.contains(t));
+                    let target = if offered.contains(&a.uri_list) {
+                        a.uri_list
+                    } else if !text && offered.contains(&a.png) {
+                        a.png
+                    } else {
+                        a.utf8_string
+                    };
+                    self.ask(target, e.time)?;
                 } else {
                     self.received(e.target, reply.value, e.time)?;
                 }
@@ -188,28 +237,51 @@ impl Inner {
             Event::SelectionNotify(e) if e.target == a.targets => self.ask(a.utf8_string, e.time)?,
             // Nothing to give, or no owner: then the first report is that nothing is there.
             Event::SelectionNotify(_) => self.found.store(false, Ordering::Relaxed),
-            Event::PropertyNotify(e) if e.atom == a.transfer && e.state == Property::NEW_VALUE => {
-                let Some((target, data)) = incoming else { return Ok(()) };
+            Event::PropertyNotify(e) if e.window == self.window && e.atom == a.transfer && e.state == Property::NEW_VALUE => {
+                let Some(incoming) = &mut transfers.incoming else { return Ok(()) };
                 let piece = self.conn.get_property(true, self.window, a.transfer, AtomEnum::ANY, 0, u32::MAX)?.reply()?.value;
                 self.conn.flush()?;
+                let limit = if incoming.target == a.png { MAX_IMAGE } else { MAX_TEXT };
                 if piece.is_empty() {
                     // An empty piece ends the transfer.
-                    let target = *target;
-                    let data = incoming.take().map(|(_, data)| data).unwrap_or_default();
-                    self.received(target, data, e.time)?;
-                } else if data.len() + piece.len() <= MAX_TEXT {
-                    data.extend_from_slice(&piece);
+                    let Incoming { target, data, cut } = transfers.incoming.take().unwrap();
+                    if cut && target == a.png {
+                        eprintln!("clipboard: a picture of more than {MAX_IMAGE} bytes was copied: not taken");
+                        self.found.store(false, Ordering::Relaxed);
+                    } else {
+                        self.received(target, data, e.time)?;
+                    }
+                } else if incoming.data.len() + piece.len() <= limit {
+                    incoming.data.extend_from_slice(&piece);
+                } else {
+                    incoming.cut = true;
                 }
             }
-            Event::SelectionRequest(e) => self.answer(e)?,
-            Event::SelectionClear(_) => *self.text.lock().unwrap() = None,
+            // A pasting client took the last piece of an INCR transfer from us.
+            Event::PropertyNotify(e) if e.window != self.window && e.state == Property::DELETE => {
+                let Some(at) = transfers.outgoing.iter().position(|o| o.requestor == e.window && o.property == e.atom) else {
+                    return Ok(());
+                };
+                let out = &mut transfers.outgoing[at];
+                let piece = &out.data.bytes()[out.sent..(out.sent + PIECE).min(out.data.bytes().len())];
+                // The empty piece after the last one ends it.
+                self.conn.change_property8(PropMode::REPLACE, out.requestor, out.property, out.target, piece)?;
+                out.sent += piece.len();
+                if piece.is_empty() {
+                    let done = transfers.outgoing.swap_remove(at);
+                    self.conn.change_window_attributes(done.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT))?;
+                }
+                self.conn.flush()?;
+            }
+            Event::SelectionRequest(e) => self.answer(e, &mut transfers.outgoing)?,
+            Event::SelectionClear(_) => *self.owned.lock().unwrap() = None,
             _ => {}
         }
         Ok(())
     }
 
-    /// The owner's text, or its `text/uri-list`: one URI a line, `#` lines
-    /// are comments. A list without local files is asked for as text.
+    /// The owner's text, picture, or its `text/uri-list`: one URI a line,
+    /// `#` lines are comments. A list without local files is asked for as text.
     fn received(&self, target: Atom, data: Vec<u8>, time: u32) -> Result<()> {
         let copied = if target == self.atoms.uri_list {
             let files: Vec<_> = String::from_utf8_lossy(&data)
@@ -221,6 +293,8 @@ impl Inner {
                 return self.ask(self.atoms.utf8_string, time);
             }
             Copied::Files(files)
+        } else if target == self.atoms.png {
+            Copied::Image(data)
         } else {
             Copied::Text(String::from_utf8_lossy(&data).into_owned())
         };
@@ -231,27 +305,43 @@ impl Inner {
         Ok(())
     }
 
-    /// An application pastes (or asks what we offer) while we own the selection.
-    fn answer(&self, e: SelectionRequestEvent) -> Result<()> {
+    /// An application pastes (or asks what we offer) while we own the
+    /// selection. What does not fit one request starts an INCR transfer.
+    fn answer(&self, e: SelectionRequestEvent, outgoing: &mut Vec<Outgoing>) -> Result<()> {
         let a = &self.atoms;
         // Obsolete clients give no property: the target names it.
         let property = if e.property == x11rb::NONE { e.target } else { e.property };
-        let text = self.text.lock().unwrap().clone().filter(|_| e.selection == a.clipboard);
-        let delivered = match text {
-            Some(_) if e.target == a.targets => {
+        let owned = self.owned.lock().unwrap().clone().filter(|_| e.selection == a.clipboard);
+        let given = match &owned {
+            Some(Clip::Text(_)) if e.target == a.targets => {
                 let offered = [a.targets, a.utf8_string, a.text_plain_utf8];
                 self.conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::ATOM, &offered)?;
-                true
+                None
             }
+            Some(Clip::Image(_)) if e.target == a.targets => {
+                self.conn.change_property32(PropMode::REPLACE, e.requestor, property, AtomEnum::ATOM, &[a.targets, a.png])?;
+                None
+            }
+            Some(text @ Clip::Text(_)) if e.target == a.utf8_string || e.target == a.text_plain_utf8 => Some(text),
+            Some(png @ Clip::Image(_)) if e.target == a.png => Some(png),
+            _ => None,
+        };
+        let delivered = match given {
             // One request carries it whole (BIG-REQUESTS allows megabytes).
-            Some(text)
-                if (e.target == a.utf8_string || e.target == a.text_plain_utf8)
-                    && text.len() + 64 <= self.conn.maximum_request_bytes() =>
-            {
-                self.conn.change_property8(PropMode::REPLACE, e.requestor, property, e.target, text.as_bytes())?;
+            Some(clip) if clip.bytes().len() + 64 <= self.conn.maximum_request_bytes() => {
+                self.conn.change_property8(PropMode::REPLACE, e.requestor, property, e.target, clip.bytes())?;
                 true
             }
-            _ => false,
+            Some(clip) => {
+                // The size first, as the type INCR; the pieces follow as the
+                // client deletes each one, which we hear of on its window.
+                self.conn.change_window_attributes(e.requestor, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE))?;
+                self.conn.change_property32(PropMode::REPLACE, e.requestor, property, a.incr, &[clip.bytes().len() as u32])?;
+                outgoing.retain(|o| o.requestor != e.requestor || o.property != property);
+                outgoing.push(Outgoing { requestor: e.requestor, property, target: e.target, data: clip.clone(), sent: 0 });
+                true
+            }
+            None => e.target == a.targets && owned.is_some(),
         };
         let notify = SelectionNotifyEvent {
             response_type: SELECTION_NOTIFY_EVENT,

@@ -8,6 +8,7 @@
 // then not sent to the remote computer. While the mouse is captured the tab
 // hides; while capture mode waits for a click on the picture, the tab says so.
 
+import { type Clip } from './clipboard';
 import { DisplaysPage } from './displays';
 import { OnScreenKeyboard } from './keyboard';
 import { TextEntry } from './textentry';
@@ -127,6 +128,9 @@ export class Ui {
   private readonly handle: HTMLButtonElement;
   private readonly flash = document.createElement('div');
   private readonly clipboardBox = document.createElement('textarea');
+  /** The picture on the remote clipboard, when it holds one. */
+  private readonly clipboardImage = document.createElement('img');
+  private picture: Blob | null = null;
   private readonly keyboard: OnScreenKeyboard;
   private readonly textEntry: TextEntry;
   private readonly page: DisplaysPage;
@@ -217,12 +221,16 @@ export class Ui {
       this.clipboardTimer = setTimeout(() => this.flushClipboard(), CLIPBOARD_SEND_MS);
       this.showClipTile();
     });
+    this.clipboardImage.id = 'ui-clipboard-image';
+    this.clipboardImage.alt = 'Picture copied on the remote computer';
+    this.clipboardImage.hidden = true;
     this.fileList.className = 'files';
     this.fileList.hidden = true;
     const clipboardView = section('ui-clipboard');
     clipboardView.append(
       this.pageHead('Clipboard'),
       this.fileList,
+      this.clipboardImage,
       this.clipboardBox,
       paragraph(
         'note',
@@ -287,11 +295,21 @@ export class Ui {
     return this.keyboard.element.offsetHeight;
   }
 
-  /** The remote clipboard changed. */
-  remoteClipboard(text: string): void {
+  /** The remote clipboard changed: text, or a picture shown above the box. */
+  remoteClipboard(clip: Clip): void {
     // Text being typed here is newer than what comes back.
+    const text = 'text' in clip ? clip.text : '';
     if (this.clipboardTimer === 0 && this.clipboardBox.value !== text) this.clipboardBox.value = text;
+    this.showPicture('png' in clip ? clip.png : null);
     this.showClipTile();
+  }
+
+  private showPicture(png: Blob | null): void {
+    if (this.picture) URL.revokeObjectURL(this.clipboardImage.src);
+    this.picture = png;
+    this.clipboardImage.hidden = png === null;
+    if (png) this.clipboardImage.src = URL.createObjectURL(png);
+    else this.clipboardImage.removeAttribute('src');
   }
 
   /** Whether the remote session's sound plays, and the reason when it does not. */
@@ -581,7 +599,8 @@ export class Ui {
     const files = this.files.length;
     // Never the text itself: it may be a password.
     const n = this.clipboardBox.value.length;
-    const detail = files ? `${files} ${files === 1 ? 'file' : 'files'} to download` : n ? `${n} characters` : 'Empty';
+    const picture = this.picture ? `Picture, ${Math.ceil(this.picture.size / 1024)} KB` : '';
+    const detail = files ? `${files} ${files === 1 ? 'file' : 'files'} to download` : n ? `${n} characters` : picture || 'Empty';
     this.tiles.clip.set(null, '', detail);
   }
 
@@ -600,6 +619,9 @@ export class Ui {
     clearTimeout(this.clipboardTimer);
     this.clipboardTimer = 0;
     this.actions.clipboard(this.clipboardBox.value);
+    // That text replaced the picture there.
+    this.showPicture(null);
+    this.showClipTile();
   }
 
   private button(label: string, title: string, onClick: () => void): HTMLButtonElement {

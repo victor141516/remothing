@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use crate::geom::{MovedRect, Rect};
 use crate::pixels::Differ;
-use crate::platform::{CaptureSession, Clipboard, Copied, DisplayInfo, InputProvider, OpenedDisplay, Platform, ThreadRole};
+use crate::platform::{CaptureSession, Clipboard, Copied, DisplayInfo, InputProvider, OpenedDisplay, Platform, ThreadRole, MAX_IMAGE};
 use crate::proto;
 use crate::shared::Shared;
 use crate::telemetry::Telemetry;
@@ -34,22 +34,43 @@ const GONE_AFTER: Duration = Duration::from_secs(10);
 /// (see `watch_layout`).
 const LAYOUT_CHECK: Duration = Duration::from_secs(1);
 
-/// Clipboard text as last seen.
+/// What the clients see of a session's clipboard.
+#[derive(Clone, PartialEq)]
+pub enum Clip {
+    Text(Arc<str>),
+    /// PNG.
+    Image(Arc<[u8]>),
+}
+
+impl Clip {
+    /// The text's UTF-8 or the PNG file.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Clip::Text(text) => text.as_bytes(),
+            Clip::Image(png) => png,
+        }
+    }
+}
+
+/// Clipboard content as last seen.
 #[derive(Clone)]
-pub struct ClipboardText {
+pub struct ClipboardContent {
     /// The client that set it (None: the session itself).
     pub by: Option<u64>,
-    pub text: Arc<str>,
+    pub clip: Clip,
     /// Copied while the display was open, not what was there when it opened:
     /// clients copy only such changes to their own computer's clipboard.
     pub changed: bool,
 }
 
-impl Default for ClipboardText {
+impl Default for ClipboardContent {
     fn default() -> Self {
-        Self { by: None, text: Arc::from(""), changed: false }
+        Self { by: None, clip: Clip::Text(Arc::from("")), changed: false }
     }
 }
+
+/// The first bytes of every PNG file.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 /// A captured display's state, shared between its capture thread, the
 /// clients watching it and the admin API.
@@ -59,7 +80,7 @@ pub struct DisplayControl {
     current: RwLock<Option<DisplayInfo>>,
     input: RwLock<Option<Arc<dyn InputProvider>>>,
     clipboard: RwLock<Option<Arc<dyn Clipboard>>>,
-    clipboard_text: watch::Sender<ClipboardText>,
+    clipboard_content: watch::Sender<ClipboardContent>,
     clipboard_files: watch::Sender<Arc<[PathBuf]>>,
 }
 
@@ -70,7 +91,7 @@ impl Default for DisplayControl {
             current: RwLock::default(),
             input: RwLock::default(),
             clipboard: RwLock::default(),
-            clipboard_text: watch::channel(ClipboardText::default()).0,
+            clipboard_content: watch::channel(ClipboardContent::default()).0,
             clipboard_files: watch::channel(Arc::from(Vec::new())).0,
         }
     }
@@ -89,21 +110,24 @@ impl DisplayControl {
         self.input.read().unwrap().clone()
     }
 
-    /// The session's clipboard text, followed across changes.
-    pub fn clipboard_text(&self) -> watch::Receiver<ClipboardText> {
-        self.clipboard_text.subscribe()
+    /// The session's clipboard text or picture, followed across changes.
+    pub fn clipboard_content(&self) -> watch::Receiver<ClipboardContent> {
+        self.clipboard_content.subscribe()
     }
 
-    /// Client `client` put `text` on the session's clipboard.
-    pub fn set_clipboard(&self, client: u64, text: &str) -> Result<()> {
-        if text.len() > MAX_CLIPBOARD {
-            bail!("clipboard text of {} bytes is too long", text.len());
+    /// Client `client` put `clip` on the session's clipboard.
+    pub fn set_clipboard(&self, client: u64, clip: Clip) -> Result<()> {
+        let clipboard = || self.clipboard.read().unwrap().clone().context("no clipboard access on this display");
+        match &clip {
+            Clip::Text(text) if text.len() > MAX_CLIPBOARD => bail!("clipboard text of {} bytes is too long", text.len()),
+            Clip::Text(text) => clipboard()?.set_text(text)?,
+            Clip::Image(png) if png.len() > MAX_IMAGE => bail!("clipboard picture of {} bytes is too large", png.len()),
+            Clip::Image(png) if !png.starts_with(PNG_SIGNATURE) => bail!("the clipboard picture is not a PNG"),
+            Clip::Image(png) => clipboard()?.set_image(png)?,
         }
-        let clipboard = self.clipboard.read().unwrap().clone().context("no clipboard access on this display")?;
-        clipboard.set_text(text)?;
-        // Text replaced whatever files were copied.
+        // It replaced whatever files were copied.
         self.clear_files();
-        self.clipboard_changed(Some(client), text, true);
+        self.clipboard_changed(Some(client), clip, true);
         Ok(())
     }
 
@@ -123,9 +147,15 @@ impl DisplayControl {
     /// What the platform reports as copied.
     fn copied(&self, copied: Copied, changed: bool) {
         match copied {
+            Copied::Text(text) if text.len() > MAX_CLIPBOARD => {}
             Copied::Text(text) => {
                 self.clear_files();
-                self.clipboard_changed(None, &text, changed);
+                self.clipboard_changed(None, Clip::Text(text.into()), changed);
+            }
+            Copied::Image(png) if png.len() > MAX_IMAGE => {}
+            Copied::Image(png) => {
+                self.clear_files();
+                self.clipboard_changed(None, Clip::Image(png.into()), changed);
             }
             Copied::Files(list) => {
                 self.clipboard_files.send_if_modified(|files| {
@@ -139,17 +169,14 @@ impl DisplayControl {
         }
     }
 
-    /// Publishes the text unless it is what was last seen (the session
-    /// reports a client's own change back). `changed`: not the text found
-    /// when the display was opened.
-    fn clipboard_changed(&self, client: Option<u64>, text: &str, changed: bool) {
-        if text.len() > MAX_CLIPBOARD {
-            return;
-        }
-        self.clipboard_text.send_if_modified(|last| {
-            let modified = *last.text != *text;
+    /// Publishes the text or picture unless it is what was last seen (the
+    /// session reports a client's own change back). `changed`: not what was
+    /// found when the display was opened.
+    fn clipboard_changed(&self, client: Option<u64>, clip: Clip, changed: bool) {
+        self.clipboard_content.send_if_modified(|last| {
+            let modified = last.clip != clip;
             if modified {
-                *last = ClipboardText { by: client, text: Arc::from(text), changed };
+                *last = ClipboardContent { by: client, clip, changed };
             }
             modified
         });

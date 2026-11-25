@@ -1,3 +1,4 @@
+import { clipKey, readClip, readQuietly, type Clip } from './clipboard';
 import { EVDEV } from './keymap';
 import { C_BUTTON, C_KEY, C_MOVE, C_MOVE_REL, C_TEXT, C_WHEEL, MOVE_AS_POSITION, WHEEL_NOTCH } from './proto';
 
@@ -35,6 +36,8 @@ const TAP_SLOP_PX = 10;
 const DOUBLE_TAP_MS = 300;
 /** Longest wait for the server to confirm a paste before held-back keys go out anyway. */
 const PASTE_WAIT_MS = 2000;
+/** A picture to paste has to get there first: it gets 1 ms more for every this many bytes (1 MB/s). */
+const PASTE_BYTES_PER_MS = 1000;
 
 export class Input {
   private keys = new Set<number>();
@@ -79,12 +82,12 @@ export class Input {
   private queued: [number, boolean][] = [];
   /** The V of that paste is still held. */
   private pasteV = false;
-  /** This computer's clipboard text that is no newer than the remote
-   * clipboard: it came from there, went there, or was already here when
-   * the remote one last changed. Ctrl+V does not send it, so an old copy
-   * here never replaces a newer one there. */
+  /** What this computer's clipboard holds (`clipKey`) that is no newer
+   * than the remote clipboard: it came from there, went there, or was
+   * already here when the remote one last changed. Ctrl+V does not send
+   * it, so an old copy here never replaces a newer one there. */
   private synced: string | null = null;
-  /** The last text seen on this computer's clipboard (null: none yet). */
+  /** The last content seen on this computer's clipboard (`clipKey`; null: none yet). */
   private known: string | null = null;
   /** The remote clipboard changed while this window was not in use. */
   private stale = false;
@@ -94,8 +97,8 @@ export class Input {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly send: (msg: Uint8Array) => void,
-    /** This computer's clipboard text for a Ctrl+V; the server sets it and presses V. */
-    private readonly sendPaste: (text: string) => void,
+    /** This computer's clipboard for a Ctrl+V; the server sets it and presses V. */
+    private readonly sendPaste: (clip: Clip) => void,
     private readonly pointerChanged: () => void,
     private readonly captureChanged: () => void,
   ) {
@@ -427,7 +430,7 @@ export class Input {
     const ctrlFirst = this.keys.has(EVDEV.ControlLeft) || this.keys.has(EVDEV.ControlRight);
     // The clipboard can be read only on HTTPS or localhost pages.
     if (down && code === EVDEV.KeyV && ctrlFirst && !e.altKey && !e.metaKey && window.isSecureContext) {
-      this.startPaste();
+      void this.startPaste();
       return;
     }
     this.setKey(code, down);
@@ -472,41 +475,46 @@ export class Input {
   /** Ctrl (pressed first) + V: the V is held back, this computer's clipboard
    * goes to the remote one, and the server presses the V once it is there.
    * Keys meanwhile wait, so Ctrl stays down on the remote side until then. */
-  private startPaste(): void {
+  private async startPaste(): Promise<void> {
     const paste = { done: 0 };
     this.paste = paste;
     this.pasteV = true;
-    void navigator.clipboard.readText().then(
-      (text) => {
-        if (this.paste !== paste) return;
-        // An empty text leaves the remote clipboard as it is.
-        const newer = text !== this.synced;
-        this.known = text;
-        if (newer) this.synced = text;
-        this.sendPaste(newer ? text : '');
-        // The server answers (`pasted`); if it never does, keys go on.
-        paste.done = window.setTimeout(() => this.pasted(), PASTE_WAIT_MS);
-      },
-      () => {
-        if (this.paste !== paste) return;
-        // No permission (or no text): a plain Ctrl+V of the remote clipboard.
-        this.setKey(EVDEV.KeyV, true);
-        this.setKey(EVDEV.KeyV, false);
-        this.pasted();
-      },
-    );
+    let clip: Clip;
+    let key: string;
+    try {
+      // Called before any wait: Safari reads only within the key's handling.
+      clip = await readClip();
+      key = await clipKey(clip);
+    } catch {
+      if (this.paste !== paste) return;
+      // No permission (or nothing readable): a plain Ctrl+V of the remote clipboard.
+      this.setKey(EVDEV.KeyV, true);
+      this.setKey(EVDEV.KeyV, false);
+      this.pasted();
+      return;
+    }
+    if (this.paste !== paste) return;
+    // An empty text leaves the remote clipboard as it is.
+    const newer = key !== this.synced;
+    this.known = key;
+    if (newer) this.synced = key;
+    const sent: Clip = newer ? clip : { text: '' };
+    this.sendPaste(sent);
+    // The server answers (`pasted`); if it never does, keys go on.
+    const upload = 'png' in sent ? sent.png.size / PASTE_BYTES_PER_MS : 0;
+    paste.done = window.setTimeout(() => this.pasted(), PASTE_WAIT_MS + upload);
   }
 
-  /** The remote clipboard changed (text or files); `copied`: its text, which
-   * this computer's clipboard now holds too (null: not copied here). What
-   * this computer's clipboard holds now is older than the change. */
+  /** The remote clipboard changed (text, picture or files); `copied`: what
+   * this computer's clipboard now holds of it (`clipKey`; null: not copied
+   * here). What this computer's clipboard holds now is older than the change. */
   remoteChanged(copied: string | null): void {
     if (copied !== null) {
       this.synced = this.known = copied;
       this.stale = false;
     } else if (document.hasFocus()) {
-      void readQuietly().then((text) => {
-        if (text !== null) this.synced = this.known = text;
+      void readQuietly().then(async (clip) => {
+        if (clip !== null) this.synced = this.known = await clipKey(clip);
       });
     } else {
       this.stale = true;
@@ -519,10 +527,11 @@ export class Input {
   private back(): void {
     if (!this.stale) return;
     this.stale = false;
-    void readQuietly().then((text) => {
-      if (text === null) return;
-      if (this.known === null || text === this.known) this.synced = text;
-      this.known = text;
+    void readQuietly().then(async (clip) => {
+      if (clip === null) return;
+      const key = await clipKey(clip);
+      if (this.known === null || key === this.known) this.synced = key;
+      this.known = key;
     });
   }
 
@@ -534,19 +543,5 @@ export class Input {
     const queued = this.queued;
     this.queued = [];
     for (const [code, down] of queued) this.setKey(code, down);
-  }
-}
-
-/** This computer's clipboard text, read only where the browser already
- * allows it (no permission prompt out of the blue); null otherwise. */
-async function readQuietly(): Promise<string | null> {
-  if (!window.isSecureContext) return null;
-  try {
-    const permission = await navigator.permissions.query({ name: 'clipboard-read' as PermissionName });
-    if (permission.state !== 'granted') return null;
-    return await navigator.clipboard.readText();
-  } catch {
-    // Firefox and Safari know no such permission.
-    return null;
   }
 }

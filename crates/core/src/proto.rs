@@ -93,6 +93,10 @@ pub const S_PASTED: u8 = 14;
 /// (empty: none). The page downloads one with `GET /files/clipboard`
 /// (`files.rs`).
 pub const S_CLIPBOARD_FILES: u8 = 15;
+/// flags u8 as S_CLIPBOARD (CLIPBOARD_CHANGED), then the PNG picture now on
+/// the session's clipboard (at most `platform::MAX_IMAGE` bytes). Sent like
+/// S_CLIPBOARD: text and picture are alternatives, the latest copy wins.
+pub const S_CLIPBOARD_IMAGE: u8 = 16;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
@@ -211,6 +215,11 @@ pub const C_BT709: u8 = 26;
 /// `decoded` is 0 without video; `refreshes` are the display refreshes
 /// (`requestAnimationFrame`) since the last batch.
 pub const C_TRACE: u8 = 27;
+/// flags u8, then a PNG picture (at most `platform::MAX_IMAGE` bytes) to put
+/// on the session's clipboard. With CLIPBOARD_PASTE it is the client's own
+/// clipboard for a Ctrl+V, handled as C_PASTE: set, V pressed, S_PASTED.
+pub const C_CLIPBOARD_IMAGE: u8 = 28;
+pub const CLIPBOARD_PASTE: u8 = 1;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server

@@ -20,7 +20,7 @@ they stop.
 - 🖥️ Cross-platform. One native binary for Linux (X11), Windows and macOS (Apple Silicon), with the web client embedded.
 - 🪟 Multi-display. Each browser window streams its own display, and virtual displays can be added from the menu.
 - 🔊 Sound. What the remote session plays is sent along (Opus), and the microphone goes the other way on Windows and Linux.
-- 📋 Clipboard and files. Copy and paste work across both sides, and a file dragged onto the page lands in the remote Downloads folder.
+- 📋 Clipboard and files. Text and pictures copy and paste across both sides, and a file dragged onto the page lands in the remote Downloads folder.
 - 📱 Touch. On a phone or tablet the screen works as a trackpad, with the device's own keyboard.
 - 🚀 Adaptive transport. WebTransport datagrams first, then WebRTC or WebSocket, at a bitrate that follows each client's link.
 

@@ -4,6 +4,7 @@
 // Frames are handled in worker.ts.
 
 import { Sound } from './audio';
+import { clipKey, readQuietly, writeClip, type Clip } from './clipboard';
 import { Input } from './input';
 import { Microphone } from './mic';
 import { Peer } from './peer';
@@ -22,19 +23,46 @@ declare global {
 
 /** A remote clipboard change the browser did not let this page write yet
  * (Firefox and Safari want a key or click first). */
-let pendingCopy: string | null = null;
+let pendingCopy: Clip | null = null;
+/** Counts remote clipboard changes: only the latest one's copy here counts. */
+let copies = 0;
 
 /** Copies a remote clipboard change to this computer's clipboard (HTTPS or
  * localhost only). Only in the window being used: one in the background
  * would otherwise overwrite, later, what was copied here meanwhile.
- * Whether this computer's clipboard takes it. */
-function copyHere(text: string): boolean {
+ * Resolves with what this computer's clipboard holds then (`clipKey`), or
+ * null when it does not take it. */
+async function copyHere(clip: Clip): Promise<string | null> {
   pendingCopy = null;
-  if (!window.isSecureContext || !document.hasFocus()) return false;
-  navigator.clipboard.writeText(text).catch(() => {
-    pendingCopy = text;
+  if (!window.isSecureContext || !document.hasFocus()) return null;
+  try {
+    await writeClip(clip);
+  } catch {
+    pendingCopy = clip;
+    return clipKey(clip);
+  }
+  if ('text' in clip) return clipKey(clip);
+  // The browser stores a picture its own way (Chromium encodes it again):
+  // what it reads back is what a Ctrl+V here finds.
+  const stored = await readQuietly();
+  return clipKey(stored ?? clip);
+}
+
+/** A remote clipboard change: shown in the menu, and copied here when it
+ * was copied there after this page connected. */
+function remoteClip(clip: Clip, changed: boolean): void {
+  ui.remoteClipboard(clip);
+  if (!changed) return;
+  const copy = ++copies;
+  void copyHere(clip).then((key) => {
+    if (copy === copies) input.remoteChanged(key);
   });
-  return true;
+}
+
+/** This computer's clipboard for a Ctrl+V. */
+function sendPaste(clip: Clip): void {
+  if ('text' in clip) toWorker({ type: 'paste', text: clip.text });
+  else void clip.png.arrayBuffer().then((png) => toWorker({ type: 'pasteimage', png }, [png]));
 }
 
 /** The remote clipboard's file list last shown (JSON), to tell a new copy from a repeat. */
@@ -46,7 +74,7 @@ for (const type of ['keydown', 'pointerdown']) {
     type,
     () => {
       if (pendingCopy === null) return;
-      void navigator.clipboard.writeText(pendingCopy).catch(() => {});
+      void writeClip(pendingCopy).catch(() => {});
       pendingCopy = null;
     },
     true,
@@ -108,7 +136,7 @@ const input = new Input(
       inputWs.send(m);
     }
   },
-  (text) => toWorker({ type: 'paste', text }),
+  sendPaste,
   showPointer,
   () => {
     // The server sends where its cursor is only while the mouse is trapped.
@@ -391,8 +419,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       path = m.path;
       break;
     case 'clipboard':
-      ui.remoteClipboard(m.text);
-      if (m.changed) input.remoteChanged(copyHere(m.text) ? m.text : null);
+      remoteClip({ text: m.text }, m.changed);
+      break;
+    case 'clipimage':
+      remoteClip({ png: new Blob([m.png], { type: 'image/png' }) }, m.changed);
       break;
     case 'displays': {
       const list = JSON.parse(m.json) as DisplaysMessage;

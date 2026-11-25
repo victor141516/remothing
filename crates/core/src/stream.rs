@@ -25,12 +25,12 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::app::{App, VirtualRequest, Watching};
-use crate::capture::DisplayStream;
+use crate::capture::{Clip, DisplayStream};
 use crate::config::constant_time_eq;
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
 use crate::pacer::{Notice, Pacer};
-use crate::platform::{Button, ThreadRole};
+use crate::platform::{Button, ThreadRole, MAX_IMAGE};
 use crate::proto;
 use crate::recovery::SentLog;
 use crate::rtc::PeerEvent;
@@ -136,7 +136,10 @@ pub async fn stream_handler(
     }
     let mut codecs = vec![Codec::H264];
     codecs.extend(q.codecs.split(',').filter_map(Codec::from_name).filter(|c| *c != Codec::H264));
-    ws.write_buffer_size(0).on_upgrade(move |socket| session(socket, app, addr, codecs, q.display, q.session))
+    // A clipboard picture comes as one message, which a browser sends as one frame.
+    ws.write_buffer_size(0)
+        .max_frame_size(2 + MAX_IMAGE)
+        .on_upgrade(move |socket| session(socket, app, addr, codecs, q.display, q.session))
 }
 
 /// Input gets its own socket so events never queue behind frame data or ACKs.
@@ -394,16 +397,21 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
             // a list the client can download them from.
             loop {
                 let control = link.watching.read().unwrap().control.clone();
-                let (mut text, mut files) = (control.clipboard_text(), control.clipboard_files());
-                let (mut first, mut send_text, mut send_files) = (true, true, true);
+                let (mut content, mut files) = (control.clipboard_content(), control.clipboard_files());
+                let (mut first, mut send_content, mut send_files) = (true, true, true);
                 loop {
-                    if send_text {
-                        let now = text.borrow_and_update().clone();
-                        if now.by != Some(link.id) && !now.text.is_empty() {
+                    if send_content {
+                        let now = content.borrow_and_update().clone();
+                        let kind = match &now.clip {
+                            Clip::Text(_) => proto::S_CLIPBOARD,
+                            Clip::Image(_) => proto::S_CLIPBOARD_IMAGE,
+                        };
+                        let bytes = now.clip.bytes();
+                        if now.by != Some(link.id) && !bytes.is_empty() {
                             let flags = if now.changed && !first { proto::CLIPBOARD_CHANGED } else { 0 };
-                            let mut m = Vec::with_capacity(2 + now.text.len());
-                            m.extend_from_slice(&[proto::S_CLIPBOARD, flags]);
-                            m.extend_from_slice(now.text.as_bytes());
+                            let mut m = Vec::with_capacity(2 + bytes.len());
+                            m.extend_from_slice(&[kind, flags]);
+                            m.extend_from_slice(bytes);
                             let _ = out_tx.send(m);
                         }
                         first = false;
@@ -413,13 +421,13 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         let listing = tokio::task::block_in_place(|| crate::files::listing(&list));
                         let _ = out_tx.send(proto::text(proto::S_CLIPBOARD_FILES, &listing.to_string()));
                     }
-                    (send_text, send_files) = (false, false);
+                    (send_content, send_files) = (false, false);
                     tokio::select! {
-                        changed = text.changed() => {
+                        changed = content.changed() => {
                             if changed.is_err() {
                                 return;
                             }
-                            send_text = true;
+                            send_content = true;
                         }
                         changed = files.changed() => {
                             if changed.is_err() {
@@ -541,35 +549,25 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         }
                     }
                     (Some(proto::C_EVENT), _) => app.telemetry.event(link.id, &String::from_utf8_lossy(&b[1..])),
-                    (Some(proto::C_CLIPBOARD), _) => {
+                    (Some(proto::C_CLIPBOARD | proto::C_PASTE | proto::C_CLIPBOARD_IMAGE), _) => {
+                        let (clip, paste) = received_clip(&b);
                         let stream = link.watching.read().unwrap().clone();
-                        // Setting waits for the platform to have it: a moment,
-                        // and in order with the next one.
-                        let set = tokio::task::block_in_place(|| stream.control.set_clipboard(link.id, &String::from_utf8_lossy(&b[1..])));
-                        if let Err(e) = set {
-                            app.telemetry.error("clipboard", e);
+                        if !paste {
+                            // Setting waits for the platform to have it: a moment,
+                            // and in order with the next one.
+                            let set = tokio::task::block_in_place(|| stream.control.set_clipboard(link.id, clip));
+                            if let Err(e) = set {
+                                app.telemetry.error("clipboard", e);
+                            }
+                            continue;
                         }
-                    }
-                    (Some(proto::C_TRACE), _) if tracing => {
-                        if let Ok(v) = serde_json::from_slice(&b[1..]) {
-                            app.telemetry.client_trace(link.id, v);
-                        }
-                    }
-                    (Some(proto::C_BT709), _) => {
-                        if !link.bt709.swap(true, Ordering::AcqRel) {
-                            waker.unpark();
-                        }
-                    }
-                    (Some(proto::C_PASTE), _) => {
-                        let stream = link.watching.read().unwrap().clone();
-                        let text = String::from_utf8_lossy(&b[1..]).into_owned();
                         let (app, out, id) = (app.clone(), out_tx.clone(), link.id);
                         // Setting the clipboard waits for the platform to have
                         // it, which the reader, carrying ACKs, must not.
                         tokio::task::spawn_blocking(move || {
-                            // Empty: this computer had no text to copy; the remote
+                            // Empty: this computer had nothing to copy; the remote
                             // clipboard is pasted as it is.
-                            let set = if text.is_empty() { Ok(()) } else { stream.control.set_clipboard(id, &text) };
+                            let set = if clip.bytes().is_empty() { Ok(()) } else { stream.control.set_clipboard(id, clip) };
                             // The client still holds Ctrl down on the remote side
                             // and waits for S_PASTED before sending more keys.
                             let pressed = set.and_then(|()| {
@@ -582,6 +580,16 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                             }
                             let _ = out.send(vec![proto::S_PASTED]);
                         });
+                    }
+                    (Some(proto::C_TRACE), _) if tracing => {
+                        if let Ok(v) = serde_json::from_slice(&b[1..]) {
+                            app.telemetry.client_trace(link.id, v);
+                        }
+                    }
+                    (Some(proto::C_BT709), _) => {
+                        if !link.bt709.swap(true, Ordering::AcqRel) {
+                            waker.unpark();
+                        }
                     }
                     (Some(proto::C_AUDIO), 2..) => {
                         audio_on.send_replace(b[1] != 0);
@@ -826,6 +834,18 @@ async fn on_signal(
             }
         }
         _ => {}
+    }
+}
+
+/// What a C_CLIPBOARD, C_PASTE or C_CLIPBOARD_IMAGE carries for the
+/// session's clipboard, and whether it is for a Ctrl+V.
+fn received_clip(b: &[u8]) -> (Clip, bool) {
+    match b[0] {
+        proto::C_CLIPBOARD_IMAGE => {
+            let paste = b.get(1).is_some_and(|flags| flags & proto::CLIPBOARD_PASTE != 0);
+            (Clip::Image(Arc::from(b.get(2..).unwrap_or_default())), paste)
+        }
+        tag => (Clip::Text(Arc::from(String::from_utf8_lossy(&b[1..]).as_ref())), tag == proto::C_PASTE),
     }
 }
 

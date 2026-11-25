@@ -17,12 +17,12 @@ import { ZSTDDecoder } from 'zstddec';
 import { lz4Decode } from './lz4';
 import { BarcodeReader, barcodeAge } from './probe';
 import {
-  BT601, BT709, C_ACK, C_AUDIO, C_BT709, C_CAPTURE, C_CLIPBOARD, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME,
-  C_MIC_INFO, C_PING, C_SIGNAL, CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
+  BT601, BT709, C_ACK, C_AUDIO, C_BT709, C_CAPTURE, C_CLIPBOARD, C_CLIPBOARD_IMAGE, C_DISPLAY, C_DISPLAYS, C_EVENT, C_HELLO_ACK, C_KEYFRAME,
+  C_MIC_INFO, C_PING, C_SIGNAL, CLIPBOARD_PASTE, CLOSE_UNAUTHORIZED, CLIPBOARD_CHANGED, CURSOR_FOLLOW,
   C_PASTE, C_STATS, C_TRACE, C_VIEW, C_VIRTUAL, C_VISIBLE, CHUNK_HEADER_LEN, CODECS, COPY_LEN, ENC_LZ4, ENC_RAW, ENC_ZSTD, FLAG_BT601,
   FLAG_CODEC_MASK, FLAG_CODEC_SHIFT, FLAG_KEY, FLAG_MOTION, FLAG_VIDEO, FRAME_HEADER_LEN,
   RECT_HEADER_LEN, S_AUDIO, S_AUDIO_INFO, S_CLIPBOARD, S_CURSOR, S_CURSOR_POS, S_DISPLAYS, S_FRAME, S_HELLO, S_MIC_INFO, S_PONG,
-  S_CLIPBOARD_FILES, S_PASTED, S_SIGNAL, VIEW_HDR, now,
+  MAX_IMAGE, S_CLIPBOARD_FILES, S_CLIPBOARD_IMAGE, S_PASTED, S_SIGNAL, VIEW_HDR, now,
 } from './proto';
 import { Renderer } from './renderer';
 import { WtPath, type WtOffer } from './wt';
@@ -49,8 +49,9 @@ export type ToWorker =
   | { type: 'display'; id: string }
   /** A virtual display request, JSON (C_VIRTUAL). */
   | { type: 'virtual'; json: string }
-  /** This computer's clipboard for a Ctrl+V (C_PASTE). */
+  /** This computer's clipboard for a Ctrl+V: text (C_PASTE) or a PNG picture (C_CLIPBOARD_IMAGE). */
   | { type: 'paste'; text: string }
+  | { type: 'pasteimage'; png: ArrayBuffer }
   /** Ask the server for the session's sound, or to stop sending it. */
   | { type: 'audio'; on: boolean }
   /** Text for the server's event log. */
@@ -79,8 +80,9 @@ export type FromWorker =
   | { type: 'dcsend'; buf: ArrayBuffer }
   /** Where frames (so input too) go. */
   | { type: 'path'; path: Path }
-  /** The remote clipboard (S_CLIPBOARD); `changed`: since this client connected, not what was there before. */
+  /** The remote clipboard: text (S_CLIPBOARD) or a PNG picture (S_CLIPBOARD_IMAGE); `changed`: since this client connected, not what was there before. */
   | { type: 'clipboard'; text: string; changed: boolean }
+  | { type: 'clipimage'; png: ArrayBuffer; changed: boolean }
   /** Display list as JSON (S_DISPLAYS). */
   | { type: 'displays'; json: string }
   /** The sound stream, or why there is none (S_AUDIO_INFO), and its packets (S_AUDIO). */
@@ -997,6 +999,11 @@ function connect(url: string): void {
       case S_CLIPBOARD:
         post({ type: 'clipboard', text: new TextDecoder().decode(new Uint8Array(buf, 2)), changed: (v.getUint8(1) & CLIPBOARD_CHANGED) !== 0 });
         break;
+      case S_CLIPBOARD_IMAGE: {
+        const png = buf.slice(2);
+        post({ type: 'clipimage', png, changed: (v.getUint8(1) & CLIPBOARD_CHANGED) !== 0 }, [png]);
+        break;
+      }
       case S_DISPLAYS: {
         const json = new TextDecoder().decode(new Uint8Array(buf, 1));
         // A reconnect comes back to the display streamed now.
@@ -1131,6 +1138,20 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'paste':
       sendText(C_PASTE, m.text);
       break;
+    case 'pasteimage': {
+      // A picture over the limit is not sent: the remote clipboard is pasted as it is.
+      if (m.png.byteLength > MAX_IMAGE) {
+        sendText(C_EVENT, `clipboard picture of ${m.png.byteLength} bytes not pasted (more than ${MAX_IMAGE})`);
+        sendText(C_PASTE, '');
+        break;
+      }
+      const msg = new Uint8Array(2 + m.png.byteLength);
+      msg[0] = C_CLIPBOARD_IMAGE;
+      msg[1] = CLIPBOARD_PASTE;
+      msg.set(new Uint8Array(m.png), 2);
+      send(msg);
+      break;
+    }
     case 'audio':
       audioOn = m.on;
       sendAudio();

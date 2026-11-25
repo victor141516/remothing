@@ -496,24 +496,53 @@ for capture on X11, where an output is captured by its area of the screen.
 
 ## Clipboard and display choice
 
-`Clipboard` (per opened display, text only, up to 1 MiB): the capture side
-keeps the last text with who set it in a watch channel; every client gets
-changes it did not make itself (`S_CLIPBOARD`), and the current text on
-connect; `C_CLIPBOARD` sets it. Windows: a message-only window on its own
-thread owns the clipboard when text is set and listens for
+`Clipboard` (per opened display): text up to 1 MiB or a picture, as PNG
+up to 16 MiB (`MAX_IMAGE`). Text and picture are alternatives: the latest
+copy wins, and a copy offering both (office programs put a picture of the
+copied text beside it) is text; files come first of all. The capture
+side keeps the last text or picture (`Clip`) with who set it in a watch
+channel; every client gets changes it did not make itself (`S_CLIPBOARD`,
+`S_CLIPBOARD_IMAGE`), and the current content on connect; `C_CLIPBOARD`
+sets text, `C_CLIPBOARD_IMAGE` a picture. Both go on the stream socket,
+whose WebSocket takes frames up to the picture's size (a browser sends a
+message as one frame); a picture there holds up the frames behind it, as
+a long text does. Windows: a message-only window on its own thread owns
+the clipboard when something is set and listens for
 `WM_CLIPBOARDUPDATE`; it reads 100 ms after the last update, because the
 program that copies is often still writing (OLE sets the data, then flushes
-it) and opening the clipboard under it makes its copy fail. X11: XFixes
-selection notifications on `CLIPBOARD`, `UTF8_STRING` conversion (INCR for
-large texts), and ownership of the selection, answering requests, when a
-client sets it.
+it) and opening the clipboard under it makes its copy fail. Others read
+each update too (the clipboard history, which takes its time over a
+picture; another remothing): a read that finds the clipboard held open
+(access denied) is tried again every 100 ms, for up to 1 s. Without that,
+four reads failed in one test on this PC and those copies never reached
+the client; with it, none did. Pictures are
+read from the registered "PNG" format (browsers, Office, the Snipping
+Tool) as they are, else from `CF_DIBV5` / `CF_DIB` (which Windows also
+makes from a `CF_BITMAP`: Paint, Print Screen), 24 or 32 bits a pixel,
+converted with the `png` crate; a picture set from a client goes as "PNG"
+and as a 32-bit `CF_DIB`, from which Windows makes the other bitmap
+formats. Our own picture comes back as the same "PNG" bytes, which the
+core ignores. X11: XFixes selection notifications on `CLIPBOARD`, then
+TARGETS: `text/uri-list`, else `UTF8_STRING` when any text is offered,
+else `image/png` (INCR for large transfers, a picture over the limit
+dropped rather than cut), and ownership of the selection, answering
+requests, when a client sets it; what does not fit one request (pictures,
+long texts) goes to the pasting program in INCR pieces of 256 KiB. macOS:
+`NSPasteboardTypePNG` as it is, else TIFF (what screenshots and Preview
+copy) converted with `NSBitmapImageRep`; a picture set goes as PNG and
+TIFF.
 
 Ctrl+V (Ctrl down first) carries the client's own clipboard: `input.ts`
-holds the V back, reads `navigator.clipboard`, and sends `C_PASTE` with the
-text on the stream socket (input messages are too small for a clipboard).
-The server sets it, presses V and answers `S_PASTED`; meanwhile the client
+holds the V back, reads `navigator.clipboard` (`read()` for a picture,
+`readText()` where the browser has no `read()`), and sends `C_PASTE` with
+the text, or `C_CLIPBOARD_IMAGE` with `CLIPBOARD_PASTE` and the PNG, on
+the stream socket (input messages are too small for a clipboard). A
+picture over 16 MiB is not sent (a client event says so) and the remote
+clipboard is pasted as it is. The server sets it, presses V and answers
+`S_PASTED`; meanwhile the client
 holds back every key, so Ctrl stays down on the remote side whichever path
-its release would take (the input channel may overtake the stream socket).
+its release would take (the input channel may overtake the stream socket);
+for a picture it waits 1 ms more per kB, its upload at 1 MB/s.
 Setting the clipboard therefore returns only once the platform has it:
 Windows waits for its clipboard thread, X11 makes a round trip after
 taking the selection. Without permission to read the clipboard the client
@@ -521,23 +550,29 @@ sends a plain V.
 
 Neither side's older content replaces the other's newer one. The server
 only sends what changed after the client connected, and never a client's
-own change back. The client (`input.ts`) keeps the text of its own
-clipboard that is no newer than the remote one (`synced`): what it copied
+own change back. The client (`input.ts`) keeps a key of its own
+clipboard's content that is no newer than the remote one (`synced`; the
+text, or a SHA-256 of the picture's file): what it copied
 from there, sent there, or found here when the remote clipboard changed
 to something it cannot hold (files) or got while the window was in the
 background (read when the window is used again, unless it changed
-meanwhile). Ctrl+V sends its clipboard only when it differs from that,
-else an empty C_PASTE that leaves the remote clipboard as it is. Reading
-happens only where the browser already allows it, never with a prompt.
+meanwhile). A picture copied here from the remote side is keyed as the
+browser reads it back, not as it came: Chromium decodes a picture it is
+given and encodes it again, so the bytes differ. Ctrl+V sends its
+clipboard only when it differs from that, else an empty C_PASTE that
+leaves the remote clipboard as it is. Reading happens only where the
+browser already allows it, never with a prompt.
 
 The other way, what is copied on the remote side reaches this computer's
-clipboard: `S_CLIPBOARD` flags a change made after the client connected
-(`CLIPBOARD_CHANGED`), which `main.ts` writes with `navigator.clipboard`;
-the text already there on connect or after a display switch is not, so
+clipboard: `S_CLIPBOARD` / `S_CLIPBOARD_IMAGE` flag a change made after
+the client connected (`CLIPBOARD_CHANGED`), which `main.ts` writes with
+`navigator.clipboard` (a picture as a `ClipboardItem` of `image/png`);
+the menu's `Clipboard ›` page shows a picture above the text box. What
+is already there on connect or after a display switch is not written, so
 opening a window never overwrites what was copied here. A display's
 capture starts with its first client, so the platform's first report can
 arrive after that client connected: each `Clipboard::watch` therefore
-tells the text it found on starting (Windows, X11 and macOS all report
+tells what it found on starting (Windows, X11 and macOS all report
 it) from later changes. Only a window with the focus writes: one in the
 background would write when used later, over newer local copies. When
 the browser refuses (Firefox and Safari want a recent key or click), the
@@ -575,8 +610,9 @@ latency and must not hold up frames or input), with the stream token:
   `OleGetClipboard` either, nor while impersonating the user (all measured
   on the demo). So when the session process, as SYSTEM, reads nothing, it
   runs itself as the logged-in user (`WTSQueryUserToken`,
-  `CreateProcessAsUserW`) with the hidden `clipboard-files` subcommand,
-  which prints the files to a pipe. They go to the
+  `CreateProcessAsUserW`) with the hidden `clipboard-read` subcommand,
+  which prints the files (or the text, or a picture as PNG: the same
+  holds for what programs copy through OLE) to a pipe. Files go to the
   clients as `S_CLIPBOARD_FILES`, and `GET /files/clipboard?session&index&name`
   sends one: only a file on the clipboard of the display that page shows,
   by index and name together, so a list that changed meanwhile never sends

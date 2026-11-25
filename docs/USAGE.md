@@ -28,21 +28,25 @@ and then they are remothing's own. Restart the server after granting them.
   in Chromium over HTTPS it also captures Alt+Tab, the Windows key and
   Esc for the remote side; hold Esc to leave —, `Stats`, `Display ›`),
   Control (`Capture mouse`, `Type` on touch screens, `On-screen keyboard`,
-  `Clipboard ›`: a text box where what is copied there appears and what
-  is typed or pasted is copied there) and Sound (`Sound`, `Microphone`).
+  `Clipboard ›`: a text box where what is copied there appears, a copied
+  picture above it, and what is typed or pasted is copied there) and Sound
+  (`Sound`, `Microphone`).
   `›` items open a page inside the menu, with `‹` to go back. Esc, the tab
   or a click outside closes it; that click is not sent to the remote side.
   A held key repeats on the remote side, and everything a client holds is
   released if it disconnects. Ctrl+V (Ctrl pressed first) pastes what is
-  copied on this computer: the page sends its clipboard to the remote one
-  before the V, over HTTPS or localhost once the browser is allowed to read
-  the clipboard (Chromium asks the first time); otherwise, or with no text
-  copied, it pastes the remote clipboard as it is. What is copied on the
-  remote side is copied on this computer too (HTTPS or localhost, in the
-  window being used); what the remote clipboard held before the page
-  opened is not. The newest copy wins: Ctrl+V sends this computer's
-  clipboard only when something was copied here after the remote one last
-  changed, so an older text here never replaces files or text copied there.
+  copied on this computer, text or a picture (PNG, up to 16 MiB): the page
+  sends its clipboard to the remote one before the V, over HTTPS or
+  localhost once the browser is allowed to read the clipboard (Chromium
+  asks the first time; a browser that reads only text sends text);
+  otherwise, or with nothing copied, it pastes the remote clipboard as it
+  is. What is copied on the remote side, text or a picture, is copied on
+  this computer too (HTTPS or localhost, in the window being used); what
+  the remote clipboard held before the page opened is not. The newest copy
+  wins: Ctrl+V sends this computer's clipboard only when something was
+  copied here after the remote one last changed, so an older text or
+  picture here never replaces what was copied there. A copy offering text
+  and a picture (office programs) goes as text.
 - Keys go to the remote side while the picture has the keyboard: a click
   on it gives it, a click anywhere else (the menu, the area around the
   picture) takes it away, and closing the menu gives it back.

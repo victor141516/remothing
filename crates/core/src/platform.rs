@@ -179,23 +179,34 @@ pub struct OpenedDisplay {
     pub clipboard: Option<Arc<dyn Clipboard>>,
 }
 
-/// What was copied: text, or files (their paths on this computer).
+/// Longest PNG relayed between a session's clipboard and the clients.
+pub const MAX_IMAGE: usize = 16 << 20;
+
+/// What was copied: text, files (their paths on this computer), or a
+/// picture (PNG, at most `MAX_IMAGE`). A copy offering text besides a
+/// picture (office programs put a picture of the selection beside it) is
+/// text.
 #[derive(Debug)]
 pub enum Copied {
     Text(String),
     Files(Vec<PathBuf>),
+    Image(Vec<u8>),
 }
 
 /// Receives what is on the clipboard: once what is there when watching
 /// starts (`false`; may be skipped when there is nothing), then each change
-/// (`true`). Something else (an image) is not reported.
+/// (`true`). Something else (rich text alone, a picture too large) is not
+/// reported.
 pub type ClipboardSink = Box<dyn Fn(Copied, bool) + Send + Sync>;
 
-/// Text clipboard of the session a display belongs to.
+/// Clipboard of the session a display belongs to: text and pictures.
 pub trait Clipboard: Send + Sync {
     fn set_text(&self, text: &str) -> Result<()>;
+    /// `png`: a PNG image, offered to pasting programs as PNG and, where
+    /// the platform's programs expect another format, converted.
+    fn set_image(&self, png: &[u8]) -> Result<()>;
     /// Reports what is on the clipboard now, then every time something
-    /// else copies text or files (called once).
+    /// else copies text, files or a picture (called once).
     fn watch(&self, on_change: ClipboardSink);
 }
 
