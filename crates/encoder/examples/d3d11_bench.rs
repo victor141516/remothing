@@ -13,10 +13,15 @@
 //! - `--size WxH`: repeatable (default 1920x1080 and 3168x1440)
 //! - `--scene S`: repeatable, default all: `window` (640x400 animated window
 //!   over a static gradient), `noise` (every pixel changes, no usable motion),
-//!   `plasma` (rt-testapp `--mode full`), `box` (rt-testapp `--mode box`)
-//! - `--enc E,..`: `nvenc-gpu`, `nvenc-cpu`, `x264` (default all three)
+//!   `plasma` (rt-testapp `--mode full`), `box` (rt-testapp `--mode box`),
+//!   `scroll` (rt-testapp `--mode scroll`: text moving 3 px a frame)
+//! - `--enc E,..`: `nvenc-gpu` (NVENC with D3D11 input: through the SDK,
+//!   FFmpeg's when that does not open), `nvenc-ffmpeg` (FFmpeg's NVENC with
+//!   D3D11 input), `nvenc-cpu`, `x264` (default `nvenc-gpu,nvenc-cpu,x264`)
 //! - `--set k=v,..`: NVENC option overrides; every `--set` is one swept
-//!   configuration (`--set default` = no overrides; default: just that)
+//!   configuration (`--set default` = no overrides; default: just that). The
+//!   SDK path takes `preset=p1|p2|p3` and nothing else (it falls back to
+//!   FFmpeg's NVENC for other options)
 //! - `--fps F`: pace frames like a capture at F Hz (default: back to back)
 //! - `--capture-sim`: a second thread uses the shared immediate context like
 //!   the DXGI capture thread at 144 Hz (staging readback of 20 tiles under
@@ -31,10 +36,27 @@
 //! - `--scale F`: encode at F times the size (as motion mode does for a
 //!   small client: GPU video processor or CPU scaler); no MAE (the decoded
 //!   picture is smaller than the source)
-//! - `--codec C`: `h264` (default), `hevc` or `av1` (AV1 needs `--no-check`
-//!   unless FFmpeg has libdav1d); `--set` applies to it
+//! - `--codec C`: `h264` (default), `hevc` or `av1` (AV1 is decoded with
+//!   libdav1d when FFmpeg has it, otherwise with NVDEC, `av1_cuvid`); `--set`
+//!   applies to it
 //! - `--dump DIR`: writes every case's stream to DIR (`.h264`/`.hevc` Annex
-//!   B, `.obu` AV1 low-overhead OBUs), to check it with other decoders
+//!   B, `.obu` AV1 low-overhead OBUs), to check it with other decoders; with
+//!   `--lose` also the stream the client got (`-lossy`) and the indices of
+//!   its frames (`-kept.txt`)
+//! - `--rate-steps N`: changes the bitrate cap every N frames (5, 12, 30, 80,
+//!   20 Mbit/s in turn) and reports the keyframes after the first; no
+//!   mid-stream keyframe is forced (nor with `--lose` and `--unseen`)
+//! - `--lose N`: drops N frames from the decoder's input once a period (60
+//!   frames, longer for long runs), then calls `invalidate_from` (a keyframe
+//!   where it says no); a second decoder gets every frame, and each frame the
+//!   client's decoder shows is compared with it: after a recovery they must
+//!   be the same picture. Frames are acknowledged 8 frames late, as a client
+//!   would. Decodes without frame threads
+//! - `--unseen`: runs every case twice, the second time with the left half
+//!   of the picture unseen (`set_unseen`), and reports the bytes saved
+//! - `--quality`: PSNR and SSIM of the luma of every decoded frame against
+//!   the source (converted with the matrix the stream signals); decodes
+//!   without frame threads
 
 #[cfg(not(windows))]
 fn main() {
@@ -47,7 +69,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
+#[path = "common/check.rs"]
+mod check;
+
+#[cfg(windows)]
 mod bench {
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -67,6 +94,8 @@ mod bench {
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
     use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIOutput1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO};
 
+    use super::check::Check;
+
     /// The core's change-tracking tile: encoder rects are runs of changed
     /// tiles, one rect per tile row.
     const TILE: u32 = 64;
@@ -82,10 +111,11 @@ mod bench {
         Noise,
         Plasma,
         Box,
+        Scroll,
     }
 
     impl Scene {
-        const ALL: [Scene; 4] = [Scene::Window, Scene::Noise, Scene::Plasma, Scene::Box];
+        const ALL: [Scene; 5] = [Scene::Window, Scene::Noise, Scene::Plasma, Scene::Box, Scene::Scroll];
 
         fn name(self) -> &'static str {
             match self {
@@ -93,15 +123,24 @@ mod bench {
                 Scene::Noise => "noise",
                 Scene::Plasma => "plasma",
                 Scene::Box => "box",
+                Scene::Scroll => "scroll",
             }
         }
+    }
+
+    /// An encoder to run: backend name, GPU (D3D11) input, NVENC through the SDK first.
+    #[derive(Clone, Copy)]
+    struct EncChoice {
+        backend: &'static str,
+        gpu_input: bool,
+        native: bool,
     }
 
     struct Args {
         frames: u32,
         sizes: Vec<(u32, u32)>,
         scenes: Vec<Scene>,
-        encoders: Vec<(&'static str, bool)>,
+        encoders: Vec<EncChoice>,
         configs: Vec<(String, Vec<(String, String)>)>,
         fps: Option<f64>,
         capture_sim: bool,
@@ -112,6 +151,10 @@ mod bench {
         scale: f64,
         codec: Codec,
         dump: Option<std::path::PathBuf>,
+        rate_steps: Option<u32>,
+        lose: Option<u32>,
+        unseen: bool,
+        quality: bool,
     }
 
     fn args() -> Result<Args> {
@@ -130,6 +173,10 @@ mod bench {
             scale: 1.0,
             codec: Codec::H264,
             dump: None,
+            rate_steps: None,
+            lose: None,
+            unseen: false,
+            quality: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -147,12 +194,14 @@ mod bench {
                 }
                 "--enc" => {
                     for e in value()?.split(',') {
-                        a.encoders.push(match e {
-                            "nvenc-gpu" => ("nvenc", true),
-                            "nvenc-cpu" => ("nvenc", false),
-                            "x264" => ("x264", false),
+                        let (backend, gpu_input, native) = match e {
+                            "nvenc-gpu" => ("nvenc", true, true),
+                            "nvenc-ffmpeg" => ("nvenc", true, false),
+                            "nvenc-cpu" => ("nvenc", false, false),
+                            "x264" => ("x264", false, false),
                             _ => bail!("unknown encoder {e}"),
-                        });
+                        };
+                        a.encoders.push(EncChoice { backend, gpu_input, native });
                     }
                 }
                 "--set" => {
@@ -181,6 +230,10 @@ mod bench {
                     a.codec = Codec::from_name(&v).with_context(|| format!("unknown codec {v}"))?;
                 }
                 "--dump" => a.dump = Some(value()?.into()),
+                "--rate-steps" => a.rate_steps = Some(value()?.parse()?),
+                "--lose" => a.lose = Some(value()?.parse()?),
+                "--unseen" => a.unseen = true,
+                "--quality" => a.quality = true,
                 _ => bail!("unknown argument {arg} (see the doc comment of examples/d3d11_bench.rs)"),
             }
         }
@@ -191,7 +244,8 @@ mod bench {
             a.scenes = Scene::ALL.to_vec();
         }
         if a.encoders.is_empty() {
-            a.encoders = vec![("nvenc", true), ("nvenc", false), ("x264", false)];
+            let choice = |backend, gpu_input, native| EncChoice { backend, gpu_input, native };
+            a.encoders = vec![choice("nvenc", true, true), choice("nvenc", false, false), choice("x264", false, false)];
         }
         if a.configs.is_empty() {
             a.configs.push(("default".into(), Vec::new()));
@@ -235,11 +289,11 @@ mod bench {
             self.paint(Rect::new(0, 0, self.w, self.h), gradient);
         }
 
-        /// rt-testapp's fake UI text (`Canvas::text(0)`) below the barcode bar.
-        fn text(&mut self) {
+        /// rt-testapp's fake UI text (`Canvas::text(scroll)`) below the barcode bar.
+        fn text(&mut self, scroll: usize) {
             let w = self.w as usize;
             for y in BAR_H as usize..self.h as usize {
-                let (line, in_line) = (y / 22, y % 22);
+                let (line, in_line) = ((y + scroll) / 22, (y + scroll) % 22);
                 let mut row = vec![0xF0F0F0u32; w];
                 if (6..18).contains(&in_line) {
                     let mut seed = (line as u32).wrapping_mul(2654435761) | 1;
@@ -299,6 +353,14 @@ mod bench {
         [(x / 8) as u8, (y / 8) as u8, ((x + y) / 16) as u8]
     }
 
+    /// Limited-range luma of `img` with the BT.601 or the BT.709 matrix.
+    fn luma(img: &Image, bt601: bool) -> Vec<u8> {
+        let (kr, kb) = if bt601 { (0.299, 0.114) } else { (0.2126, 0.0722) };
+        let kg = 1.0 - kr - kb;
+        let y = |p: &[u8]| 16.0 + 219.0 * (kr * p[2] as f64 + kg * p[1] as f64 + kb * p[0] as f64) / 255.0;
+        img.px.chunks_exact(4).map(|p| y(p).round() as u8).collect()
+    }
+
     fn plasma_tables() -> (Vec<u32>, Vec<u32>) {
         let table = |period: f64| -> Vec<u32> {
             (0..4096).map(|i| ((((i as f64) * std::f64::consts::TAU / period).sin() + 1.0) * 63.0) as u32).collect()
@@ -347,6 +409,8 @@ mod bench {
         current: usize,
         box_x: u32,
         box_dx: i32,
+        /// `--quality`: luma of the cycle's images, in BT.601 or not.
+        lumas: Vec<Option<(bool, Rc<Vec<u8>>)>>,
     }
 
     impl Source {
@@ -356,10 +420,10 @@ mod bench {
             match scene {
                 Scene::Window => img.gradient(),
                 Scene::Box => {
-                    img.text();
+                    img.text(0);
                     img.barcode(0);
                 }
-                Scene::Noise | Scene::Plasma => {
+                Scene::Noise | Scene::Plasma | Scene::Scroll => {
                     let tables = plasma_tables();
                     for t in 0..CYCLE {
                         let mut f = Image::new(w, h);
@@ -370,6 +434,9 @@ mod bench {
                                 let v = (x * x / 97 + y * y / 89 + t * 5) as u8;
                                 [v, v ^ (x / 16) as u8, ((y / 4) as u8).wrapping_add((t * 3) as u8)]
                             });
+                        } else if scene == Scene::Scroll {
+                            f.text(t as usize * 3);
+                            f.barcode(t);
                         } else {
                             f.plasma(&tables, t as usize + 1);
                             f.barcode(t);
@@ -380,7 +447,8 @@ mod bench {
                     img = cycle[0].0.clone();
                 }
             }
-            Ok(Self { scene, background: img.clone(), img, cycle, current: 0, box_x: 0, box_dx: 8 })
+            let lumas = vec![None; cycle.len()];
+            Ok(Self { scene, background: img.clone(), img, cycle, current: 0, box_x: 0, box_dx: 8, lumas })
         }
 
         /// Source image of the current frame.
@@ -389,6 +457,23 @@ mod bench {
                 &self.img
             } else {
                 &self.cycle[self.current].0
+            }
+        }
+
+        /// Limited-range luma of the current image, as an encoder converting
+        /// with BT.601 (`bt601`) or BT.709 makes it.
+        fn luma(&mut self, bt601: bool) -> Rc<Vec<u8>> {
+            if self.cycle.is_empty() {
+                return Rc::new(luma(&self.img, bt601));
+            }
+            let (i, img) = (self.current, &self.cycle[self.current].0);
+            match &self.lumas[i] {
+                Some((b, l)) if *b == bt601 => l.clone(),
+                _ => {
+                    let l = Rc::new(luma(img, bt601));
+                    self.lumas[i] = Some((bt601, l.clone()));
+                    l
+                }
             }
         }
 
@@ -434,7 +519,7 @@ mod bench {
                     self.img.paint(Rect::new(nx, by, 256, 256), |_, _| [c as u8, (c >> 8) as u8, (c >> 16) as u8]);
                     vec![self.img.barcode(n), span]
                 }
-                Scene::Noise | Scene::Plasma => {
+                Scene::Noise | Scene::Plasma | Scene::Scroll => {
                     // Forth and back: the motion stays smooth at the turns.
                     let i = n % (2 * CYCLE - 2);
                     self.current = (if i < CYCLE { i } else { 2 * CYCLE - 2 - i }) as usize;
@@ -520,105 +605,6 @@ mod bench {
         fn surface(&self, w: u32, h: u32) -> Result<Arc<D3D11Frame>> {
             let tex = self.texture(w, h, D3D11_BIND_SHADER_RESOURCE.0 as u32, None)?;
             Ok(Arc::new(D3D11Frame::new(self.device.clone(), self.context.clone(), tex, w, h)))
-        }
-    }
-
-    /// Decodes the produced stream and checks it against the source.
-    struct Check {
-        dec: ff::decoder::Video,
-        decoded: usize,
-        last: ff::frame::Video,
-    }
-
-    impl Check {
-        fn new(codec: Codec) -> Result<Self> {
-            let codec = match codec {
-                Codec::H264 => ff::decoder::find(ff::codec::Id::H264).context("no h264 decoder")?,
-                Codec::Hevc => ff::decoder::find(ff::codec::Id::HEVC).context("no hevc decoder")?,
-                // FFmpeg's own AV1 decoder needs a hardware decoder underneath.
-                Codec::Av1 => ff::decoder::find_by_name("libdav1d").context("no libdav1d in this FFmpeg: --no-check")?,
-            };
-            let mut ctx = ff::codec::context::Context::new_with_codec(codec);
-            ctx.set_threading(ff::threading::Config { kind: ff::threading::Type::Frame, ..Default::default() });
-            Ok(Self { dec: ctx.decoder().video()?, decoded: 0, last: ff::frame::Video::empty() })
-        }
-
-        fn feed(&mut self, au: &[u8]) -> Result<()> {
-            if !au.is_empty() {
-                self.dec.send_packet(&ff::Packet::copy(au))?;
-            }
-            self.drain()
-        }
-
-        fn drain(&mut self) -> Result<()> {
-            let mut f = ff::frame::Video::empty();
-            while self.dec.receive_frame(&mut f).is_ok() {
-                self.decoded += 1;
-                std::mem::swap(&mut self.last, &mut f);
-            }
-            Ok(())
-        }
-
-        /// Mean absolute per-channel difference of the last picture vs `img`.
-        fn finish(mut self, img: &Image) -> Result<(usize, f64)> {
-            self.dec.send_eof()?;
-            self.drain()?;
-            if self.decoded == 0 {
-                bail!("nothing decoded");
-            }
-            let (w, h) = (self.last.width(), self.last.height());
-            if (w, h) != (img.w, img.h) {
-                bail!("decoded {w}x{h}, expected {}x{}", img.w, img.h);
-            }
-            let mut bgr = ff::frame::Video::empty();
-            let mut sws = ff::software::scaling::Context::get(
-                self.last.format(),
-                w,
-                h,
-                ff::format::Pixel::BGRZ,
-                w,
-                h,
-                ff::software::scaling::Flags::BILINEAR,
-            )?;
-            // Convert with the matrix the stream signals, as browsers do
-            // (swscale assumes BT.601 otherwise).
-            if self.last.color_space() == ff::color::Space::BT709 {
-                unsafe {
-                    let (mut inv, mut src_range, mut table, mut dst_range) = (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
-                    let (mut brightness, mut contrast, mut saturation) = (0, 0, 0);
-                    ff::ffi::sws_getColorspaceDetails(
-                        sws.as_mut_ptr(),
-                        &mut inv,
-                        &mut src_range,
-                        &mut table,
-                        &mut dst_range,
-                        &mut brightness,
-                        &mut contrast,
-                        &mut saturation,
-                    );
-                    let bt709 = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
-                    ff::ffi::sws_setColorspaceDetails(
-                        sws.as_mut_ptr(),
-                        bt709,
-                        src_range,
-                        table,
-                        dst_range,
-                        brightness,
-                        contrast,
-                        saturation,
-                    );
-                }
-            }
-            sws.run(&self.last, &mut bgr)?;
-            let (stride, data) = (bgr.stride(0), bgr.data(0));
-            let mut sum = 0u64;
-            for y in 0..h as usize {
-                let (a, b) = (&data[y * stride..][..w as usize * 4], &img.px[y * w as usize * 4..][..w as usize * 4]);
-                for (p, q) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
-                    sum += (0..3).map(|i| p[i].abs_diff(q[i]) as u64).sum::<u64>();
-                }
-            }
-            Ok((self.decoded, sum as f64 / (w as f64 * h as f64 * 3.0)))
         }
     }
 
@@ -793,7 +779,20 @@ mod bench {
         check: bool,
         /// File the encoded stream goes to.
         dump: Option<std::path::PathBuf>,
+        rate_steps: Option<u32>,
+        lose: Option<u32>,
+        /// The left half of the picture is unseen (`set_unseen`).
+        unseen: bool,
+        quality: bool,
+        /// An IDR mid-stream too, as for a joining client: not where something is counted
+        /// that it would disturb (`--rate-steps`, `--lose`, both `--unseen` runs).
+        mid_key: bool,
     }
+
+    /// Caps `--rate-steps` cycles through, Mbit/s at 60 fps.
+    const RATE_STEPS: [u64; 5] = [5, 12, 30, 80, 20];
+    /// `--lose`: frames are acknowledged this many frames after they are coded.
+    const ACK_DELAY: u64 = 8;
 
     #[derive(Default)]
     struct EncodeStats {
@@ -802,6 +801,23 @@ mod bench {
         total: Vec<Duration>,
         bytes: usize,
         keys: u32,
+        rate_changes: u32,
+        /// `--rate-steps`: bytes and frames coded under each cap (Mbit/s).
+        per_cap: Vec<(u64, usize, u32)>,
+        /// `--lose`: runs of lost frames, the ones predicted past without a
+        /// keyframe, the size of those recovery frames and of the other P frames.
+        losses: u32,
+        recovered: u32,
+        recovery_bytes: Vec<usize>,
+        p_bytes: Vec<usize>,
+        key_bytes: Vec<usize>,
+    }
+
+    /// `path` with `suffix` before its extension.
+    fn beside(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = path.extension().unwrap_or_default().to_string_lossy();
+        path.with_file_name(format!("{stem}{suffix}.{ext}"))
     }
 
     fn encode_frames(c: &Case, enc: &mut dyn VideoEncoder, src: &mut Source, check: &mut Option<Check>) -> Result<EncodeStats> {
@@ -809,7 +825,14 @@ mod bench {
         let surface: GpuSurface = c.frame.clone();
         let mut st = EncodeStats::default();
         let start = Instant::now();
-        let mut stream = Vec::new();
+        let (mut stream, mut lossy, mut kept) = (Vec::new(), Vec::new(), Vec::new());
+        // `--lose N`: a run of N lost frames from the middle of every period but the first.
+        let period = c.lose.map(|n| (n as u64 + 40).max(60));
+        let mut reached = Vec::new();
+        let mut lost_from = None;
+        if c.unseen {
+            enc.set_unseen(&[Rect::new(0, 0, w / 2, h)]);
+        }
         for n in 0..c.frames {
             if let Some(p) = c.pace {
                 let due = start + p * n;
@@ -834,30 +857,89 @@ mod bench {
             } else {
                 enc.load_cpu(&src.image().px, w as usize * 4, 0, &rects)?;
             }
+            let step = c.rate_steps.map(|s| RATE_STEPS[(n / s) as usize % RATE_STEPS.len()]);
+            if let Some(cap) = step.filter(|_| n > 0 && n % c.rate_steps.unwrap_or(1) == 0) {
+                enc.set_max_bitrate(cap * 1_000_000, 60);
+                st.rate_changes += 1;
+            }
+            let i = n as u64;
+            // The last run ends before the stream does, so the client's last picture is current.
+            let lost = match (c.lose, period) {
+                (Some(len), Some(p)) => {
+                    let start = i - i % p + p / 2;
+                    i >= p && (start..start + len as u64).contains(&i) && start + len as u64 + 1 < c.frames as u64
+                }
+                _ => false,
+            };
+            // An IDR at start (and one mid-stream).
+            let mut force_key = n == 0 || (c.mid_key && n == c.frames / 2);
+            // The client reports the loss once frames reach it again.
+            if let (false, Some(first)) = (lost, lost_from) {
+                lost_from = None;
+                st.losses += 1;
+                force_key |= !enc.invalidate_from(first);
+            }
             let t1 = Instant::now();
-            // An IDR at start and one mid-stream, as for a joining client.
-            let out = enc.encode(n == 0 || n == c.frames / 2)?;
+            let out = enc.encode(force_key)?;
             let t2 = Instant::now();
             st.upload.push(t1 - t0);
             st.encode.push(t2 - t1);
             st.total.push(t2 - t0);
             st.bytes += out.data.len();
             st.keys += out.key as u32;
+            // Under the first cap the encoder is still uncapped.
+            if let Some(cap) = step.filter(|_| n >= c.rate_steps.unwrap_or(0)) {
+                match st.per_cap.iter_mut().find(|(c, ..)| *c == cap) {
+                    Some((_, bytes, frames)) => (*bytes, *frames) = (*bytes + out.data.len(), *frames + 1),
+                    None => st.per_cap.push((cap, out.data.len(), 1)),
+                }
+            }
+            if out.recovers.is_some() {
+                st.recovered += 1;
+                st.recovery_bytes.push(out.data.len());
+            } else if out.key {
+                st.key_bytes.push(out.data.len());
+            } else {
+                st.p_bytes.push(out.data.len());
+            }
+            if lost && lost_from.is_none() {
+                lost_from = Some(out.index);
+            }
+            reached.push(!lost);
+            if c.lose.is_some() && out.index >= ACK_DELAY && reached[(out.index - ACK_DELAY) as usize] {
+                enc.acknowledge(out.index - ACK_DELAY);
+            }
             if let Some(check) = check {
-                check.feed(&out.data)?;
+                let source = c.quality.then(|| src.luma(enc.bt601()));
+                check.feed(out.index, &out.data, !lost, source)?;
             }
             if c.dump.is_some() {
                 stream.extend_from_slice(&out.data);
+                if !lost {
+                    lossy.extend_from_slice(&out.data);
+                    kept.push(out.index.to_string());
+                }
             }
         }
         if let Some(path) = &c.dump {
             std::fs::write(path, &stream).with_context(|| format!("write {}", path.display()))?;
+            if c.lose.is_some() {
+                std::fs::write(beside(path, "-lossy"), &lossy)?;
+                std::fs::write(beside(path, "-kept").with_extension("txt"), kept.join("\n"))?;
+            }
         }
         Ok(st)
     }
 
-    fn run_case(c: &Case, enc: &mut dyn VideoEncoder, src: &mut Source) -> Result<String> {
-        let mut check = if c.check { Some(Check::new(enc.codec())?) } else { None };
+    /// Median of `v` in KiB.
+    fn median_kib(v: &mut [usize]) -> f64 {
+        v.sort_unstable();
+        v.get(v.len() / 2).map_or(f64::NAN, |&b| b as f64 / 1024.0)
+    }
+
+    /// One table row, and the KiB per frame.
+    fn run_case(c: &Case, enc: &mut dyn VideoEncoder, src: &mut Source) -> Result<(String, f64)> {
+        let mut check = if c.check { Some(Check::new(enc.codec(), c.lose.is_some(), c.quality)?) } else { None };
         let stop = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let (st, sim, dupl) = std::thread::scope(|s| {
@@ -875,21 +957,20 @@ mod bench {
         });
         let elapsed = started.elapsed().as_secs_f64();
         let mut st = st?;
-        let (decoded, mae) = match check {
-            Some(check) => {
-                let (d, mae) = check.finish(src.image())?;
-                (format!("{d}/{}", c.frames), format!("{mae:.2}"))
-            }
+        let image = src.image();
+        let decoded = check.map(|check| check.finish(&image.px, image.w, image.h)).transpose()?;
+        let (count, mae) = match &decoded {
+            Some(d) => (format!("{}/{}", d.decoded, c.frames), format!("{:.2}", d.mae)),
             None => ("-".into(), "-".into()),
         };
+        let kib = st.bytes as f64 / c.frames as f64 / 1024.0;
         let mut row = format!(
-            "| {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {} | {decoded} | {mae} |",
+            "| {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {kib:.1} | {} | {count} | {mae} |",
             pct(&mut st.upload, 0.5),
             pct(&mut st.encode, 0.5),
             pct(&mut st.encode, 0.9),
             pct(&mut st.encode, 0.99),
             pct(&mut st.total, 0.99),
-            st.bytes as f64 / c.frames as f64 / 1024.0,
             st.keys,
         );
         if let Some(sim) = sim {
@@ -905,7 +986,28 @@ mod bench {
         if let Some(d) = dupl {
             row += &format!(" dupl {:.0} fps |", d? as f64 / elapsed);
         }
-        Ok(row)
+        if c.rate_steps.is_some() {
+            st.per_cap.sort_unstable();
+            let caps: Vec<String> = st.per_cap.iter().map(|(cap, bytes, frames)| format!("{cap}: {:.1}", *bytes as f64 / *frames as f64 / 1024.0)).collect();
+            row += &format!(" {} | {} | {} |", st.rate_changes, st.keys.saturating_sub(1), caps.join(", "));
+        }
+        if c.lose.is_some() {
+            let client = decoded.as_ref().map_or("- | - | - | -".into(), |d| format!("{} | {} | {:.3} | {}", d.shown, d.differing, d.worst, d.errors));
+            row += &format!(
+                " {} | {} | {} | {:.1} | {:.1} | {:.1} | {client} |",
+                st.losses,
+                st.recovered,
+                st.keys.saturating_sub(1),
+                median_kib(&mut st.recovery_bytes),
+                median_kib(&mut st.key_bytes),
+                median_kib(&mut st.p_bytes),
+            );
+        }
+        if c.quality {
+            let q = decoded.and_then(|d| d.quality).map_or("- | -".into(), |(p, s)| format!("{p:.2} | {s:.4}"));
+            row += &format!(" {q} |");
+        }
+        Ok((row, kib))
     }
 
     /// Reports encoder options the configuration relies on that this FFmpeg
@@ -956,6 +1058,18 @@ mod bench {
             header += " cap read p50 ms | cap read p99 ms | cap lock wait p99 ms | cap lock hold p99 ms |";
             rule += "---|---|---|---|";
         }
+        if args.rate_steps.is_some() {
+            header += " rate changes | keys after first | KiB/frame per cap (Mbit/s: KiB) |";
+            rule += "---|---|---|";
+        }
+        if args.lose.is_some() {
+            header += " losses | recovered | keys after first | recovery KiB p50 | key KiB p50 | P KiB p50 | client pictures | differing | worst MAE | refused |";
+            rule += "---|---|---|---|---|---|---|---|---|---|";
+        }
+        if args.quality {
+            header += " PSNR-Y dB | SSIM-Y |";
+            rule += "---|---|";
+        }
         for &(w, h) in &args.sizes {
             let frame = gpu.surface(w, h)?;
             let gs: GpuSurface = frame.clone();
@@ -979,49 +1093,71 @@ mod bench {
             println!("{header}\n{rule}");
             for &scene in &args.scenes {
                 let mut src = Source::new(&gpu, scene, w, h)?;
-                for &(backend, gpu_input) in &args.encoders {
+                for &EncChoice { backend, gpu_input, native } in &args.encoders {
                     for (label, opts) in &args.configs {
-                        provider.set_options("nvenc", args.codec, opts)?;
-                        let req = EncoderRequest {
-                            codec: args.codec,
-                            width: w,
-                            height: h,
-                            output: ((w as f64 * args.scale) as u32 & !1, (h as f64 * args.scale) as u32 & !1),
-                            preferred: Some(backend.into()),
-                            surface: gpu_input.then(|| gs.clone()),
-                            max_bitrate: u64::MAX,
-                            fps: 60,
-                            // Swept with `--set multipass=qres` instead.
-                            two_pass: false,
-                            bt709: false,
-                        };
-                        let mut e = provider.create(&req)?;
-                        let prefix = format!("| {} | {label} | {w}x{h} | {} ", e.name(), scene.name());
-                        if !e.name().starts_with(backend) || e.gpu_input() != gpu_input {
-                            println!("{prefix}| skipped: {:?} |", e.fallback_reason());
-                            continue;
+                        let mut seen_kib = None;
+                        for unseen in if args.unseen { &[false, true][..] } else { &[false][..] } {
+                            provider.set_options("nvenc", args.codec, opts)?;
+                            provider.set_native_nvenc(native);
+                            let req = EncoderRequest {
+                                codec: args.codec,
+                                width: w,
+                                height: h,
+                                output: ((w as f64 * args.scale) as u32 & !1, (h as f64 * args.scale) as u32 & !1),
+                                preferred: Some(backend.into()),
+                                surface: gpu_input.then(|| gs.clone()),
+                                max_bitrate: u64::MAX,
+                                fps: 60,
+                                // Swept with `--set multipass=qres` instead.
+                                two_pass: false,
+                                bt709: false,
+                            };
+                            let mut e = provider.create(&req)?;
+                            let config = if *unseen { format!("{label}, half unseen") } else { label.clone() };
+                            let prefix = format!("| {} | {config} | {w}x{h} | {} ", e.name(), scene.name());
+                            if !e.name().starts_with(backend) || e.gpu_input() != gpu_input {
+                                println!("{prefix}| skipped: {:?} |", e.fallback_reason());
+                                continue;
+                            }
+                            if native && !e.name().contains("sdk") {
+                                println!("(SDK path did not open: {:?})", e.fallback_reason());
+                            }
+                            let tag = match (native, gpu_input) {
+                                (true, _) => format!("{backend}-sdk"),
+                                (false, true) => format!("{backend}-gpu"),
+                                (false, false) => format!("{backend}-cpu"),
+                            };
+                            let case = Case {
+                                frame: &frame,
+                                gpu_input,
+                                frames: args.frames,
+                                pace,
+                                capture_sim: args.capture_sim,
+                                dupl: args.dupl.as_deref(),
+                                dupl_poll: args.dupl_poll,
+                                check: args.check && args.scale == 1.0,
+                                dump: args.dump.as_ref().map(|dir| {
+                                    let ext = match args.codec {
+                                        Codec::H264 => "h264",
+                                        Codec::Hevc => "hevc",
+                                        Codec::Av1 => "obu",
+                                    };
+                                    let label: String = config.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                                    dir.join(format!("{}-{tag}-{w}x{h}-{}-{label}.{ext}", args.codec.name(), scene.name()))
+                                }),
+                                rate_steps: args.rate_steps,
+                                lose: args.lose,
+                                unseen: *unseen,
+                                quality: args.quality,
+                                mid_key: args.rate_steps.is_none() && args.lose.is_none() && !args.unseen,
+                            };
+                            let (row, kib) = run_case(&case, e.as_mut(), &mut src)?;
+                            println!("{prefix}{row}");
+                            match seen_kib {
+                                None => seen_kib = Some(kib),
+                                Some(seen) => println!("half unseen: {kib:.1} KiB/frame against {seen:.1}, {:.0} % saved", 100.0 * (1.0 - kib / seen)),
+                            }
                         }
-                        let case = Case {
-                            frame: &frame,
-                            gpu_input,
-                            frames: args.frames,
-                            pace,
-                            capture_sim: args.capture_sim,
-                            dupl: args.dupl.as_deref(),
-                            dupl_poll: args.dupl_poll,
-                            check: args.check && args.scale == 1.0,
-                            dump: args.dump.as_ref().map(|dir| {
-                                let ext = match args.codec {
-                                    Codec::H264 => "h264",
-                                    Codec::Hevc => "hevc",
-                                    Codec::Av1 => "obu",
-                                };
-                                let label: String = label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-                                dir.join(format!("{}-{w}x{h}-{}-{label}.{ext}", args.codec.name(), scene.name()))
-                            }),
-                        };
-                        let row = run_case(&case, e.as_mut(), &mut src)?;
-                        println!("{prefix}{row}");
                     }
                 }
             }

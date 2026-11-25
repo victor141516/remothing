@@ -20,7 +20,7 @@ use remothing_core::geom::Rect;
 use remothing_core::platform::GpuSurface;
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_BOX, D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
@@ -79,6 +79,8 @@ pub struct D3D11Input {
     /// With a smaller encoded size or NV12: the full-size copy and the
     /// video processor that scales and converts it.
     scaler: Option<Scaler>,
+    /// The capture device, which the texture lives on (and NVENC runs on).
+    d3d: ID3D11Device,
     /// Keeps the capture frame alive: FFmpeg's lock callbacks point at its
     /// `context_lock` and the device context references its device. Dropped last.
     surface: GpuSurface,
@@ -165,7 +167,8 @@ impl D3D11Input {
             let scaler = ((width, height) != (out_w, out_h) || nv12)
                 .then(|| scaler(capture, &texture, subresource, (width, height), (out_w, out_h), nv12))
                 .transpose()?;
-            Ok(Self { device, frames, frame, texture, subresource, width, height, scaler, surface: surface.clone() })
+            let d3d = capture.device.clone();
+            Ok(Self { device, frames, frame, texture, subresource, width, height, scaler, d3d, surface: surface.clone() })
         }
     }
 
@@ -198,6 +201,24 @@ impl D3D11Input {
 
     /// The encoder input frame, scaled from the full-size copy first when smaller.
     pub fn frame(&mut self) -> Result<&mut ff::frame::Video> {
+        self.scale()?;
+        Ok(&mut self.frame)
+    }
+
+    /// The encoder texture and its array slice, for encoders that take it
+    /// directly (native NVENC).
+    pub fn texture(&self) -> (&ID3D11Texture2D, u32) {
+        (&self.texture, self.subresource)
+    }
+
+    /// The device the texture lives on.
+    pub fn device(&self) -> &ID3D11Device {
+        &self.d3d
+    }
+
+    /// Scales and converts the full-size copy into the encoder texture,
+    /// when there is one; to run before each encoded frame.
+    pub fn scale(&mut self) -> Result<()> {
         if let Some(s) = &self.scaler {
             let capture = self.surface.downcast_ref::<D3D11Frame>().context("no D3D11 capture surface")?;
             capture.with_context(|ctx| -> Result<()> {
@@ -216,7 +237,7 @@ impl D3D11Input {
                 blt.context("VideoProcessorBlt")
             })?;
         }
-        Ok(&mut self.frame)
+        Ok(())
     }
 }
 

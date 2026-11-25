@@ -10,7 +10,7 @@
 | R2.2 CaptureSession | `FrameInfo{dirty, moved, capture_us}`, `read()` (CPU BGRX), `mapped()`, `gpu_surface()` | done |
 | R2.3 InputProvider | display-relative motion, buttons, wheel v/h, evdev keys mapped per platform (XTest keycodes / PS/2 scancodes), held keys repeat and are released with their connection, text as characters (`KEYEVENTF_UNICODE` / X keysyms) | done |
 | R2.4 CursorProvider | `cursor_change()` → shape (RGBA + hotspot) / hidden; XFixes, DXGI pointer shape | done |
-| R2.5 EncoderProvider | FFmpeg H.264 low latency, IDR on demand; NVENC (CUDA / D3D11 zero copy), AMF (D3D11 / host), QuickSync (host), x264; startup probe reports unusable backends | done (AMF/QSV untested: no such GPU here) |
+| R2.5 EncoderProvider | FFmpeg H.264 low latency, IDR on demand; NVENC (CUDA / D3D11 zero copy; through NVIDIA's SDK first: bitrate changes and losses without keyframes, unseen areas at the coarsest quantizer), AMF (D3D11 / host), QuickSync (host), x264; startup probe reports unusable backends | done (AMF/QSV untested: no such GPU here) |
 | R2.6 hot display switch | `DisplayControl::select` → capture loop reopens, `Shared::reconfigure` bumps the epoch → clients get HELLO + full frame + IDR | done |
 | R3.1 Linux simulated display | `xvfb.rs` (Xvfb manager), `xvfb_session.rs` (shm + XDamage), XTest, XFixes | done |
 | R3.2 Linux real X11 | `x11.rs`: one display per RandR output, XShm + XDamage | done |

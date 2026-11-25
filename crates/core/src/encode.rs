@@ -71,6 +71,11 @@ pub struct Encoded {
     /// sequence header.
     pub data: Vec<u8>,
     pub key: bool,
+    /// The encoder's own frame counter, from 0 for the first frame it codes.
+    pub index: u64,
+    /// Some(first): the first frame coded after `invalidate_from(first)` without a
+    /// keyframe; it predicts only from frames before `first`.
+    pub recovers: Option<u64>,
 }
 
 pub trait EncoderProvider: Send + Sync {
@@ -121,6 +126,21 @@ pub trait VideoEncoder: Send {
     /// The video's YUV is BT.601 rather than BT.709: NVENC converts RGB
     /// input with that matrix (measured), the other paths convert to BT.709.
     fn bt601(&self) -> bool;
+    /// Frames from `first` on (Encoded::index) never reached the client, nor did any frame that
+    /// predicts from them: the next frame must not predict from any of them. True when the encoder
+    /// can do that without a keyframe; false: the caller forces one.
+    fn invalidate_from(&mut self, _first: u64) -> bool {
+        false
+    }
+    /// Every frame up to `index` reached and was decoded by the client (anchors may be pinned).
+    fn acknowledge(&mut self, _index: u64) {}
+    /// `set_max_bitrate` changes cost no keyframe.
+    fn free_rate_changes(&self) -> bool {
+        false
+    }
+    /// Areas the client does not show from video now (it shows its own exact copy there): the
+    /// encoder may code them as cheaply as it can until a later call leaves them out.
+    fn set_unseen(&mut self, _rects: &[Rect]) {}
 }
 
 pub trait AudioEncoder: Send {

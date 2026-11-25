@@ -2,7 +2,7 @@
 name = "remothing-encoder"
 version.workspace = true
 edition.workspace = true
-description = "Video encoders (NVENC, AMF, QuickSync, x264 through FFmpeg; VideoToolbox on macOS) with zero-copy GPU input, and FFmpeg sound codecs"
+description = "Video encoders (NVENC through NVIDIA's SDK and through FFmpeg, AMF, QuickSync, x264 through FFmpeg; VideoToolbox on macOS) with zero-copy GPU input, and FFmpeg sound codecs"
 
 [dependencies]
 anyhow.workspace = true

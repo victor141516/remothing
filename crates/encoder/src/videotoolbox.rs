@@ -74,6 +74,8 @@ pub(crate) struct VtEncoder {
     fps: u32,
     pts: i64,
     started: Instant,
+    /// Frames coded so far (`Encoded::index`).
+    frames: u64,
 }
 
 // SAFETY: the session is used by one client thread at a time; VideoToolbox
@@ -194,7 +196,8 @@ fn annex_b(sample: &CMSampleBuffer, codec: Codec) -> Result<Encoded> {
     if key && codec == Codec::H264 {
         mark_no_reorder(&mut out);
     }
-    Ok(Encoded { data: out, key })
+    // `index` is the encoder's to set (`VtEncoder::encode`).
+    Ok(Encoded { data: out, key, index: 0, recovers: None })
 }
 
 impl VtEncoder {
@@ -245,7 +248,8 @@ impl VtEncoder {
             Some(_) => Input::Surface { latest: None, size: input },
             None => Input::Memory(memory_buffer(input)?),
         };
-        let mut encoder = Self { session, output: boxed, input, codec, hardware, bitrate: 0, fps: 0, pts: -1, started: Instant::now() };
+        let started = Instant::now();
+        let mut encoder = Self { session, output: boxed, input, codec, hardware, bitrate: 0, fps: 0, pts: -1, started, frames: 0 };
         encoder.apply_bitrate(bitrate, fps)?;
         Ok(encoder)
     }
@@ -461,7 +465,10 @@ impl VideoEncoder for VtEncoder {
             bail!("VTCompressionSessionCompleteFrames failed ({status})");
         }
         let result = self.output.lock().unwrap().result.take().context("VideoToolbox returned no frame")?;
-        result.map_err(|e| anyhow!(e))
+        let mut out = result.map_err(|e| anyhow!(e))?;
+        out.index = self.frames;
+        self.frames += 1;
+        Ok(out)
     }
 
     fn set_max_bitrate(&mut self, bits_per_sec: u64, fps: u32) -> bool {

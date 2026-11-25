@@ -159,7 +159,10 @@ Main config keys: `server.listen`, `server.admin_listen`, `server.display`
 (the display new windows start on; "Make default" in the admin UI sets it),
 `tuning.bandwidth_mbps` (upper bound; each client's measured link decides
 below it), `tuning.max_lossless_frame_kb`,
-`encoder.preferred` (`auto|nvenc|amf|qsv|x264`), `encoder.codec`
+`encoder.preferred` (`auto|nvenc|amf|qsv|x264`; `nvenc` drives NVIDIA's
+SDK directly where it can, so bitrate changes and lost frames cost no
+keyframe, and falls back to FFmpeg's NVENC otherwise: the admin status
+shows `sdk` in the encoder's name, or the reason in its fallback), `encoder.codec`
 (`auto`: AV1, HEVC or H.264, the first the client decodes in hardware and
 the server encodes; `h264|hevc|av1`: that one, H.264 for a client without
 it; a config written before codecs could be chosen says `h264`: set

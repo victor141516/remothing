@@ -128,6 +128,28 @@ impl CudaSurface {
         unsafe { ffi::av_buffer_ref(self.frames) }
     }
 
+    /// The CUDA context the surface lives in, for an NVENC session of its own.
+    pub fn context(&self) -> *mut c_void {
+        self.ctx
+    }
+
+    /// Device address and pitch (bytes) of the surface's BGR0 picture.
+    pub fn device_ptr(&self) -> (u64, u32) {
+        // SAFETY: the frame was allocated in `new` and lives as long as `self`.
+        let f = unsafe { &*self.frame.as_ptr() };
+        (f.data[0] as u64, f.linesize[0] as u32)
+    }
+
+    /// Makes the surface's context current on this thread until the guard drops.
+    pub fn current(&self) -> Result<Current> {
+        // SAFETY: a valid context, popped by the guard.
+        let r = unsafe { (self.api.push)(self.ctx) };
+        if r != 0 {
+            bail!("cuCtxPushCurrent failed: {r}");
+        }
+        Ok(Current(self.api.pop))
+    }
+
     /// Copies pixel rect `r` (display coordinates) of a host BGRX image whose
     /// first row is display row `src_y0` into the same place of the surface.
     pub fn upload(&mut self, src: &[u8], src_stride: usize, src_y0: u32, r: Rect) -> Result<()> {
@@ -178,5 +200,16 @@ impl Drop for CudaSurface {
             ffi::av_buffer_unref(&mut self.frames);
             ffi::av_buffer_unref(&mut self.device);
         }
+    }
+}
+
+/// A CUDA context made current on this thread (`CudaSurface::current`) while it lives.
+pub struct Current(unsafe extern "C" fn(*mut *mut c_void) -> CuResult);
+
+impl Drop for Current {
+    fn drop(&mut self) {
+        let mut old = ptr::null_mut();
+        // SAFETY: pushed in `CudaSurface::current` on this thread.
+        unsafe { (self.0)(&mut old) };
     }
 }

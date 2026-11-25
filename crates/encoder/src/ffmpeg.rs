@@ -33,7 +33,7 @@ pub(crate) struct HostInput {
 }
 
 impl HostInput {
-    fn new((iw, ih): (u32, u32), (ow, oh): (u32, u32), wants: Pixel) -> Result<Self> {
+    pub(crate) fn new((iw, ih): (u32, u32), (ow, oh): (u32, u32), wants: Pixel) -> Result<Self> {
         let convert = if wants == Pixel::BGRZ && (iw, ih) == (ow, oh) {
             None
         } else {
@@ -46,7 +46,7 @@ impl HostInput {
         Ok(Self { bgrx: ff::frame::Video::new(Pixel::BGRZ, iw, ih), convert })
     }
 
-    fn load(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) {
+    pub(crate) fn load(&mut self, src: &[u8], stride: usize, src_y0: u32, rects: &[Rect]) {
         let dst_stride = self.bgrx.stride(0);
         let dst = self.bgrx.data_mut(0);
         for r in rects {
@@ -59,7 +59,7 @@ impl HostInput {
     }
 
     /// The picture to encode.
-    fn frame(&mut self) -> Result<&mut ff::frame::Video> {
+    pub(crate) fn frame(&mut self) -> Result<&mut ff::frame::Video> {
         Ok(match &mut self.convert {
             Some((sws, out)) => {
                 sws.run(&self.bgrx, out)?;
@@ -180,7 +180,7 @@ pub(crate) const MAX_BITRATE: u64 = 200_000_000;
 /// AV1 at 60 matches or beats the PSNR of H.264 at 20 with 40-60 % of the
 /// bytes (at 100 it lost 4.7 dB on scrolling text). HEVC at 20 matched
 /// H.264 at 20 on `full` and gained 1.9 dB on `scroll`.
-fn min_qp(codec: Codec) -> i32 {
+pub(crate) fn min_qp(codec: Codec) -> i32 {
     match codec {
         Codec::H264 | Codec::Hevc => 20,
         Codec::Av1 => 60,
@@ -189,7 +189,7 @@ fn min_qp(codec: Codec) -> i32 {
 
 /// Frame rate NVENC's rate control assumes (it ignores timestamps): a frame
 /// gets a sixtieth of the cap it is given, however fast frames come.
-const RC_FPS: i32 = 60;
+pub(crate) const RC_FPS: i32 = 60;
 
 /// The cap as the backend's rate control takes it, for frames coming at up
 /// to `fps` a second. NVENC gets it scaled, so that a frame's share is
@@ -204,7 +204,7 @@ pub(crate) fn rate_control_bitrate(backend: Backend, bps: u64, fps: u32) -> u64 
 
 /// VBV buffer: two frames at RC_FPS (two frames for NVENC, 33 ms for x264),
 /// so no single frame takes much more of the link than its share.
-fn vbv_size(bps: u64) -> i32 {
+pub(crate) fn vbv_size(bps: u64) -> i32 {
     (bps * 2 / RC_FPS as u64).min(i32::MAX as u64) as i32
 }
 
@@ -212,7 +212,7 @@ fn vbv_size(bps: u64) -> i32 {
 /// asks for it: only for H.264 on NVENC, where it measurably helped on slow
 /// and distant links (docs/RESULTS.md, "Two-pass on slow links"); HEVC and
 /// AV1 gained nothing measurable.
-fn offers_two_pass(backend: Backend, codec: Codec) -> bool {
+pub(crate) fn offers_two_pass(backend: Backend, codec: Codec) -> bool {
     backend == Backend::Nvenc && codec == Codec::H264
 }
 
@@ -221,6 +221,8 @@ pub(crate) struct FfmpegEncoder {
     input: Input,
     packet: ff::Packet,
     pts: i64,
+    /// Frames coded so far (`Encoded::index`).
+    frames: u64,
     started: std::time::Instant,
     bitrate: u64,
     backend: Backend,
@@ -380,6 +382,7 @@ impl FfmpegEncoder {
             input,
             packet: ff::Packet::empty(),
             pts: -1,
+            frames: 0,
             started: std::time::Instant::now(),
             bitrate,
             backend,
@@ -478,7 +481,8 @@ impl VideoEncoder for FfmpegEncoder {
         frame.set_pts(Some(self.pts));
         frame.set_kind(if force_key { ff::picture::Type::I } else { ff::picture::Type::None });
         self.enc.send_frame(frame)?;
-        let mut out = Encoded { data: Vec::new(), key: false };
+        let mut out = Encoded { data: Vec::new(), key: false, index: self.frames, recovers: None };
+        self.frames += 1;
         while self.enc.receive_packet(&mut self.packet).is_ok() {
             if let Some(d) = self.packet.data() {
                 out.data.extend_from_slice(d);

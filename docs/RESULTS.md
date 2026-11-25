@@ -544,6 +544,130 @@ forced) decode without errors (200/200 frames, dav1d and FFmpeg's HEVC
 decoder). Decoded and compared with the source, HEVC (split disabled or
 the driver's choice) has the MAE of H.264 (1.4-1.8).
 
+## NVENC through the SDK
+
+Windows, RTX 4080 SUPER, driver 610.88 (NVENC API 13.1),
+`examples/d3d11_bench`, D3D11 input. `sdk` = NVENC driven directly
+(`crates/encoder/src/nvenc/`), `ffmpeg` = FFmpeg's NVENC with the same
+input (`--enc nvenc-ffmpeg`). The GPU also drew this PC's live desktop
+during the runs, so encode times scatter by a few tenths of a ms at the
+median and much more at p99 from run to run.
+
+**Same encoder.** 600 frames per case, every scene at 1920x1080 and
+3168x1440, all three codecs (60 cases): the decoded MAE is the same to the
+hundredth in every case, KiB/frame within 5 % except H.264 on `noise`
+(378 against 334 KiB at 1080p, 395 against 376 at 1440p), encode p50
+within the run-to-run spread (1080p `plasma`: H.264 2.23 / 2.06 ms, HEVC
+1.22 / 1.35, AV1 1.11 / 1.18). Both declare the same level (the driver's
+choice at the 200 Mbit/s cap, parsed from the streams): H.264 5.0 at 1080p,
+5.2 at 4K; HEVC 5.2 High tier; AV1 31 at 1080p, 6.1 High tier at 4K.
+
+**Bitrate changes** (`--rate-steps 25`, 500 frames of `noise` at 1080p, the
+cap cycling 5, 12, 30, 80, 20 Mbit/s; KiB/frame under each cap, the budget
+at 60 fps being 10.4, 25.0, 41.7, 62.5, 166.7):
+
+| codec | path | keyframes after the first (19 changes) | KiB/frame at 5 / 12 / 20 / 30 / 80 Mbit/s |
+|---|---|---|---|
+| H.264 | sdk | 0 | 9.3 / 24.0 / 36.3 / 61.4 / 155.9 |
+| H.264 | ffmpeg | 19 | 10.1 / 17.4 / 26.1 / 39.5 / 103.2 |
+| HEVC | sdk | 0 | 9.3 / 24.5 / 38.3 / 56.9 / 150.2 |
+| HEVC | ffmpeg | 19 | 10.2 / 23.0 / 35.9 / 52.1 / 124.6 |
+| AV1 | sdk | 0 | 9.8 / 24.3 / 39.5 / 62.2 / 162.0 |
+| AV1 | ffmpeg | 19 | 12.7 / 30.5 / 50.6 / 72.9 / 175.3 |
+
+The new cap holds from the next frame; FFmpeg's restarts cost a keyframe
+each (and the rate control's state). Same at 4K `plasma` (11 changes, no
+keyframe after the first for any codec).
+
+**Losses** (`--lose N`: N frames dropped from the decoder's input once a
+period, then `invalidate_from`; a second decoder gets every frame and every
+picture the client's decoder shows is compared with that loss-free
+decode; acknowledgements 8 frames late). In every run below each picture
+the client showed after a recovery was identical to the loss-free one
+(0 differing) and the decoders refused nothing. H.264 and HEVC decoded by
+FFmpeg 9 in the bench, AV1 by NVDEC (`av1_cuvid`) in the bench and, for
+the dumped streams marked †, by dav1d 1.4 in an Ubuntu 24.04 container
+(every picture identical to the loss-free decode's).
+
+| scene, size | codec | lost frames per loss | losses | recovered without keyframe | recovery / keyframe / P frame KiB (p50) | ffmpeg: keyframes |
+|---|---|---|---|---|---|---|
+| plasma 1080p | H.264 | 1 / 3 / 6 / 30 / 100 | 14 / 14 / 14 / 11 / 5 | 14 / 13 / 13 / 8 / 2 | 1.6-12.7 / 10.0 / 9.6 | |
+| plasma 1080p | HEVC | 1 / 3 / 6 / 30 / 100 | 14 / 14 / 14 / 11 / 5 | all | 2.8-22.2 / 23.5 / 10.3 | |
+| plasma 1080p | AV1 | 1 / 3 / 6 / 30 / 100 † | 14 / 14 / 14 / 11 / 5 | all | 1.0-10.0 / 17.9 / 4.7 | |
+| plasma 4K | H.264 | 6 / 30 | 9 / 7 | 8 / 5 | 50 / 39 / 38 | |
+| plasma 4K | HEVC | 6 / 30 | 9 / 7 | all | 70-86 / 91 / 41 | |
+| plasma 4K | AV1 | 6 † / 30 | 9 / 7 | all | 29-36 / 69 / 18 | |
+| box 1080p | H.264 | 3 / 30 | 9 / 7 | 8 / 5 | 3.1-27.5 / 714 / 0.9 | 9 / 7, 690 KiB each |
+| box 1080p | HEVC | 3 / 30 | 9 / 7 | all | 3.5-32.2 / 766 / 1.6 | 9 / 7, 697 KiB each |
+| box 1080p | AV1 | 3 / 30 | 9 / 7 | all | 3.1-27.1 / 930 / 0.8 | 9 / 7, 823-829 KiB each |
+
+On mostly still content (`box`: text with a moving square) a keyframe is
+690-930 KiB against a few KiB for a P frame, and a recovery costs 3-32 KiB:
+the stream averaged 2.4-5.7 KiB/frame instead of FFmpeg's 12.6-16.7. On
+`plasma`, where every frame changes everything, P frames are as large as
+keyframes and the difference is the keyframe the decoder no longer waits
+for. Losses of 1-3 frames are predicted past from short-term references,
+longer ones from an anchor (four short-term references at 1080p, three at
+4K, before the anchors are needed).
+
+The H.264 keyframes are the `frame_num` rule: NVENC's H.264 counts
+`frame_num` in 256 values, and a loss covering a frame where it wraps is
+answered with a keyframe. Without that rule (`--lose 30`, 900 frames, 11
+losses) all 11 were predicted past and FFmpeg 9's decoder showed 435
+pictures instead of 570: it dropped 135 after the three gaps across a
+wrap, though every picture it did show was right.
+
+Every frame still in the decoder's buffer has to be forgotten, not only
+the newest four: first forgetting only those, HEVC losses of 6 frames left
+older lost frames in the reference picture sets, and FFmpeg 9's HEVC
+decoder refused every frame after the first such recovery ("Error
+constructing the frame RPS"; FFmpeg 6.1 decoded the same stream).
+
+**Linux** (Ubuntu 24.04 container with `--gpus all`, same GPU and driver,
+`examples/nvenc_check`: 400 frames of `plasma` at 1080p loaded from system
+memory into the CUDA surface, decoded by the container's FFmpeg 6.1, AV1
+with its libdav1d): all three codecs open as `nvenc … (cuda, sdk)`, MAE
+1.68 / 1.44 / 1.42 (H.264 / HEVC / AV1). 15 cap changes: no keyframe after
+the first (FFmpeg's NVENC: 15 each). `--lose 3`: 6 of 6 losses recovered
+without a keyframe for each codec; `--lose 30`: 4 of 4 for HEVC and AV1,
+3 of 4 for H.264 (the `frame_num` rule); every picture the client showed
+identical to the loss-free decode.
+
+**Areas the client does not show** (`--unseen`: each case twice, the
+second with the left half of the picture unseen; 300 frames, one keyframe
+each; KiB/frame and the share saved):
+
+| codec | 1080p plasma | 1080p scroll | 1080p window | 4K plasma | 4K scroll | 4K window |
+|---|---|---|---|---|---|---|
+| H.264 | 9.4 → 5.1, 46 % | 9.6 → 6.2, 35 % | 20.2 → 8.9, 56 % | 37.3 → 20.2, 46 % | 23.4 → 13.3, 43 % | 19.8 → 5.2, 74 % |
+| HEVC | 10.2 → 5.8, 43 % | 9.0 → 5.7, 37 % | 26.3 → 10.6, 60 % | 40.3 → 22.6, 44 % | 21.8 → 13.1, 40 % | 28.9 → 5.9, 79 % |
+| AV1 | 4.6 → 2.8, 40 % | 6.1 → 4.2, 31 % | 16.3 → 6.5, 60 % | 17.5 → 10.6, 39 % | 17.1 → 11.7, 31 % | 15.6 → 3.3, 79 % |
+
+Encode time is unchanged (the QP delta map is on from the start; with no
+area unseen it costs nothing measurable, see "Same encoder"). On `window`
+the moving window spends part of its time in the unseen half, so more
+than half is saved there.
+
+**Presets** (`--set preset=p1|p2|p3`; encode p50 / p99 ms from 600 frames
+without decoding, PSNR-Y dB / SSIM-Y from 300 frames decoded and compared
+with the source, `plasma` / `scroll`):
+
+| codec, size | P1 | P2 | P3 |
+|---|---|---|---|
+| H.264 1080p | 1.83 / 5.06, 2.27 / 14.93; 52.57 / 0.9955, 42.86 / 0.9985 | 1.92 / 7.37, 2.30 / 12.51; 52.57 / 0.9955, 42.80 / 0.9985 | 2.74 / 10.82, 3.81 / 14.63; 52.60 / 0.9955, 43.47 / 0.9991 |
+| H.264 4K | 5.59 / 14.09, 4.26 / 6.17; 52.51 / 0.9955, 40.18 / 0.9900 | 5.34 / 7.77, 4.30 / 6.52; 52.51 / 0.9955, 40.33 / 0.9898 | 6.19 / 8.58, 10.51 / 12.35; 52.54 / 0.9955, 40.52 / 0.9908 |
+| HEVC 1080p | 0.92 / 2.00, 0.97 / 6.01; 52.34 / 0.9951, 45.70 / 0.9990 | 1.35 / 3.09, 1.91 / 15.48; 52.40 / 0.9952, 45.69 / 0.9990 | 1.48 / 2.82, 2.39 / 9.88; 52.28 / 0.9951, 45.48 / 0.9989 |
+| HEVC 4K | 4.11 / 27.51, 2.64 / 11.01; 52.33 / 0.9951, 43.62 / 0.9932 | 4.90 / 20.35, 4.03 / 8.74; 52.38 / 0.9952, 43.64 / 0.9931 | 4.63 / 24.72, 4.39 / 12.33; 52.26 / 0.9951, 43.41 / 0.9931 |
+| AV1 1080p | 0.88 / 1.98, 0.96 / 3.54; 52.07 / 0.9954, 44.08 / 0.9988 | 0.95 / 2.06, 1.26 / 4.34; 52.07 / 0.9954, 44.47 / 0.9989 | 1.10 / 2.06, 1.51 / 3.46; 52.52 / 0.9958, 45.17 / 0.9995 |
+| AV1 4K | 2.88 / 4.92, 2.67 / 7.19; 52.07 / 0.9954, 45.02 / 0.9985 | 2.58 / 4.17, 3.20 / 27.71; 52.07 / 0.9954, 44.81 / 0.9983 | 3.32 / 7.65, 3.54 / 19.79; 52.52 / 0.9959, 45.08 / 0.9988 |
+
+P1 stays. P2 gains nothing measurable on H.264 and HEVC and +0.4 dB on
+AV1 scrolling text at 1080p, -0.2 at 4K, for up to 50 % more encode time
+(HEVC). P3 gains up to 0.6 dB (H.264) and 1.1 dB (AV1) on scrolling text
+at 1080p and less at 4K, but takes H.264 at 4K from 4.3 to 10.5 ms a
+frame, past the 6 ms a 165 fps stream has, and HEVC from 1.0 to 2.4 ms at
+1080p; the bytes stay within a few per cent.
+
 ## Video colour matrix
 
 This PC (RTX 4080 SUPER), Edge 156. Flat colour patches encoded by each

@@ -1,8 +1,11 @@
 //! The `EncoderProvider`: NVENC, AMF, QuickSync and x264 through FFmpeg
 //! behind one low-latency configuration, with zero-copy GPU input where the
 //! platform offers it (CUDA on Linux, D3D11 on Windows) and system memory
-//! otherwise; H.264 everywhere, HEVC and AV1 with NVENC. On macOS,
-//! VideoToolbox driven directly (H.264, HEVC). Opus or AAC for sound.
+//! otherwise; H.264 everywhere, HEVC and AV1 with NVENC. NVENC with D3D11
+//! (Windows) or CUDA (Linux) input is driven through NVIDIA's SDK directly
+//! first (rate changes and losses without keyframes), FFmpeg's NVENC the
+//! fallback. On macOS, VideoToolbox driven directly (H.264, HEVC). Opus or
+//! AAC for sound.
 
 mod audio;
 
@@ -11,6 +14,8 @@ mod cuda;
 #[cfg(windows)]
 mod d3d11;
 mod ffmpeg;
+#[cfg(any(windows, target_os = "linux"))]
+mod nvenc;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
@@ -105,6 +110,9 @@ pub struct FfmpegEncoders {
     unavailable: Vec<(String, String)>,
     /// Option overrides applied over a backend's defaults for one codec.
     overrides: Vec<(Backend, Codec, Options)>,
+    /// NVENC through the SDK ahead of FFmpeg's (D3D11 input on Windows, CUDA on Linux).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    native_nvenc: bool,
 }
 
 impl FfmpegEncoders {
@@ -139,7 +147,7 @@ impl FfmpegEncoders {
                 Err(e) => unavailable.push((format!("{VIDEOTOOLBOX} {}", codec.name()), format!("{e:#}"))),
             }
         }
-        Ok(Self { available, videotoolbox, unavailable, overrides: Vec::new() })
+        Ok(Self { available, videotoolbox, unavailable, overrides: Vec::new(), native_nvenc: true })
     }
 
     /// Replaces the option overrides of `backend` ("nvenc", "amf", "qsv",
@@ -158,6 +166,12 @@ impl FfmpegEncoders {
         self.overrides.retain(|(o, c, _)| (*o, *c) != (b, codec));
         self.overrides.push((b, codec, opts.to_vec()));
         Ok(())
+    }
+
+    /// Whether NVENC goes through the SDK directly ahead of FFmpeg (the
+    /// default), for encoders created afterwards: benchmarks compare the two.
+    pub fn set_native_nvenc(&mut self, on: bool) {
+        self.native_nvenc = on;
     }
 }
 
@@ -209,6 +223,23 @@ impl EncoderProvider for FfmpegEncoders {
         }
         for backend in order {
             let opts = self.overrides.iter().find(|(b, c, _)| (*b, *c) == (backend, req.codec)).map_or(&[][..], |(_, _, o)| o);
+            // D3D11 input needs the capture surface; the CUDA input takes system memory,
+            // in BT.601 only (BT.709 is converted in system memory, FFmpeg's host path).
+            #[cfg(any(windows, target_os = "linux"))]
+            if backend == Backend::Nvenc && self.native_nvenc && if cfg!(windows) { req.surface.is_some() } else { !req.bt709 } {
+                let bitrate = ffmpeg::rate_control_bitrate(backend, req.max_bitrate, req.fps);
+                let (size, surface) = ((req.width, req.height), req.surface.as_ref());
+                match nvenc::NvencEncoder::open(req.codec, surface, size, req.output, bitrate, req.two_pass, req.bt709, opts) {
+                    Ok(mut e) => {
+                        if !skipped.is_empty() {
+                            e.fallback = Some(skipped.join("; "));
+                        }
+                        eprintln!("video encoder: {}", e.name());
+                        return Ok(Box::new(e));
+                    }
+                    Err(err) => skipped.push(format!("nvenc (sdk): {err:#}")),
+                }
+            }
             for kind in backend.inputs(req.surface.is_some()) {
                 let (input, surface) = ((req.width, req.height), req.surface.as_ref());
                 let bitrate = ffmpeg::rate_control_bitrate(backend, req.max_bitrate, req.fps);

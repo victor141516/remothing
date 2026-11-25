@@ -33,7 +33,7 @@ flowchart LR
 | crate | role |
 |---|---|
 | `crates/core` | traits (`platform.rs`, `encode.rs`), tile diff + motion classification + policy (`shared.rs`), capture loop (`capture.rs`), wire protocol (`proto.rs`), transport (`stream.rs`), sound hub (`audio.rs`), admin API (`admin.rs`), config/auth (`config.rs`), embedded web assets, server wiring (`app.rs`) |
-| `crates/encoder` | `EncoderProvider`: through FFmpeg H.264 with NVENC / AMF / QuickSync / x264, HEVC and AV1 with NVENC, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; on macOS VideoToolbox directly (H.264, HEVC) with IOSurface input; Opus (libopus) or AAC for sound |
+| `crates/encoder` | `EncoderProvider`: through FFmpeg H.264 with NVENC / AMF / QuickSync / x264, HEVC and AV1 with NVENC, low-latency settings, zero-copy CUDA (Linux) and D3D11 (Windows) input, host-memory fallback; NVENC with D3D11 or CUDA input through NVIDIA's SDK directly (`nvenc/`: rate changes and losses without keyframes); on macOS VideoToolbox directly (H.264, HEVC) with IOSurface input; Opus (libopus) or AAC for sound |
 | `crates/gpu-interop` | GPU surface types shared by capture and encoder of one platform (`D3D11Frame`, macOS `PixelBufferFrame`) |
 | `crates/platform-linux` | Xvfb manager (simulated displays, shared-memory framebuffer + XDamage), real X11 displays (RandR outputs, XShm + XDamage), XTest input, XFixes cursor, X selections (clipboard), sound through PulseAudio / PipeWire / ALSA loopback helpers, NVML/DRM GPU info |
 | `crates/platform-windows` | DXGI Desktop Duplication (dirty + move rects, D3D11 texture), SendInput, cursor from duplication, clipboard, WASAPI loopback sound, desktop switching, Windows service supervising the session process |
@@ -141,9 +141,10 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   recording) it needs 40-60 % of H.264's bytes, which slow links turn into
   frame rate and latency (docs/RESULTS.md, "Video codecs"). HEVC matched
   H.264 on moving pictures and saved 10-15 % on text.
-- **Split-frame encoding** (HEVC, AV1; FFmpeg 7.1 or later, so Windows
-  here, not the Ubuntu 24.04 container's 6.1): forced on, the GPU's NVENC
-  units take a strip each; the driver's own choice splits only at 4K.
+- **Split-frame encoding** (HEVC, AV1; through FFmpeg 7.1 or later, so
+  FFmpeg's NVENC on Windows here, not the Ubuntu 24.04 container's 6.1;
+  always through the SDK): forced on, the GPU's NVENC units take a strip
+  each; the driver's own choice splits only at 4K.
 - **Two-pass** (H.264 on NVENC only, `multipass=qres`): a quick pass at a
   quarter of the size plans each frame, so sizes come out even. It costs
   0.6 ms of encode at the median (4 ms at p99), which on a fast near link
@@ -177,6 +178,90 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   +0.05 to +0.1 ms per frame with AV1 and up to +1.1 ms with H.264 at 4K
   (docs/RESULTS.md, "Video colour matrix"), so it is only done where the
   browser needs it; swscale's BT.709 costs nothing over its BT.601.
+
+### NVENC through the SDK
+
+With D3D11 input (Windows) or CUDA input (Linux), NVENC is driven through
+NVIDIA's Video Codec SDK directly (`crates/encoder/src/nvenc/`), ahead of
+FFmpeg's NVENC, which stays the fallback (its open error is the encoder's
+`fallback_reason`). The driver's `nvEncodeAPI64.dll` /
+`libnvidia-encode.so.1` is loaded at runtime as FFmpeg does; the bindings
+are generated from FFmpeg's nv-codec-headers (API 13.1), so an older
+driver falls back with that reason. System-memory input (Windows without a
+D3D11 capture, and BT.709 on Linux, which needs swscale's NV12) and AMF,
+QuickSync and x264 stay on FFmpeg. What FFmpeg cannot do without
+restarting the encoder (a keyframe each time) this path does in place:
+
+- **Same encoder as FFmpeg's.** The settings of the FFmpeg NVENC arm
+  written out: preset P1 (P2 and P3 measured again here: at most 1.1 dB
+  more on scrolling text, for up to 2.5 times the encode time, H.264 at 4K
+  past a 165 fps frame), ultra-low-latency tuning, VBR with average = max
+  = the scaled cap (`rate_control_bitrate`), VBV of two frames, the QP
+  floor of `min_qp`, no lookahead, zero reorder delay, keyframes only on
+  demand, one slice, split-frame encoding forced for HEVC and AV1 (on Linux
+  too now, where the container's FFmpeg 6.1 cannot ask for it), two-pass
+  at quarter resolution for H.264 when asked, the same BT.601 / BT.709
+  behaviour (BGRA texture converted by NVENC, or the video processor's
+  NV12) and the same inputs (`D3D11Input`; on Linux the `CudaSurface`
+  updated from system memory, through a scaled system-memory copy when the
+  encoded size is smaller, with the CUDA context made current around the
+  driver calls as FFmpeg does). Encode time, bytes and MAE match FFmpeg's
+  NVENC (docs/RESULTS.md, "NVENC through the SDK").
+- **Bitrate caps without keyframes.** `set_max_bitrate` hands the new rate
+  to `nvEncReconfigureEncoder` without reset or IDR, and the rate control
+  follows it from the next frame (`free_rate_changes` is true). The level
+  is what would have to change with a higher cap, and a new level needs a
+  new sequence header, which only a keyframe carries: so the session opens
+  at the highest cap (`MAX_BITRATE`), lets the driver choose the level for
+  it (the level FFmpeg's NVENC declares at that cap: H.264 5.0 at 1080p,
+  5.2 at 4K; HEVC 5.2 High tier; AV1 level 31 at 1080p, 6.1 High tier at
+  4K), and gets its real cap right after, before the first frame.
+- **Losses without keyframes.** Every frame is coded with its index as
+  the timestamp. `invalidate_from(first)` tells the driver to forget every
+  lost frame still in its decoded picture buffer
+  (`nvEncInvalidateRefFrames`); the next frame predicts only from frames
+  before `first` and comes out with `Encoded::recovers = Some(first)`.
+  Short-term references (four kept, fewer where the level's buffer is
+  smaller: three at 4K H.264 and HEVC) cover a loss of fewer frames than
+  that. Deeper losses use one of two long-term references (anchors): a
+  frame is marked every 16 frames, the newest anchor the client
+  acknowledged (`acknowledge`) stays pinned while the schedule marks the
+  other slot, and an anchor not yet acknowledged keeps its slot for four
+  periods; the recovery frame names the newest anchor before `first`
+  (`ltrUseFrames`). Without acknowledgements anchors rotate and reach back
+  four to five periods. The bookkeeping is `nvenc/refs.rs`.
+- **Where it still takes a keyframe** (`invalidate_from` returns false):
+  the loss covers the last keyframe; no short-term reference and no anchor
+  predates it; the device cannot invalidate references; or the codec
+  cannot carry the gap. H.264: NVENC's `frame_num` takes 256 values and a
+  decoder that misses the frame where it wraps cannot be predicted past
+  (FFmpeg's H.264 decoder, which browsers use on Linux, dropped 135
+  pictures after three such recoveries instead of none), so a loss
+  covering that frame, about one loss in 256 / its length, is a keyframe.
+  HEVC: the gap must stay under half the picture order count range (NVENC
+  writes a range large enough that 100 lost frames recovered). AV1 carries
+  every order hint in full and is limited by its anchors only. The
+  limits are read from the sequence parameter set of each keyframe
+  (`nvenc/syntax.rs`).
+- **Every lost frame is forgotten**, not only the newest few: a frame the
+  driver still holds but was not told to forget stays in HEVC's reference
+  picture sets, and FFmpeg's HEVC decoder from 7.1 on refuses every frame
+  whose set names a picture it never got, from then on until a keyframe.
+- **Areas the client does not show.** `set_unseen` fills a QP delta map
+  (one entry per H.264 macroblock, HEVC 32x32 coding tree block (the CTB
+  size is set to 32 for that), AV1 superblock) with the largest offset
+  over the blocks those areas cover entirely; the rate control's QP plus
+  the offset clamps to the codec's coarsest. Rects are in display
+  coordinates, rounded inwards to encoded blocks; each call replaces the
+  last, an empty one ends it. Half the picture unseen saved 31-79 % of the
+  bytes. Once a frame named a map every later one names one (zeros when
+  nothing is unseen): the driver codes a frame without one with the last
+  map it was given.
+- **Checks.** `examples/d3d11_bench` (Windows: `--rate-steps`, `--lose`,
+  `--unseen`, `--quality`, `--enc nvenc-ffmpeg` for the comparison) and
+  `examples/nvenc_check` (Linux, in a container with `--gpus all`)
+  measure all of the above; `nvenc/refs.rs` has unit tests for the
+  reference bookkeeping.
 
 ## HDR
 
