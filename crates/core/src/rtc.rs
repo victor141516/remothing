@@ -33,6 +33,9 @@ use crate::platform::{Platform, ThreadRole};
 const FRAMES_LABEL: &str = "frames";
 /// Input (client → server, reliable and ordered like the input WebSocket).
 const INPUT_LABEL: &str = "input";
+/// Pointer positions where only the latest counts (C_MOVE_LATEST): unordered,
+/// never sent again.
+const MOVES_LABEL: &str = "moves";
 /// SCTP send buffer: a few large frames in flight (the pacer bounds it anyway).
 const SCTP_BUFFER: usize = 8 << 20;
 /// STUN binding requests: retries while unanswered, then a periodic refresh
@@ -163,6 +166,7 @@ struct Peer {
     events: tmpsc::UnboundedSender<PeerEvent>,
     frames: Option<ChannelId>,
     input: Option<ChannelId>,
+    moves: Option<ChannelId>,
     /// Frames-channel messages waiting for SCTP buffer space.
     queue: VecDeque<Vec<u8>>,
     timeout: Instant,
@@ -251,7 +255,8 @@ impl HubThread {
         if let Some(mut old) = self.peers.remove(&id) {
             old.rtc.disconnect();
         }
-        self.peers.insert(id, Peer { rtc, events, frames: None, input: None, queue: VecDeque::new(), timeout: Instant::now(), closed: false });
+        let peer = Peer { rtc, events, frames: None, input: None, moves: None, queue: VecDeque::new(), timeout: Instant::now(), closed: false };
+        self.peers.insert(id, peer);
         self.drain(id);
         Ok(answer.to_sdp_string())
     }
@@ -366,12 +371,14 @@ impl HubThread {
                             let _ = p.events.send(PeerEvent::FramesOpen);
                         } else if label == INPUT_LABEL {
                             p.input = Some(cid);
+                        } else if label == MOVES_LABEL {
+                            p.moves = Some(cid);
                         }
                     }
                     Event::ChannelData(d) => {
                         let event = if Some(d.id) == p.frames {
                             PeerEvent::Frames(d.data)
-                        } else if Some(d.id) == p.input {
+                        } else if Some(d.id) == p.input || Some(d.id) == p.moves {
                             PeerEvent::Input(d.data)
                         } else {
                             continue;

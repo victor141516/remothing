@@ -127,7 +127,11 @@ H.264, HEVC or AV1, chosen per client (`stream.rs::pick_codec`):
   comes with a keyframe and the client reconfigures its decoder for it.
   A decoder error on HEVC or AV1 (said to be supported, yet failing) drops
   that codec from the client's offer and reconnects, so the server picks
-  again without it.
+  again without it. A decoder that takes frames and gives no pictures (a
+  frame waiting 1.5 s with three more behind it; hardware decoders after a
+  GPU reset or sleep have done so without an error) is treated the same
+  for HEVC and AV1, and moves H.264 to `prefer-software` (back to hardware
+  if that fails).
 - **No reordering.** Browsers hold a picture back when the stream allows
   reordering. H.264 says it cannot through constraint_set3 in the SPS
   (`mark_no_reorder`); HEVC's SPS carries the reorder count, zero without
@@ -406,6 +410,17 @@ platform's list, and a display that moved is opened again
 nothing else reopened them: absolute moves aimed where a display had been,
 and Windows held the cursor on the nearest edge. Reopening also matters
 for capture on X11, where an output is captured by its area of the screen.
+
+Over UDP paths each pointer position goes twice (`C_MOVE_LATEST`, with a
+sequence number): unordered (a WebTransport datagram, the WebRTC `moves`
+channel without resends), so a lost move holds no later one back behind
+its retransmission, and the ordered way, so a lost one still arrives after
+a round trip and ahead of any later click. The server applies only
+positions newer than the last it applied: the second copy is dropped.
+Sending the latest position the ordered way only once the pointer rested
+(60 ms) made isolated moves slower at 3 % loss (input round trip p95 98
+ms against 80), since a lost one waited for that instead of a round trip.
+Moves of a captured mouse are counts that add up: they stay ordered.
 
 - **Held keys**: a key is down on the server from the client's press to its
   release, so holding it repeats on the remote side (the browser's own
@@ -859,18 +874,26 @@ TCP's retransmission timeout). Two UDP paths, in this order:
 flowchart LR
   B[browser] -- "WS /ws: signaling, HELLO, cursor, ACK copy (+ frames on WS path)" --> S[server]
   B -- "WS /input: input, unloaded pings" --> S
-  B -. "WT datagrams: frame pieces, parity; ACKs, NACKs, pings" .-> S
+  B -. "WT datagrams: frame pieces, parity; ACKs, NACKs, pings, pointer positions" .-> S
   B -. "WT stream: input" .-> S
   B -. "DC frames: reliable, unordered chunks ≤60 KiB; ACKs, pings" .-> S
-  B -. "DC input: reliable, ordered" .-> S
+  B -. "DC input: reliable, ordered; DC moves: unordered, no resends" .-> S
 ```
 
 A wrong stream token is refused with WebSocket close code 4401
 (`CLOSE_UNAUTHORIZED`) on both sockets, after an upgrade that carries
 nothing else: a browser hides the HTTP status of a refused upgrade from the
 page, so a plain 401 looked like a network failure and the client retried
-every second. On 4401 the client stops and shows "Error 4401"; the server
+while the server stayed away. On 4401 the client stops and shows "Error 4401"; the server
 logs the refused address.
+
+Both sockets reconnect at once when they close (a restarted server, a
+dropped connection: the picture is back within a round trip), then after
+250 ms doubling up to 2 s while the server stays away; a session that
+sends its HELLO resets that. A stream socket that hears nothing for 4 s,
+not even the pongs of its pings every second, is dead without knowing it
+(a NAT or proxy forgot it, the computer slept; TCP would take minutes to
+say so): the client drops it for a new one.
 
 ### WebTransport
 
@@ -896,13 +919,25 @@ logs the refused address.
   points at a proxy that ends WebTransport itself (checked as any HTTPS
   site; not tried here).
 - **Frames** go as pieces of at most 1100 bytes (they fit the smallest QUIC
-  packet), plus one parity piece per 8: the XOR of every 8th piece, so one
-  lost piece per group, or a run of up to one piece per group, is rebuilt
-  without a round trip. What is still missing is asked for again
-  (`C_NACK`): holes behind later pieces after 4 ms, the rest of a frame
+  packet), plus parity pieces: piece `j` of `p` is the XOR of every `p`-th
+  piece from `j`, so one lost piece per group, or a run of up to `p`
+  pieces, is rebuilt without a round trip. `p` is one per 16, 8, 4 or 2
+  pieces (each frame says which), chosen from what the client still had to
+  ask for (`datagrams::Fec`): more parity after a second in which over
+  0.5 % of the pieces sent were asked for again, less after 5 s in which
+  none were, and no more for 2 s after a cut of the estimate (losses
+  there may be our own queue's, which parity would only add to; not less
+  either, since random loss makes the model cut now and then too). A session starts at one
+  per 8. What is still missing is asked for again
+  (`C_NACK`): holes behind later pieces after 4 ms plus the time the
+  pieces still to come need at their spacing (the parity that may rebuild
+  them comes last; without that wait paced frames had every loss asked
+  for, 3-12 % of the pieces at 3 % loss), the rest of a frame
   once its pieces stopped for 4 ms and three times their usual spacing (on
   a slow link they come far apart), or when a later frame arrives; again
-  after 1.5 round trips, up to five times. A frame that got nothing new for
+  after 1.5 round trips, up to five times. The first time a piece is asked
+  for it is sent twice, the copy after the other repairs, so the loss
+  burst that took it seldom takes both. A frame that got nothing new for
   250 ms (or 4 round trips) is given up: the ACK lists it as lost and the
   repair below follows. The server keeps the last 256 unacknowledged
   frames for these requests.
@@ -911,13 +946,23 @@ logs the refused address.
   and a second controller would hold datagrams back, and drop the oldest,
   on losses it reads as congestion. A frame that was only complete after
   asking again says so in its ACK, and its timing is not a link sample.
-- **Health**: the session is given up when it closes or a ping (every
-  250 ms) stays unanswered for 300 ms (or 4 round trips), and not tried
+- **Pacing** (`datagrams::pace`): a frame's datagrams leave at 2.5× the
+  link estimate (bursts of at most 2 ms of that, the timer ticks about
+  every millisecond), not at line rate: a slower hop on the way (a Wi-Fi
+  access point, a radio cell) gets them spread out instead of as one burst
+  that overflows its buffer. At 2.5× they wait here at most 40 % of what
+  the path needs for them anyway. Repairs go ahead of waiting frames;
+  pings are never paced. Unpaced while the estimate is unproven, so a first
+  keyframe never crawls at the initial guess.
+- **Health**: the session is given up when it closes or no ping (every
+  250 ms) is answered for 550 ms (or 4 round trips): one lost ping or pong
+  is made up by the next. With 300 ms one lost pong ended the session
+  (at 3 % loss every few seconds). It is not tried
   again for 30 s, doubling up to 5 min; a failed attempt counts the same.
   Frames then take the data channel or the WebSocket, with the same repair
   as an abandoned data channel. A new WebSocket connection starts afresh.
 - **Input** goes over one unidirectional stream (ordered, each message
-  after its length).
+  after its length); pointer positions as datagrams (below).
 - **Why it failed**: the browser tells its page only "Opening handshake
   failed", whatever the cause. The client's event lists every address
   tried, grouped by error, with how long each took: milliseconds means
@@ -989,7 +1034,8 @@ per undecodable frame), STATS (JSON for the admin UI), SIGNAL, HELLO_ACK,
 VISIBLE (a hidden tab gets no frames; changes accumulate into one frame for
 when it shows again), EVENT (text for the event log), CLIPBOARD, PASTE, DISPLAYS,
 DISPLAY, AUDIO (on/off), MIC_INFO (JSON: ask for the microphone, release
-it, agree to install or restart), MIC (one packet), MOVE, MOVE_REL (mouse
+it, agree to install or restart), MIC (one packet), MOVE, MOVE_LATEST (a
+move sent unordered with a sequence number), MOVE_REL (mouse
 counts while captured), BUTTON, WHEEL, KEY, TEXT, NACK (WebTransport
 pieces to send again), VIEW (picture size in the window and refresh rate),
 CAPTURE (the mouse is captured or not), BT709 (this browser shows BT.601

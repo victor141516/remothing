@@ -59,8 +59,9 @@ export type ToWorker =
   /** About this device's microphone: a C_MIC_INFO as JSON, or a complete C_MIC message. */
   | { type: 'mic'; json: string }
   | { type: 'micdata'; buf: ArrayBuffer }
-  /** An input message, for the WebTransport path. */
-  | { type: 'input'; buf: ArrayBuffer }
+  /** An input message, for the WebTransport path; `latest`: a
+   * C_MOVE_LATEST, as a datagram. */
+  | { type: 'input'; buf: ArrayBuffer; latest: boolean }
   /** How the picture is shown: its size in the window (device pixels), the
    * refresh rate, and whether the page can show HDR where it is now. */
   | { type: 'view'; width: number; height: number; hz: number; hdr: boolean }
@@ -143,6 +144,22 @@ let bt709Asked = false;
 /** Codecs besides H.264 offered to the server: those decoded in hardware here. */
 let offered: string[] = [];
 let awaitingKey = true;
+/** The hardware decoder got stuck: H.264 is decoded in software (`watchDecoder`). */
+let decoderSoftware = false;
+/** Waiting this long for a picture, with this many video frames behind it: stuck. */
+const DECODER_STUCK_MS = 1500;
+const DECODER_STUCK_FRAMES = 3;
+/** Where the stream socket connects (`connect`), when it last heard anything,
+ * and how long until the next reconnect. */
+let streamUrl = '';
+let wsHeard = 0;
+/** Why the last stream socket was dropped (`watchSocket`), for the next one. */
+let dropped = '';
+let retryMs = 0;
+const RETRY_MIN_MS = 250;
+const RETRY_MAX_MS = 2000;
+/** Pings go every second: this long without even a pong, the socket is dead. */
+const WS_SILENT_MS = 4000;
 const queue: Frame[] = [];
 const rec = new Recorder();
 
@@ -509,8 +526,10 @@ function watchGap(): void {
     // or given up); a path that stops answering is dead.
     // A queue on the path delays the answers too, without the path being
     // dead: the limit follows the last round trip.
+    // Pings are datagrams: one lost (or its pong) is only made up by the
+    // next one's answer, so the limit covers one ping interval more.
     const silent = wtPingSince ? t - wtPingSince : 0;
-    if (silent > Math.max(DC_STALL_MS, 4 * wt.rtt, 3 * wt.lastRtt)) wt.close(`no answer for ${silent.toFixed(0)} ms`);
+    if (silent > Math.max(DC_STALL_MS + DC_PING_MS, 4 * wt.rtt, 3 * wt.lastRtt)) wt.close(`no answer for ${silent.toFixed(0)} ms`);
     return;
   }
   if (!gapSince || (useDc && dcOpen) || t - gapSince < (udpDead ? 0 : LOSS_WAIT_MS)) return;
@@ -655,6 +674,17 @@ async function hardwareCodecs(only: string | null): Promise<string[]> {
   return found;
 }
 
+/** The decoder of a codec said to be supported fails: it is not offered
+ * again, and a new session lets the server choose without it. */
+function dropCodec(why: string): void {
+  const name = CODECS[decoderCodec].name;
+  offered = offered.filter((c) => c !== name);
+  sendText(C_EVENT, `decoder error with ${name}, no longer offered: ${why}`);
+  decoderCodec = 0;
+  resetDecoder();
+  ws?.close();
+}
+
 function createDecoder(): void {
   decoder = new VideoDecoder({
     output: (picture) => {
@@ -673,19 +703,14 @@ function createDecoder(): void {
       pump();
     },
     error: (e) => {
-      const name = CODECS[decoderCodec].name;
-      if (name !== 'h264') {
-        // Said to be supported, yet failing: not offered again, and a new
-        // session lets the server choose without it.
-        offered = offered.filter((c) => c !== name);
-        sendText(C_EVENT, `decoder error with ${name}, no longer offered: ${e.message}`);
-        decoderCodec = 0;
-        resetDecoder();
-        ws?.close();
+      if (CODECS[decoderCodec].name !== 'h264') {
+        dropCodec(e.message);
         return;
       }
       console.warn('decoder error, requesting keyframe', e);
-      sendText(C_EVENT, `decoder error: ${e.message}`);
+      // A browser without software H.264 fails at once: back to hardware.
+      sendText(C_EVENT, `decoder error${decoderSoftware ? ' in software, back to hardware' : ''}: ${e.message}`);
+      decoderSoftware = false;
       resetDecoder();
     },
   });
@@ -697,7 +722,7 @@ function configureDecoder(): void {
   decoder.configure({
     codec: CODECS[decoderCodec].config,
     optimizeForLatency: true,
-    hardwareAcceleration: 'prefer-hardware',
+    hardwareAcceleration: decoderSoftware && CODECS[decoderCodec].name === 'h264' ? 'prefer-software' : 'prefer-hardware',
     // Overrides what the stream says (Chromium takes BT.709 whatever it says).
     colorSpace: decoderBt601 ? BT601 : BT709,
   });
@@ -936,10 +961,14 @@ function reportLate(): void {
 }
 
 function connect(url: string): void {
+  streamUrl = url;
   const codecs = offered.length ? `&codecs=${offered.join(',')}` : '';
   ws = new WebSocket(`${url}${codecs}&display=${encodeURIComponent(display)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    wsHeard = now();
+    if (dropped) sendText(C_EVENT, dropped);
+    dropped = '';
     // Each server session says whether it wants the frame trace.
     trace = null;
     // The server's choice is per connection.
@@ -955,6 +984,7 @@ function connect(url: string): void {
   };
   ws.onmessage = (ev) => {
     const received = now();
+    wsHeard = received;
     const buf = ev.data as ArrayBuffer;
     const v = new DataView(buf);
     switch (v.getUint8(0)) {
@@ -1021,6 +1051,8 @@ function connect(url: string): void {
         post({ type: 'micinfo', json: new TextDecoder().decode(new Uint8Array(buf, 1)) });
         break;
       case S_HELLO: {
+        // The session works: the next drop reconnects at once again.
+        retryMs = 0;
         const width = v.getUint32(4, true);
         const height = v.getUint32(8, true);
         const tile = v.getUint32(12, true);
@@ -1051,8 +1083,47 @@ function connect(url: string): void {
   // A refused token stays refused: retrying would only repeat the refusal.
   ws.onclose = (ev) => {
     if (ev.code === CLOSE_UNAUTHORIZED) post({ type: 'refused', code: ev.code });
-    else setTimeout(() => connect(url), 1000);
+    else reconnect();
   };
+}
+
+/** At once the first time (a server restart, a dropped connection: the
+ * picture comes back within a round trip), then backing off while the
+ * server stays away. */
+function reconnect(): void {
+  setTimeout(() => connect(streamUrl), retryMs);
+  retryMs = Math.min(Math.max(2 * retryMs, RETRY_MIN_MS), RETRY_MAX_MS);
+}
+
+/** A socket that hears nothing, not even the pongs of its pings, is dead
+ * without knowing it (a NAT or proxy forgot it, the computer slept): TCP
+ * would take minutes to say so. Dropped for a new one. */
+function watchSocket(): void {
+  if (ws?.readyState !== WebSocket.OPEN || now() - wsHeard < WS_SILENT_MS) return;
+  // Told over the new socket: the old one reaches nobody.
+  dropped = `stream socket silent for ${Math.round(now() - wsHeard)} ms: reconnected`;
+  const dead = ws;
+  dead.onclose = dead.onmessage = null;
+  dead.close();
+  reconnect();
+}
+
+/** A decoder that takes frames and gives no pictures is stuck (hardware
+ * decoders after a GPU reset or sleep have done so without an error). H.264
+ * goes on in software; other codecs are only offered in hardware and are
+ * dropped as after a decoder error. */
+function watchDecoder(): void {
+  const waiting = queue.findIndex((f) => f.hasVideo && !f.picture);
+  if (waiting < 0 || now() - queue[waiting].received < DECODER_STUCK_MS) return;
+  if (queue.slice(waiting + 1).filter((f) => f.hasVideo).length < DECODER_STUCK_FRAMES) return;
+  const why = `no picture for ${Math.round(now() - queue[waiting].received)} ms`;
+  if (CODECS[decoderCodec].name !== 'h264') {
+    dropCodec(why);
+    return;
+  }
+  sendText(C_EVENT, `decoder stuck (${why}): ${decoderSoftware ? 'reset' : 'decoding in software from now on'}`);
+  decoderSoftware = true;
+  resetDecoder();
 }
 
 self.onmessage = (ev: MessageEvent<ToWorker>) => {
@@ -1083,6 +1154,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
         ping();
         choosePath();
         tryWt();
+        watchSocket();
+        watchDecoder();
       }, 1000);
       setInterval(watchGap, 20);
       // Missing pieces are asked for within a few ms.
@@ -1103,7 +1176,8 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
               : 'websocket';
         const picture = renderer.float ? '  HDR' : renderer.hdr ? '  HDR picture clipped to SDR' : '';
         const mode = `${motion ? 'motion mode' : 'tile mode'}, video ${renderer.videoTiles}/${renderer.tiles} tiles${picture}`;
-        const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${CODECS[decoderCodec].name} ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
+        const software = decoderSoftware ? ' software' : '';
+        const pipeline = `${path}${rtts}  ${mode}  lost ${lostTotal}  queue ${queue.length}  decoder ${CODECS[decoderCodec].name}${software} ${decoder.state} q${decoder.decodeQueueSize}${awaitingKey ? ' awaiting key' : ''}`;
         const pingRtt = Math.min(...syncSamples.map((s) => s.rtt));
         post({ type: 'stats', batch: rec.take(), pipeline, pingRtt });
       }, 250);
@@ -1183,10 +1257,12 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
     case 'micdata':
       send(new Uint8Array(m.buf));
       break;
-    case 'input':
+    case 'input': {
       // The input stream may not be open yet: the stream socket takes input too.
-      if (!wt.sendInput(new Uint8Array(m.buf))) send(new Uint8Array(m.buf));
+      const b = new Uint8Array(m.buf);
+      if (!(m.latest ? wt.send(b) : wt.sendInput(b))) send(b);
       break;
+    }
     case 'wsrtt':
       wsRtts.push(m.rtt);
       if (wsRtts.length > RTT_WINDOW) wsRtts.shift();

@@ -21,6 +21,7 @@ export class Peer {
   private pc: RTCPeerConnection | null = null;
   private frames: RTCDataChannel | null = null;
   private input: RTCDataChannel | null = null;
+  private moves: RTCDataChannel | null = null;
 
   constructor(private readonly events: PeerEvents) {}
 
@@ -38,6 +39,9 @@ export class Peer {
     frames.onclose = () => this.events.open(false);
     this.frames = frames;
     this.input = pc.createDataChannel('input', { ordered: true });
+    // Positions where only the latest counts: a lost one is not sent again,
+    // and none waits behind one that was.
+    this.moves = pc.createDataChannel('moves', { ordered: false, maxRetransmits: 0 });
     // What ICE offers says whether this browser may use UDP at all (a
     // policy can hide or forbid it): reported once gathering ends.
     const offered: Record<string, number> = {};
@@ -68,17 +72,19 @@ export class Peer {
     if (this.frames?.readyState === 'open') this.frames.send(buf);
   }
 
-  /** False when the input channel is not open (the caller uses the WebSocket). */
-  sendInput(m: Uint8Array): boolean {
-    if (this.input?.readyState !== 'open') return false;
-    this.input.send(m as Uint8Array<ArrayBuffer>);
+  /** False when the channel is not open (the caller uses the WebSocket).
+   * `latest`: a C_MOVE_LATEST, on the unordered channel without resends. */
+  sendInput(m: Uint8Array, latest = false): boolean {
+    const channel = latest ? this.moves : this.input;
+    if (channel?.readyState !== 'open') return false;
+    channel.send(m as Uint8Array<ArrayBuffer>);
     return true;
   }
 
   close(): void {
     if (!this.pc) return;
     this.pc.close();
-    this.pc = this.frames = this.input = null;
+    this.pc = this.frames = this.input = this.moves = null;
     this.events.open(false);
   }
 }

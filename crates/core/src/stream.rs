@@ -27,6 +27,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::app::{App, VirtualRequest, Watching};
 use crate::capture::{Clip, DisplayStream};
 use crate::config::constant_time_eq;
+use crate::datagrams::{self, Datagram, Fec, Kept};
 use crate::encode::{Codec, EncoderRequest, VideoEncoder};
 use crate::mic;
 use crate::pacer::{Notice, Pacer};
@@ -193,6 +194,8 @@ pub async fn input_handler(
 struct Held {
     keys: Vec<u16>,
     buttons: Vec<Button>,
+    /// Sequence of the last C_MOVE_LATEST applied.
+    move_seq: Option<u32>,
 }
 
 impl Held {
@@ -205,6 +208,14 @@ impl Held {
             let _ = input.button(button, false);
         }
     }
+}
+
+/// The client's WebTransport session: the connection, and the queue its
+/// frames' datagrams are paced from (`datagrams::pace`).
+#[derive(Clone)]
+struct WtLink {
+    conn: wtransport::Connection,
+    queue: mpsc::UnboundedSender<Datagram>,
 }
 
 struct ClientLink {
@@ -222,9 +233,11 @@ struct ClientLink {
     /// The frames channel is open (the client chooses whether to use it).
     rtc_open: AtomicBool,
     /// The client's WebTransport session, while open.
-    wt: Mutex<Option<wtransport::Connection>>,
-    /// Frames sent as datagrams and not acknowledged yet: (seq, FRAME).
-    wt_frames: Mutex<VecDeque<(u32, Vec<u8>)>>,
+    wt: Mutex<Option<WtLink>>,
+    /// Frames sent as datagrams and not acknowledged yet.
+    wt_frames: Mutex<VecDeque<Kept>>,
+    /// Parity of the frames sent as datagrams.
+    fec: Mutex<Fec>,
     key_request: AtomicBool,
     /// Sequence of the last keyframe sent.
     last_key: Mutex<Option<u32>>,
@@ -295,6 +308,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
         rtc_open: AtomicBool::new(false),
         wt: Mutex::new(None),
         wt_frames: Mutex::new(VecDeque::new()),
+        fec: Mutex::new(Fec::default()),
         key_request: AtomicBool::new(false),
         last_key: Mutex::new(None),
         paused: AtomicBool::new(false),
@@ -363,10 +377,13 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
             while let Some(conn) = wt_rx.recv().await {
                 app.telemetry.event(link.id, &format!("webtransport session from {}", conn.remote_address()));
                 // A new session replaces an older one the client gave up.
-                *link.wt.lock().unwrap() = Some(conn.clone());
-                let why = serve_wt(&conn, &app, &link, &waker).await;
+                let (queue, paced) = mpsc::unbounded_channel();
+                let wt = WtLink { conn, queue };
+                *link.wt.lock().unwrap() = Some(wt.clone());
+                *link.fec.lock().unwrap() = Fec::default();
+                let why = serve_wt(&wt, paced, &app, &link, &waker).await;
                 let mut current = link.wt.lock().unwrap();
-                if current.as_ref().is_some_and(|c| c.stable_id() == conn.stable_id()) {
+                if current.as_ref().is_some_and(|c| c.conn.stable_id() == wt.conn.stable_id()) {
                     *current = None;
                 }
                 drop(current);
@@ -770,8 +787,8 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
     if let Some(hub) = &app.wt {
         hub.unregister(&wt_key);
     }
-    if let Some(conn) = link.wt.lock().unwrap().take() {
-        conn.close(0u32.into(), b"session ended");
+    if let Some(wt) = link.wt.lock().unwrap().take() {
+        wt.conn.close(0u32.into(), b"session ended");
     }
     // A reconnect of the same page may have registered its route already.
     let mut routes = app.input_routes.lock().unwrap();
@@ -859,13 +876,14 @@ fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
     repair(app, link, &lost);
     link.sent.lock().unwrap().ack(seq);
     // Nothing up to `seq` will be asked for again.
-    link.wt_frames.lock().unwrap().retain(|&(s, _)| (s.wrapping_sub(seq) as i32) > 0);
+    link.wt_frames.lock().unwrap().retain(|k| (k.seq.wrapping_sub(seq) as i32) > 0);
     let (cut, notice) = {
         let mut p = link.pacer.lock().unwrap();
         p.on_ack(seq, proto::now_us(), hold_us, b[2] != 0, arrived);
         (p.take_cut(), p.take_notice())
     };
     if let Some((rate, queue_us)) = cut {
+        link.fec.lock().unwrap().on_queue(proto::now_us());
         let text = format!("link estimate cut to {:.1} Mbit/s (queue {} ms)", rate * 8.0 / 1e6, queue_us / 1000);
         app.telemetry.event(link.id, &text);
     }
@@ -884,8 +902,15 @@ fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
 /// Serves one WebTransport session until it closes; returns why it closed.
 /// ACKs, pings and requests for pieces come as datagrams; input on a
 /// unidirectional stream, each message after its length (u16).
-async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, waker: &std::thread::Thread) -> String {
-    let datagrams = async {
+async fn serve_wt(
+    wt: &WtLink,
+    paced: mpsc::UnboundedReceiver<Datagram>,
+    app: &App,
+    link: &ClientLink,
+    waker: &std::thread::Thread,
+) -> String {
+    let conn = &wt.conn;
+    let received = async {
         loop {
             let d = match conn.receive_datagram().await {
                 Ok(d) => d,
@@ -896,6 +921,13 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
                     on_ack(&d, app, link);
                     waker.unpark();
                 }
+                // Unordered moves (the ordered ones come on the input stream).
+                (Some(proto::C_MOVE_LATEST), 10..) => {
+                    let stream = link.watching.read().unwrap().clone();
+                    if let Err(e) = handle_input(&d, &stream, &mut link.held.lock().unwrap()) {
+                        app.telemetry.error("input", e);
+                    }
+                }
                 // Round trip of this path (clock offset, health).
                 (Some(proto::C_PING), 16..) => {
                     let _ = conn.send_datagram(proto::pong(f64::from_le_bytes(d[8..16].try_into().unwrap())));
@@ -903,15 +935,20 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
                 (Some(proto::C_NACK), 8..) => {
                     let seq = u32::from_le_bytes(d[4..8].try_into().unwrap());
                     let count = u16::from_le_bytes([d[2], d[3]]) as usize;
-                    let kept = link.wt_frames.lock().unwrap();
-                    let Some((_, frame)) = kept.iter().find(|(s, _)| *s == seq) else { continue };
-                    let (data, _) = proto::piece_counts(frame.len());
-                    if count == 0 {
+                    let mut out = Vec::new();
+                    let mut frames = link.wt_frames.lock().unwrap();
+                    let Some(frame) = frames.iter_mut().find(|k| k.seq == seq) else { continue };
+                    let asked = if count == 0 {
                         // Not one piece arrived: the client knows nothing of its size.
-                        send_pieces(conn, frame, 0..data);
+                        frame.repair(None, &mut out)
                     } else {
-                        let asked = d[8..].chunks_exact(2).take(count).map(|c| u16::from_le_bytes([c[0], c[1]]) as usize);
-                        send_pieces(conn, frame, asked.filter(|&i| i < data));
+                        let mut asked = d[8..].chunks_exact(2).take(count).map(|c| u16::from_le_bytes([c[0], c[1]]) as usize);
+                        frame.repair(Some(&mut asked), &mut out)
+                    };
+                    drop(frames);
+                    link.fec.lock().unwrap().on_asked(asked);
+                    for d in out {
+                        let _ = wt.queue.send(d);
                     }
                 }
                 _ => {}
@@ -938,9 +975,16 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
             }
         }
     };
+    // Ahead of the estimate (`datagrams::PACE_GAIN`); unpaced until it is
+    // proven, so a keyframe never crawls at a first guess.
+    let rate = || {
+        let p = link.pacer.lock().unwrap();
+        p.proven().then(|| p.rate() * datagrams::PACE_GAIN)
+    };
     tokio::select! {
-        why = datagrams => why,
+        why = received => why,
         why = input => why,
+        why = datagrams::pace(conn, paced, rate) => why,
     }
 }
 
@@ -990,32 +1034,31 @@ fn send_frame(app: &App, link: &ClientLink, out: &mpsc::UnboundedSender<Vec<u8>>
                 hub.send(link.id, chunk);
             }
         }
-        (PATH_WT, _, Some(conn)) => {
-            let (data, parity) = proto::piece_counts(msg.len());
-            send_pieces(conn, &msg, 0..data + parity);
-            let seq = u32::from_le_bytes(msg[4..8].try_into().unwrap());
-            let mut kept = link.wt_frames.lock().unwrap();
-            if kept.len() == WT_KEEP {
-                kept.pop_front();
+        (PATH_WT, _, Some(wt)) => {
+            let mut datagrams = Vec::new();
+            let mut fec = link.fec.lock().unwrap();
+            let kept = Kept::send(msg, fec.per(), &mut datagrams);
+            let changed = fec.on_sent(datagrams.len(), proto::now_us()).map(|loss| (fec.per(), loss));
+            drop(fec);
+            if let Some((per, loss)) = changed {
+                let text = format!("parity one per {per} pieces ({:.2} % asked for again)", loss * 100.0);
+                app.telemetry.event(link.id, &text);
             }
-            kept.push_back((seq, msg));
+            for d in datagrams {
+                // A closed queue: the session is ending, its closing repairs this.
+                let _ = wt.queue.send(d);
+            }
+            let mut frames = link.wt_frames.lock().unwrap();
+            if frames.len() == WT_KEEP {
+                frames.pop_front();
+            }
+            frames.push_back(kept);
         }
         // The UDP path went away meanwhile: what was sent there is repaired
         // when its closing is handled; this one goes the sure way.
         _ => return out.send(msg).is_ok(),
     }
     true
-}
-
-/// Datagrams with pieces `indices` of `frame` (see `proto::S_PIECE`). A
-/// closed connection drops them; its closing is handled elsewhere.
-fn send_pieces(conn: &wtransport::Connection, frame: &[u8], indices: impl Iterator<Item = usize>) {
-    let mut piece = Vec::with_capacity(proto::PIECE_HEADER_LEN + proto::PIECE_PAYLOAD);
-    for i in indices {
-        piece.clear();
-        proto::piece(frame, i, &mut piece);
-        let _ = conn.send_datagram(&piece);
-    }
 }
 
 fn transport_name(path: u8) -> &'static str {
@@ -1514,6 +1557,14 @@ fn handle_input(b: &[u8], stream: &DisplayStream, held: &mut Held) -> Result<()>
     let Some(input) = stream.control.input() else { return Ok(()) };
     match (b.first().copied(), b.len()) {
         (Some(proto::C_MOVE), 6..) => input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?,
+        (Some(proto::C_MOVE_LATEST), 10..) => {
+            let seq = u32::from_le_bytes(b[6..10].try_into().unwrap());
+            // Each move comes twice (unordered and ordered): the later copy is dropped.
+            if held.move_seq.is_none_or(|last| seq.wrapping_sub(last) as i32 > 0) {
+                held.move_seq = Some(seq);
+                input.motion(u16_at(b, 2) as u32, u16_at(b, 4) as u32)?
+            }
+        }
         (Some(proto::C_MOVE_REL), 6..) => {
             let (dx, dy) = (u16_at(b, 2) as i16 as i32, u16_at(b, 4) as i16 as i32);
             if b[1] & proto::MOVE_AS_POSITION == 0 {

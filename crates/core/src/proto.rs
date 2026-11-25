@@ -76,7 +76,9 @@ pub const S_MIC_INFO: u8 = 11;
 /// frame in order, PIECE_PAYLOAD bytes each but the last. Piece `data + j`
 /// is parity: the XOR of the data pieces whose index is `j` modulo `parity`
 /// (short ones padded with zeros), so one lost piece of each such group can
-/// be rebuilt, and a run of up to `parity` lost in a row too.
+/// be rebuilt, and a run of up to `parity` lost in a row too. How many
+/// parity pieces a frame has follows the loss the client could not repair
+/// (`datagrams::Fec`).
 pub const S_PIECE: u8 = 12;
 pub const PIECE_HEADER_LEN: usize = 16;
 /// flags u8, x u16, y u16: where the remote cursor's hot spot is, display
@@ -100,8 +102,6 @@ pub const S_CLIPBOARD_IMAGE: u8 = 16;
 /// Fits a QUIC datagram on the smallest path every QUIC connection has
 /// (1200 bytes), with the headers around it.
 pub const PIECE_PAYLOAD: usize = 1100;
-/// Data pieces per parity piece.
-pub const PIECES_PER_PARITY: usize = 8;
 
 // Client -> server
 /// client_ts f64 at offset 8; answered with S_PONG on the same path (the
@@ -220,6 +220,12 @@ pub const C_TRACE: u8 = 27;
 /// clipboard for a Ctrl+V, handled as C_PASTE: set, V pressed, S_PASTED.
 pub const C_CLIPBOARD_IMAGE: u8 = 28;
 pub const CLIPBOARD_PASTE: u8 = 1;
+/// pad u8, x u16, y u16, seq u32: C_MOVE where only the latest counts. Over
+/// UDP paths each goes twice: unordered (a WebTransport datagram, the WebRTC
+/// "moves" channel) so a lost move holds no later one back, and the ordered
+/// way, so a lost one still comes after a round trip, ahead of later input.
+/// Moves not newer than the last applied (by `seq`, wrapping) are dropped.
+pub const C_MOVE_LATEST: u8 = 29;
 
 /// WebSocket close code for a token the server does not accept. Browsers do
 /// not show a page the HTTP status of a refused upgrade, so the server
@@ -312,15 +318,17 @@ pub fn chunks(frame: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
     })
 }
 
-/// Data and parity pieces a FRAME of `len` bytes is sent as over WebTransport.
-pub fn piece_counts(len: usize) -> (usize, usize) {
+/// Data and parity pieces a FRAME of `len` bytes is sent as over
+/// WebTransport, one parity piece for every `per` data pieces.
+pub fn piece_counts(len: usize, per: usize) -> (usize, usize) {
     let data = len.div_ceil(PIECE_PAYLOAD).max(1);
-    (data, data.div_ceil(PIECES_PER_PARITY))
+    (data, data.div_ceil(per))
 }
 
-/// Appends piece `index` of `frame` (see S_PIECE) to `out`.
-pub fn piece(frame: &[u8], index: usize, out: &mut Vec<u8>) {
-    let (data, parity) = piece_counts(frame.len());
+/// Appends piece `index` of `frame` (see S_PIECE) to `out`; `per` as in
+/// `piece_counts`, the same for every piece of the frame.
+pub fn piece(frame: &[u8], index: usize, per: usize, out: &mut Vec<u8>) {
+    let (data, parity) = piece_counts(frame.len(), per);
     out.extend_from_slice(&[S_PIECE, frame[1] & FLAG_VIDEO]);
     for v in [index, data, parity] {
         out.extend_from_slice(&(v as u16).to_le_bytes());
@@ -381,12 +389,12 @@ mod tests {
     /// A frame is whole again after losing any `parity` pieces in a row.
     #[test]
     fn parity_rebuilds_a_lost_run() {
-        for len in [FRAME_HEADER_LEN, PIECE_PAYLOAD, 9 * PIECE_PAYLOAD - 3, 40 * PIECE_PAYLOAD + 17] {
+        for (len, per) in [(FRAME_HEADER_LEN, 8), (PIECE_PAYLOAD, 2), (9 * PIECE_PAYLOAD - 3, 4), (40 * PIECE_PAYLOAD + 17, 16), (40 * PIECE_PAYLOAD, 2)] {
             let frame: Vec<u8> = (0..len).map(|i| (i * 31 + i / 7) as u8).collect();
-            let (data, parity) = piece_counts(len);
+            let (data, parity) = piece_counts(len, per);
             let payload = |index: usize| {
                 let mut p = Vec::new();
-                piece(&frame, index, &mut p);
+                piece(&frame, index, per, &mut p);
                 p.split_off(PIECE_HEADER_LEN)
             };
             for first in 0..data {

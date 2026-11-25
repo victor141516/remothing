@@ -9,7 +9,7 @@ import { Input } from './input';
 import { Microphone } from './mic';
 import { Peer } from './peer';
 import { InputProber } from './probe';
-import { C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
+import { C_MOVE, C_MOVE_LATEST, C_PING, CLOSE_UNAUTHORIZED, S_PONG, now } from './proto';
 import { Uploads } from './files';
 import { Stats, refreshRate } from './stats';
 import { Ui, type ClipboardFiles, type DisplaysMessage } from './ui';
@@ -108,33 +108,62 @@ function pingInput(): void {
   new DataView(m.buffer).setFloat64(8, now(), true);
   inputWs.send(m);
 }
+let inputRetryMs = 0;
 function connectInput(): void {
   inputWs = new WebSocket(`${wsBase}input${auth}`);
   inputWs.binaryType = 'arraybuffer';
   inputWs.onopen = () => {
+    inputRetryMs = 0;
     for (let i = 0; i < 5; i++) setTimeout(pingInput, i * 50);
   };
   inputWs.onmessage = (e) => {
     const v = new DataView(e.data as ArrayBuffer);
     if (v.getUint8(0) === S_PONG) toWorker({ type: 'wsrtt', rtt: now() - v.getFloat64(8, true) });
   };
+  // At once the first time, then backing off while the server stays away.
   inputWs.onclose = (e) => {
-    if (e.code !== CLOSE_UNAUTHORIZED) setTimeout(connectInput, 1000);
+    if (e.code === CLOSE_UNAUTHORIZED) return;
+    setTimeout(connectInput, inputRetryMs);
+    inputRetryMs = Math.min(Math.max(2 * inputRetryMs, 250), 2000);
   };
 }
 connectInput();
 setInterval(pingInput, 1000);
 /** Where frames go (the worker's choice): input follows. */
 let path: Path = 'ws';
+
+/** Input the ordered way (`latest`: a C_MOVE_LATEST, unordered where the
+ * path has a way: a WebTransport datagram, the "moves" channel). */
+function sendInput(m: Uint8Array, latest = false): void {
+  if (path === 'wt') {
+    const buf = m.slice().buffer;
+    toWorker({ type: 'input', buf, latest }, [buf]);
+  } else if (!(path === 'webrtc' && peer.sendInput(m, latest)) && inputWs.readyState === WebSocket.OPEN) {
+    inputWs.send(m);
+  }
+}
+
+/** Over UDP paths a position goes twice: unordered (a WebTransport
+ * datagram, the "moves" channel), so a lost one holds no later one back,
+ * and the ordered way, so a lost one still arrives after a round trip and
+ * ahead of any later input. The server applies only the newer of each
+ * pair (see C_MOVE_LATEST). */
+let moveSeq = 0;
+
 const input = new Input(
   canvas,
   (m) => {
-    if (path === 'wt') {
-      const buf = m.slice().buffer;
-      toWorker({ type: 'input', buf }, [buf]);
-    } else if (!(path === 'webrtc' && peer.sendInput(m)) && inputWs.readyState === WebSocket.OPEN) {
-      inputWs.send(m);
+    if (m[0] !== C_MOVE || path === 'ws') {
+      sendInput(m);
+      return;
     }
+    const latest = new Uint8Array(10);
+    latest[0] = C_MOVE_LATEST;
+    latest.set(m.subarray(2, 6), 2);
+    moveSeq = (moveSeq + 1) >>> 0;
+    new DataView(latest.buffer).setUint32(6, moveSeq, true);
+    sendInput(latest, true);
+    sendInput(latest);
   },
   sendPaste,
   showPointer,

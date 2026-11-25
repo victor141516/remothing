@@ -72,6 +72,9 @@ export class WtPath {
   private datagrams: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private input: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private assembling = new Map<number, Assembly>();
+  /** Frames complete but not taken in order by the worker yet: a late copy
+   * of a piece (repairs go twice) or a gap before them asks for nothing. */
+  private readonly completed = new Set<number>();
   /** Newest frame a piece arrived for (-1: none). */
   private newest = -1;
   /** Shortest round trip seen on this path, ms. */
@@ -151,6 +154,7 @@ export class WtPath {
     this.transport = t;
     this.datagrams = t.datagrams.writable.getWriter();
     this.assembling.clear();
+    this.completed.clear();
     this.newest = -1;
     this.rtt = 0;
     void t.createUnidirectionalStream().then((s) => (this.input = s.getWriter())).catch(() => {});
@@ -183,8 +187,11 @@ export class WtPath {
     t.close();
   }
 
-  send(m: Uint8Array): void {
-    void this.datagrams?.write(m).catch(() => {});
+  /** As a datagram; false while there is no session. */
+  send(m: Uint8Array): boolean {
+    if (!this.datagrams) return false;
+    void this.datagrams.write(m).catch(() => {});
+    return true;
   }
 
   /** Input, in order (each message after its u16 length). */
@@ -208,7 +215,7 @@ export class WtPath {
     }
     if (d[0] !== S_PIECE || d.length < PIECE_HEADER_LEN) return;
     const seq = v.getUint32(8, true);
-    if (before(seq, this.expected())) return;
+    if (before(seq, this.expected()) || this.completed.has(seq)) return;
     if (this.newest < 0 || before(this.newest, seq)) this.newest = seq;
     const index = v.getUint16(2, true);
     const data = v.getUint16(4, true);
@@ -263,6 +270,7 @@ export class WtPath {
 
   private complete(seq: number, a: Assembly, received: number): void {
     this.assembling.delete(seq);
+    this.completed.add(seq);
     const out = new Uint8Array(a.len);
     for (let i = 0; i < a.data; i++) out.set(a.pieces[i]!, i * PIECE_PAYLOAD);
     this.events.frame(out.buffer, received, a.nacks > 0);
@@ -273,10 +281,11 @@ export class WtPath {
     if (!this.up) return;
     const t = now();
     const expected = this.expected();
+    for (const s of this.completed) if (before(s, expected)) this.completed.delete(s);
     // Frames not one piece of which arrived, while later ones did.
     if (this.newest >= 0) {
       for (let s = expected; before(s, this.newest); s = (s + 1) >>> 0) {
-        if (!this.assembling.has(s)) {
+        if (!this.assembling.has(s) && !this.completed.has(s)) {
           this.assembling.set(s, {
             data: 0, parity: 0, len: 0, video: true, pieces: [], got: 0, count: 0, top: -1, holeAt: 0,
             first: t, last: t, nacks: 0, nackAt: 0,
@@ -298,7 +307,11 @@ export class WtPath {
       if (t - a.nackAt < Math.max(NACK_MIN_MS, 1.5 * rtt)) continue;
       const spacing = a.count > 1 ? (a.last - a.first) / (a.count - 1) : 0;
       const tail = a.data === 0 || before(seq, this.newest) || t - a.last > Math.max(QUIET_MS, 3 * spacing);
-      const holes = a.holeAt > 0 && t - a.holeAt > HOLE_MS;
+      // The parity that could rebuild a hole comes after all the data: a
+      // paced frame's pieces still to come (lost ones included) are waited
+      // for at their spacing, else every loss is asked for before parity.
+      const left = a.data + a.parity - a.count;
+      const holes = a.holeAt > 0 && t - a.holeAt > HOLE_MS + left * spacing;
       if (!tail && !holes) continue;
       const missing: number[] = [];
       for (let i = 0; i < (tail ? a.data : a.top); i++) if (!a.pieces[i]) missing.push(i);

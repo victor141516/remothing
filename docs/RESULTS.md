@@ -852,3 +852,33 @@ the recent delay on the way out (selkies allows 100 ms + 4x jitter) gave
 ms (four simulator tests), so it was left out. A rule that keeps the
 estimate through stalls (selkies' "a stall is not a slower path") changes
 nothing here: the stall cases above no longer cut it.
+
+## WebTransport sending: pacing, adaptive parity, pointer moves
+
+`MODE=bench` containers side by side (`--mode box --fps 120` unless
+said), 1920x1080, x264, headless Edge 158 on this PC, link shaped with
+netem in each container (server → client only); "before" is commit
+`e1412ce` (one-way delay already in), "after" the change. Runs of 15-20 s,
+alternating. The host was loaded by other builds during the later runs:
+the same image ranged 63-160 fps between runs, so latency differences
+under 20-30 ms are not resolved here.
+
+| link | before | after |
+|---|---|---|
+| 20 ms, no loss (fps, total p50/p95/p99 ms, 2 runs each) | 158 fps, 13/18/21 | 160 fps, 13/19/23 and 14/20/26 |
+| 20 Mbit/s, 40-packet buffer, 1 % loss, `--mode full` (fps, drops at the buffer) | 76 fps, 173 drops | 78 fps, 148 drops |
+| 20 ms, 3 % loss: WebTransport sessions given up in 4 runs of 20 s | 5 | 1 |
+
+- Parity: on a clean path it fell to one in 16 pieces within 6 s; at 3 %
+  loss it rose to one in 2 within 2 s, and then 0.6-2.4 % of the pieces
+  were still asked for again each second.
+- Before two client fixes the same 3 % loss had 10-17 % of the pieces
+  asked for again even at one parity per 2: frames already complete but
+  waiting behind an incomplete one were asked for whole every 15 ms, and
+  holes were asked for before the parity that rebuilds them arrived.
+- At the bottleneck the estimate stayed above the link (39-44 Mbit/s on
+  20), so pacing at 2.5x of it spread nothing there.
+- Stream socket on a link that goes silent (netem 100 % loss for 7 s):
+  the client dropped it after 4.98 s and was streaming again 0.6 s after
+  the link came back. After `docker restart` of the server the client was
+  back 1.1 s after the restart returned.

@@ -120,6 +120,8 @@ export const C_TRACE = 27;
 /** flags u8, then a PNG picture for the remote clipboard; with CLIPBOARD_PASTE for a Ctrl+V, as C_PASTE (see proto.rs). */
 export const C_CLIPBOARD_IMAGE = 28;
 export const CLIPBOARD_PASTE = 1;
+/** pad u8, x u16, y u16, seq u32: a C_MOVE sent unordered, older ones dropped (see proto.rs). */
+export const C_MOVE_LATEST = 29;
 /** WebSocket close code for a token the server does not accept (see proto.rs). */
 export const CLOSE_UNAUTHORIZED = 4401;
 
