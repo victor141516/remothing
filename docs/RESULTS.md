@@ -826,3 +826,29 @@ bad spell of the link (network p99 640-870 ms, stalls up to 1.2 s):
 
 On the real link most cuts still stand: its stalls end within the round
 trip after the cut, so the delay has fallen by the time the cut is judged.
+
+## Link model: one-way delay
+
+`pacer.rs` simulator, video following the estimate (70 % of it, 120 fps),
+60 s from a fresh start: frames a second and median estimate of the last
+40 s. "Round trip": the ACK carries no arrival time, the model measures
+queue from round trips (as before, with cuts undone when the delay stays);
+"one way": the ACK carries the client's arrival time.
+
+| path | round trip | one way |
+|---|---|---|
+| 5G-like (50 Mbit/s, 15 ms, delay 15-60 ms redrawn every 300 ms, 30 ms jitter, 250 ms stall every 3 s), all on the way out | 92 fps, 43.0 Mbit/s | 91 fps, 45.5 Mbit/s |
+| the same without stalls | 95 fps, 74.0 Mbit/s | 94 fps, 51.6 Mbit/s |
+| the same delays and stalls on the way back only | 92 fps, 43.0 Mbit/s | 111 fps, 157.4 Mbit/s |
+| Wi-Fi power save (100 Mbit/s, 5 ms, 30 ms stall every 220 ms) | 112 fps, 311.5 Mbit/s | 112 fps, 312.9 Mbit/s |
+| selkies' Wi-Fi model (20 ms + up to 40 ms redrawn every 20 ms) | 88 fps, 118.4 Mbit/s | 90 fps, 112.4 Mbit/s |
+| the same with a 120 ms stall every 5 s | 89 fps, 96.4 Mbit/s | 89 fps, 103.1 Mbit/s |
+| a real 8 Mbit/s link with the 5G delays | 91 fps, 10.5 Mbit/s, worst queue 138 ms | 91 fps, 10.2 Mbit/s, worst queue 132 ms |
+
+Delay on the way back is what one-way measurement removes; delay on the
+way out still costs frames through the overdue rule. Relaxing that rule by
+the recent delay on the way out (selkies allows 100 ms + 4x jitter) gave
+110-118 fps on these paths but let a slow link's own queue reach 384-744
+ms (four simulator tests), so it was left out. A rule that keeps the
+estimate through stalls (selkies' "a stall is not a slower path") changes
+nothing here: the stall cases above no longer cut it.

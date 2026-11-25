@@ -302,11 +302,19 @@ pixels that is thrown away a moment later.
 ## Link model
 
 `pacer.rs`, per client, from frame ACKs (client hold time subtracted, so
-only the network is modelled; a slow client still holds frames back):
+only the network is modelled; a slow client still holds frames back). The
+ACK carries when the frame arrived, on the client's clock: against the
+send time that is the one-way delay plus the clocks' offset, which the
+least of it over 10 s takes out, so queue and delivery rates are measured
+on the way out only. With round trips a phone's uplink (5G scheduling,
+Wi-Fi contention) delayed ACKs by tens of ms read as our queue: in the
+simulator 5G-like wander and stalls on the uplink only held the estimate
+at 43 Mbit/s and 92 frames a second; measured one way, 157 and 111 (the
+stalls cost the rest).
 
 - **Bandwidth estimate**: raised by measured delivery rates (BBR-style
   samples, transmission time of large frames); steered by the standing queue
-  — the least ACK delay beyond base RTT and the frame's own transmission over
+  — the least delay on the way out beyond its base and the frame's own transmission over
   a window of about one RTT, so single late ACKs (relay jitter) are ignored.
   Proportional control toward 12 ms of queue (±4 %/RTT, accelerating after a
   deep cut); an emergency cut to the measured delivery rate beyond 30 ms.
@@ -364,12 +372,18 @@ only the network is modelled; a slow client still holds frames back):
   can keep a short-queue signal from raising the estimate for good. A link
   whose other traffic stopped already recovers through growth (1-2 s in
   the simulator after a download took two thirds of it for 20 s).
-- **Window**: estimated rate × (base RTT + the path's delay above + jitter)
-  with 10 % margin, so the frame rate is not bound by the round trip (was a
-  fixed 2 frames); and the oldest unacknowledged frame must not be
-  overdue, so a stalled client gets no backlog — held-back updates coalesce
-  into one current frame. Widening it to the delay of recent windows let a
-  slow link's own queue grow (174-506 ms in the simulator).
+- **Window**: estimated rate × (base RTT + the path's delay above + jitter
+  + recent delay on the way back) with 10 % margin, so the frame rate is
+  not bound by the round trip (was a fixed 2 frames); and the oldest
+  unacknowledged frame must not be overdue, so a stalled client gets no
+  backlog — held-back updates coalesce into one current frame. The delay
+  on the way back (round trip minus the one-way delay, its per-window
+  highs smoothed) delays ACKs without queueing frames: uncovered, a 5G
+  uplink's delay held a 50 Mbit/s path to 52 frames a second of 120 in the
+  simulator. Widening it to the delay on the way out lets a slow link's
+  own queue grow (174-744 ms in the simulator, also through the overdue
+  rule alone), which is why a radio's level on the way out still costs
+  frames until a failed cut teaches it (about 92 of 120 a second there).
 
 Over Tailscale Funnel (≈18 Mbit/s, ≈50 ms) this took the harness from
 10–34 fps to ~170 fps with lower latency; see `docs/RESULTS.md`.

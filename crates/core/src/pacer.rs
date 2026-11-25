@@ -127,6 +127,13 @@ pub struct Pacer {
     first_sent_us: u64,
     /// Minimum RTT: (value, measured at); 0 = unknown.
     base_rtt: (u64, u64),
+    /// Least of (client arrival time - send time) and when it was seen: the
+    /// one-way delay plus the clocks' offset (see `on_ack`).
+    one_way_floor: Option<(i64, u64)>,
+    /// Smoothed highest delay on the way back (the ACKs') per judging
+    /// window, and the highest of the current window, µs.
+    back_us: f64,
+    judge_back_max_us: u64,
     rate: f64,
     /// Smoothed spread of ACK delays above their per-window minimum (µs).
     jitter_us: f64,
@@ -193,6 +200,9 @@ impl Default for Pacer {
             delivered_us: 0,
             first_sent_us: 0,
             base_rtt: (0, 0),
+            one_way_floor: None,
+            back_us: 0.0,
+            judge_back_max_us: 0,
             rate: INITIAL_RATE,
             jitter_us: 0.0,
             cut_us: 0,
@@ -252,10 +262,13 @@ impl Pacer {
         self.base_rtt.0
     }
 
-    /// Round trip the window covers: base RTT, the path's own delay and
-    /// typical jitter, µs.
+    /// Round trip the window covers: base RTT, the path's own delay, typical
+    /// jitter and the recent delay on the way back, µs.
     fn path_us(&self) -> f64 {
-        if self.base_rtt.0 == 0 { DEFAULT_RTT_US as f64 } else { self.base_rtt.0 as f64 + self.path_floor_us + self.jitter_us }
+        match self.base_rtt.0 {
+            0 => DEFAULT_RTT_US as f64,
+            base => base as f64 + self.path_floor_us + self.jitter_us + self.back_us,
+        }
     }
 
     fn window(&self) -> f64 {
@@ -330,7 +343,12 @@ impl Pacer {
     /// queueing on the path. `repaired`: the frame was only complete after
     /// pieces were sent again, so its timing is a round trip of repair, not
     /// queue; it is delivered, but not a sample.
-    pub fn on_ack(&mut self, seq: u32, now: u64, hold_us: u64, repaired: bool) {
+    /// `arrived_client_us`: when it reached the client, on the client's own
+    /// clock. Against the send time that is the one-way delay plus a
+    /// constant (the clocks' offset), so only delay on the way out counts as
+    /// queue: a phone's uplink (5G scheduling, Wi-Fi contention) delays the
+    /// ACKs by tens of ms that the round trip read as our queue.
+    pub fn on_ack(&mut self, seq: u32, now: u64, hold_us: u64, repaired: bool, arrived_client_us: Option<u64>) {
         // Unknown seq: a frame forgotten by `forget_inflight` (display switch).
         let Some(n) = self.sent.iter().position(|f| f.seq == seq) else { return };
         let mut acked = None;
@@ -340,11 +358,33 @@ impl Pacer {
             acked = Some(f);
         }
         let f = acked.expect("drained at least one frame");
-        let arrived = now.saturating_sub(hold_us).max(f.sent_us + 1);
+        let returned = now.saturating_sub(hold_us).max(f.sent_us + 1);
+        let rtt = returned - f.sent_us;
+        // Raw minimum: it includes the smallest frame's transmission, but never
+        // depends on the rate estimate (subtracting an estimated transmission
+        // time would make any rate self-consistent). It sizes the window.
+        if !repaired && (self.base_rtt.0 == 0 || rtt <= self.base_rtt.0 || now - self.base_rtt.1 > BASE_RTT_WINDOW_US) {
+            self.base_rtt = (rtt, now);
+        }
+        // Arrival on a clock whose least delay is the base RTT: the one-way
+        // delay above its own least, re-learned like the base RTT.
+        let arrived = match arrived_client_us {
+            Some(client) if !repaired => {
+                let one_way = client as i64 - f.sent_us as i64;
+                if self.one_way_floor.is_none_or(|(least, at)| one_way <= least || now - at > BASE_RTT_WINDOW_US) {
+                    self.one_way_floor = Some((one_way, now));
+                }
+                let least = self.one_way_floor.map_or(one_way, |(least, _)| least);
+                f.sent_us + self.base_rtt.0 + (one_way - least) as u64
+            }
+            _ => returned,
+        };
+        // Beyond the least round trip, what the way back (the ACK) took.
+        self.judge_back_max_us = self.judge_back_max_us.max(rtt.saturating_sub(arrived - f.sent_us));
         self.delivered_us = arrived;
         self.first_sent_us = f.sent_us;
         if !repaired {
-            self.sample(&f, arrived);
+            self.sample(&f, arrived, now);
         }
     }
 
@@ -363,19 +403,17 @@ impl Pacer {
         }
     }
 
-    fn sample(&mut self, f: &Sent, now: u64) {
-        let rtt = now.saturating_sub(f.sent_us).max(1);
-        // Raw minimum: it includes the smallest frame's transmission, but never
-        // depends on the rate estimate (subtracting an estimated transmission
-        // time would make any rate self-consistent).
-        if self.base_rtt.0 == 0 || rtt <= self.base_rtt.0 || now - self.base_rtt.1 > BASE_RTT_WINDOW_US {
-            self.base_rtt = (rtt, now);
-        }
+    /// `arrived`: when the frame reached the client, on a clock where its
+    /// least delay ever is the base RTT (the one-way delay where the client
+    /// said when, else the round trip): delays and delivery rates. `now`:
+    /// this server's time, for the judging windows.
+    fn sample(&mut self, f: &Sent, arrived: u64, now: u64) {
         let base = self.base_rtt.0;
+        let delayed = arrived.saturating_sub(f.sent_us).max(1);
 
-        let interval = f.sent_us.saturating_sub(f.first_sent_us).max(now.saturating_sub(f.delivered_us)).max(base.max(MIN_SAMPLE_US));
+        let interval = f.sent_us.saturating_sub(f.first_sent_us).max(arrived.saturating_sub(f.delivered_us)).max(base.max(MIN_SAMPLE_US));
         let mut sample = if interval > 0 { (self.delivered - f.delivered) as f64 * 1e6 / interval as f64 } else { 0.0 };
-        let excess = rtt - base;
+        let excess = delayed.saturating_sub(base);
         if f.alone && excess >= JITTER_US.max(base / 4) {
             sample = sample.max(f.bytes as f64 * 1e6 / excess as f64);
         }
@@ -385,7 +423,7 @@ impl Pacer {
         }
 
         let own = (f.bytes as f64 * 1e6 / self.rate) as u64;
-        let delay = rtt.saturating_sub(base + own);
+        let delay = delayed.saturating_sub(base + own);
         self.judge_min_us = self.judge_min_us.min(delay);
         self.judge_sum_us += delay;
         self.judge_n += 1;
@@ -412,6 +450,10 @@ impl Pacer {
             self.judge_n = 0;
             self.judge_best = 0.0;
             self.judge_max_bytes = 0;
+            // Delay on the way back does not queue our frames, but they stay
+            // in flight for it: the window covers its recent highs.
+            self.back_us += (self.judge_back_max_us as f64 - self.back_us) / 4.0;
+            self.judge_back_max_us = 0;
             self.judge_limited = false;
         }
         self.rate = self.rate.max(MIN_RATE);
@@ -549,6 +591,7 @@ mod tests {
         jitter_us: u64,
         hold_us: u64,
         busy_until: u64,
+        last_arrival: u64,
         last_ack: u64,
         lcg: u64,
         /// Longest wait of a frame behind earlier ones, over the whole run.
@@ -562,17 +605,36 @@ mod tests {
         /// Stalls: every first value (µs), the path holds everything for the
         /// second value (µs).
         stall: (u64, u64),
+        /// The jitter, level and stalls are on the way back (the ACKs).
+        uplink: bool,
         /// Last frame number sent over it (runs go on from it).
         seq: u32,
     }
 
     impl Link {
         fn new(rate: f64, rtt_us: u64, jitter_us: u64) -> Self {
-            Self { rate, rtt_us, jitter_us, hold_us: 0, busy_until: 0, last_ack: 0, lcg: 1, worst_queue_us: 0, wander: (0, 1), wander_low: (0, 0, 0), stall: (0, 0), seq: 0 }
+            Self {
+                rate,
+                rtt_us,
+                jitter_us,
+                hold_us: 0,
+                busy_until: 0,
+                last_arrival: 0,
+                last_ack: 0,
+                lcg: 1,
+                worst_queue_us: 0,
+                wander: (0, 1),
+                wander_low: (0, 0, 0),
+                stall: (0, 0),
+                uplink: false,
+                seq: 0,
+            }
         }
 
-        /// ACK time of a frame handed to the link at `now`.
-        fn deliver(&mut self, bytes: u64, now: u64) -> u64 {
+        /// Arrival and ACK times of a frame handed to the link at `now`. The
+        /// jitter, wandering level and stalls delay the frame on its way out,
+        /// or with `uplink` only its ACK on the way back.
+        fn deliver(&mut self, bytes: u64, now: u64) -> (u64, u64) {
             let start = self.busy_until.max(now);
             self.worst_queue_us = self.worst_queue_us.max(start - now);
             self.busy_until = start + (bytes as f64 * 1e6 / self.rate) as u64;
@@ -592,8 +654,11 @@ mod tests {
                 0 => 0,
                 _ => lasts.saturating_sub(now % every),
             };
-            self.last_ack = (self.busy_until + self.rtt_us + level + jitter + held + self.hold_us).max(self.last_ack);
-            self.last_ack
+            let extra = level + jitter + held;
+            let (down, up) = if self.uplink { (0, extra) } else { (extra, 0) };
+            self.last_arrival = (self.busy_until + self.rtt_us / 2 + down).max(self.last_arrival);
+            self.last_ack = (self.last_arrival + self.rtt_us - self.rtt_us / 2 + up + self.hold_us).max(self.last_ack);
+            (self.last_arrival, self.last_ack)
         }
     }
 
@@ -616,14 +681,14 @@ mod tests {
         paced: bool,
         mut next: impl FnMut(&Pacer) -> (u64, u64),
     ) -> (u64, u64, u64) {
-        let mut acks: VecDeque<(u64, u32)> = VecDeque::new();
+        let mut acks: VecDeque<(u64, u32, u64)> = VecDeque::new();
         let (mut seq, mut sent, mut worst) = (link.seq, 0u64, 0u64);
         let end = start + secs * 1_000_000;
         let (mut t, mut next_frame) = (start, start);
         while t < end || !acks.is_empty() {
-            while acks.front().is_some_and(|&(at, _)| at <= t) {
-                let (_, s) = acks.pop_front().unwrap();
-                p.on_ack(s, t, link.hold_us, false);
+            while acks.front().is_some_and(|&(at, _, _)| at <= t) {
+                let (_, s, arrived) = acks.pop_front().unwrap();
+                p.on_ack(s, t, link.hold_us, false, Some(arrived + CLIENT_CLOCK));
             }
             if t < end && t >= next_frame {
                 if p.can_send(t) {
@@ -636,7 +701,8 @@ mod tests {
                     if t > start + secs * 500_000 {
                         worst = worst.max(link.busy_until.saturating_sub(t));
                     }
-                    acks.push_back((link.deliver(bytes, t), seq));
+                    let (arrived, acked) = link.deliver(bytes, t);
+                    acks.push_back((acked, seq, arrived));
                     sent += 1;
                     next_frame = t + gap;
                 } else if p.window_full() {
@@ -650,6 +716,9 @@ mod tests {
     }
 
     const FUNNEL: f64 = 18e6 / 8.0;
+    /// The client's clock is this far from the server's (arrival times in
+    /// ACKs are the client's): no result may depend on it.
+    const CLIENT_CLOCK: u64 = 7_654_321_000;
 
     /// A phone on 5G as measured (tasks: link model on wandering delay):
     /// 50 Mbit/s, 15 ms, and a delay level drawn anew every 300 ms whatever
@@ -707,6 +776,44 @@ mod tests {
         let late = &mut estimates[30..].to_vec();
         late.sort_by(f64::total_cmp);
         assert!(late[late.len() / 2] > 6.0, "estimates of the last minute (Mbit/s): {late:?}");
+    }
+
+    /// Video that follows the estimate (70 % of it, at most `cap` bytes a
+    /// frame at 120 fps), run for `secs`: the frames sent and the median
+    /// estimate (Mbit/s) of the seconds after the first third.
+    fn video_run(p: &mut Pacer, link: &mut Link, secs: u64, cap: u64) -> (u64, f64) {
+        let video = |p: &Pacer| (((0.7 * p.rate() / 120.0) as u64).clamp(500, cap), 8_333);
+        let (mut t, mut sent, mut estimates) = (1_000_000, 0, Vec::new());
+        for _ in 0..secs {
+            let r = run_from(p, link, t, 1, true, video);
+            (t, sent) = (r.0, sent + r.1);
+            estimates.push(p.rate() * 8.0 / 1e6);
+        }
+        let mut late = estimates[secs as usize / 3..].to_vec();
+        late.sort_by(f64::total_cmp);
+        (sent, late[late.len() / 2])
+    }
+
+    #[test]
+    fn delay_on_the_way_back_is_not_a_queue() {
+        // The 5G phone's wandering delay and stalls on its uplink only: the
+        // ACKs come late, the frames do not. With round trips this read as
+        // a queue of ours.
+        let mut link = five_g(50e6 / 8.0);
+        link.uplink = true;
+        link.stall = (3_000_000, 250_000);
+        let (sent, median) = video_run(&mut Pacer::default(), &mut link, 60, 20_000);
+        assert!(median > 20.0 && sent > 60 * 110, "median estimate {median} Mbit/s, {sent} frames");
+    }
+
+    #[test]
+    fn wifi_power_save_stalls_do_not_cut_the_estimate() {
+        // The Mac's Wi-Fi as measured: 100 Mbit/s, 5 ms, and the path holds
+        // everything for 30 ms every 220 ms.
+        let mut link = Link::new(100e6 / 8.0, 5_000, 2_000);
+        link.stall = (220_000, 30_000);
+        let (sent, median) = video_run(&mut Pacer::default(), &mut link, 60, 60_000);
+        assert!(median > 40.0 && sent > 60 * 110, "median estimate {median} Mbit/s, {sent} frames");
     }
 
     #[test]
@@ -842,12 +949,14 @@ mod tests {
     #[test]
     fn rate_drop_is_detected() {
         let mut p = Pacer { rate: 100e6 / 8.0, ..Default::default() };
+        // Learned from earlier, small frames: 40 ms round trip, 20 ms each way.
         p.base_rtt = (40_000, 0);
+        p.one_way_floor = Some((CLIENT_CLOCK as i64 + 20_000, 0));
         // A 200 KB frame alone takes 40 ms + 16 ms at 100 Mbit/s; at 5 Mbit/s 360 ms.
         for i in 0..10u32 {
             let t = 1_000_000 * (i as u64 + 1);
             p.on_send(i, 200_000, t);
-            p.on_ack(i, t + 40_000 + 320_000, 0, false);
+            p.on_ack(i, t + 40_000 + 320_000, 0, false, Some(t + 20_000 + 320_000 + CLIENT_CLOCK));
         }
         assert!(p.rate() < 10e6 / 8.0, "estimate {}", p.rate());
     }
@@ -860,7 +969,7 @@ mod tests {
             let t = 1_000_000 + i as u64 * 10_000;
             let hold = 50_000 + (i as u64 % 4) * 10_000;
             p.on_send(i, 50_000, t);
-            p.on_ack(i, t + 2_000 + hold, hold, false);
+            p.on_ack(i, t + 2_000 + hold, hold, false, Some(t + 1_000 + CLIENT_CLOCK));
         }
         assert!(!p.proven() && p.rate() >= INITIAL_RATE, "estimate {} proven {}", p.rate(), p.proven());
     }
@@ -874,7 +983,7 @@ mod tests {
         for _ in 0..200 {
             seq += 1;
             p.on_send(seq, 10_000, t);
-            p.on_ack(seq, t + 1_000, 500, false);
+            p.on_ack(seq, t + 1_000, 500, false, Some(t + 500 + CLIENT_CLOCK));
             t += 6_060;
         }
         let mut during_stall = 0;

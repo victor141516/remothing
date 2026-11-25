@@ -516,7 +516,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                         let ts = f64::from_le_bytes(b[8..16].try_into().unwrap());
                         let _ = out_tx.send(proto::pong(ts));
                     }
-                    (Some(proto::C_ACK), 12..) => {
+                    (Some(proto::C_ACK), 20..) => {
                         on_ack(&b, &app, &link);
                         waker.unpark();
                     }
@@ -695,7 +695,7 @@ async fn session(socket: WebSocket, app: Arc<App>, addr: SocketAddr, codecs: Vec
                 match event {
                     PeerEvent::FramesOpen => link.rtc_open.store(true, Ordering::Release),
                     PeerEvent::Frames(b) => match (b.first().copied(), b.len()) {
-                        (Some(proto::C_ACK), 12..) => {
+                        (Some(proto::C_ACK), 20..) => {
                             on_ack(&b, &app, &link);
                             waker.unpark();
                         }
@@ -833,15 +833,16 @@ async fn on_signal(
 fn on_ack(b: &[u8], app: &App, link: &ClientLink) {
     let seq = u32::from_le_bytes(b[4..8].try_into().unwrap());
     let hold_us = u32::from_le_bytes(b[8..12].try_into().unwrap()) as u64;
+    let arrived = Some(u64::from_le_bytes(b[12..20].try_into().unwrap())).filter(|&t| t > 0);
     let lost: Vec<u32> =
-        b[12..].chunks_exact(4).take(b[1] as usize).map(|s| u32::from_le_bytes(s.try_into().unwrap())).collect();
+        b[20..].chunks_exact(4).take(b[1] as usize).map(|s| u32::from_le_bytes(s.try_into().unwrap())).collect();
     repair(app, link, &lost);
     link.sent.lock().unwrap().ack(seq);
     // Nothing up to `seq` will be asked for again.
     link.wt_frames.lock().unwrap().retain(|&(s, _)| (s.wrapping_sub(seq) as i32) > 0);
     let (cut, notice) = {
         let mut p = link.pacer.lock().unwrap();
-        p.on_ack(seq, proto::now_us(), hold_us, b[2] != 0);
+        p.on_ack(seq, proto::now_us(), hold_us, b[2] != 0, arrived);
         (p.take_cut(), p.take_notice())
     };
     if let Some((rate, queue_us)) = cut {
@@ -871,7 +872,7 @@ async fn serve_wt(conn: &wtransport::Connection, app: &App, link: &ClientLink, w
                 Err(e) => return e.to_string(),
             };
             match (d.first().copied(), d.len()) {
-                (Some(proto::C_ACK), 12..) => {
+                (Some(proto::C_ACK), 20..) => {
                     on_ack(&d, app, link);
                     waker.unpark();
                 }

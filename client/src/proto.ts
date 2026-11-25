@@ -31,7 +31,7 @@ export const S_AUDIO = 10;
 export const S_MIC_INFO = 11;
 
 export const C_PING = 1;
-/** Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, n_lost x lost seq u32. */
+/** Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, arrived_us u64 (client clock), n_lost x lost seq u32 (see proto.rs). */
 export const C_ACK = 2;
 export const C_KEYFRAME = 3;
 export const C_STATS = 4;

@@ -103,13 +103,16 @@ pub const PIECES_PER_PARITY: usize = 8;
 /// client_ts f64 at offset 8; answered with S_PONG on the same path (the
 /// WebSocket or the data channel: the client compares their round trips).
 pub const C_PING: u8 = 1;
-/// Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, then n_lost x
-/// seq u32. `seq` is the last frame drawn; every earlier frame was drawn or
-/// is listed as lost (in this ACK or an earlier one). `hold_us` is the client
-/// time from receiving that frame to drawing it, excluded from the network
-/// round trip. The first pad byte is 1 when the frame was only complete
-/// after asking for pieces again (WebTransport): when it arrived then says
-/// nothing about the link's queue.
+/// Frames handled: n_lost u8, pad u16, seq u32, hold_us u32, arrived_us u64,
+/// then n_lost x seq u32. `seq` is the last frame drawn; every earlier frame
+/// was drawn or is listed as lost (in this ACK or an earlier one). `hold_us`
+/// is the client time from receiving that frame to drawing it, excluded from
+/// the network round trip. `arrived_us` is when it was received, on the
+/// client's own clock (0: no frame to time): against the send time it is
+/// the one-way delay plus a constant, so the link model does not take delay
+/// on the way back (the ACK's) for a queue on the way out. The first pad
+/// byte is 1 when the frame was only complete after asking for pieces again
+/// (WebTransport): when it arrived then says nothing about the link's queue.
 pub const C_ACK: u8 = 2;
 /// The client's decoder needs an IDR frame: pad u8 x 3, seq u32 of the
 /// newest frame it received (requests older than the last keyframe sent are

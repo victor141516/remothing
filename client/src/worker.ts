@@ -373,17 +373,19 @@ function sendAckBoth(m: Uint8Array): void {
 }
 
 /** `repaired`: the frame was only complete after pieces were asked for
- * again, so its arrival time is no sample of the link's queue. */
-function sendAck(seq: number, holdUs: number, repaired: boolean): void {
+ * again, so its arrival time is no sample of the link's queue. `received`:
+ * when the frame arrived, ms on this page's clock (0: none to time). */
+function sendAck(seq: number, holdUs: number, repaired: boolean, received: number): void {
   const n = Math.min(lost.length, 255);
-  const ack = new Uint8Array(12 + 4 * n);
+  const ack = new Uint8Array(20 + 4 * n);
   const v = new DataView(ack.buffer);
   ack[0] = C_ACK;
   ack[1] = n;
   ack[2] = repaired ? 1 : 0;
   v.setUint32(4, seq, true);
   v.setUint32(8, holdUs, true);
-  for (let i = 0; i < n; i++) v.setUint32(12 + 4 * i, lost[i], true);
+  v.setBigUint64(12, BigInt(Math.round(received * 1000)), true);
+  for (let i = 0; i < n; i++) v.setUint32(20 + 4 * i, lost[i], true);
   lost = lost.slice(n);
   sendAckBoth(ack);
   // A lost last ACK would hold the server's window until its timeout.
@@ -481,7 +483,7 @@ function giveUp(seq: number, video: boolean): void {
   release();
   // Nothing drawn after it carries the loss to the server: say it now. The
   // frame is listed lost, so its own timing is no sample.
-  if (lost.length) sendAck((expected - 1) >>> 0, 0, true);
+  if (lost.length) sendAck((expected - 1) >>> 0, 0, true, 0);
 }
 
 function pingWt(): void {
@@ -861,7 +863,7 @@ function present(): void {
 function drew(f: Frame, drawn: number): void {
   const v = new DataView(f.buf);
   // The server leaves this frame's time here out of its network model.
-  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired);
+  sendAck(f.seq, Math.max(0, Math.round((now() - f.received) * 1000)), f.repaired, f.received);
 
   motion = (v.getUint8(1) & FLAG_MOTION) !== 0;
   rec.frame(f.buf.byteLength, !!f.picture);
